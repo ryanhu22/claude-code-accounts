@@ -33,6 +33,15 @@ ICON = "⇄"
 # title cannot colour the bucket that is nearly spent.
 BAR_W = 10
 NAME_W = 14
+REPO_W = 20
+DETAIL_W = 30
+
+
+def _fit(text: str, width: int) -> str:
+    """Pad or truncate to an exact width so columns cannot be knocked askew."""
+    if len(text) <= width:
+        return text.ljust(width)
+    return text[: max(1, width - 1)] + "\u2026"
 FULL, EMPTY = "\u2588", "\u2591"          # █ ░
 
 
@@ -361,12 +370,20 @@ class ManagerApp(rumps.App):
                           if (a.email or "").lower() == email.lower()), _short(email))
         head = f"  {proj.name} — {acct_name} ({proj.context.name}) · {proj.ago}"
         item = rumps.MenuItem(head)
+        # Fixed columns: chip, repo, branch, context, age. The branch is the
+        # part that differs between sibling worktrees, so it gets the emphasis
+        # and the repeated repo name is dimmed.
         _apply_style(item, [
             ("  ", "dim"),
             _chip(acct_name, NAME_W),
-            (f"  {proj.name:<38}", "text"),
+            ("  ", "dim"),
+            # emphasis follows whatever distinguishes the row: sibling
+            # worktrees differ by branch, separate repos differ by name
+            (_fit(proj.repo, REPO_W), "dim" if proj.is_worktree else "text"),
+            (" ", "dim"),
+            (_fit(proj.detail, DETAIL_W), "text" if proj.is_worktree else "dim"),
             (f" {proj.context.name:<8}", "dim"),
-            (f" {proj.ago:>9}", "dim"),
+            (f"{proj.ago:>9}", "dim"),
         ])
         item.add(rumps.MenuItem(f"{proj.sessions} session(s) · {proj.path}", callback=None))
         item.add(rumps.separator)

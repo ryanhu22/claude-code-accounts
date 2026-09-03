@@ -43,6 +43,21 @@ class ProjectActivity:
         return ".claude" in parts and "worktrees" in parts
 
     @property
+    def repo(self) -> str:
+        """Repository name: a worktree reports its parent repo, not its own dir."""
+        parts = self.path.rstrip("/").split("/")
+        if self.is_worktree:
+            return parts[max(0, parts.index("worktrees") - 2)]
+        return parts[-1] or self.path
+
+    @property
+    def detail(self) -> str:
+        """What distinguishes this session inside the repo: its branch."""
+        if self.branch:
+            return self.branch
+        return "" if not self.is_worktree else self.path.rstrip("/").split("/")[-1]
+
+    @property
     def name(self) -> str:
         """Readable label.
 
