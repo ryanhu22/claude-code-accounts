@@ -47,27 +47,60 @@ def _colors():
     }
 
 
+# Each account keeps one colour everywhere it appears, so a glance at the
+# project list tells you which subscription is paying without reading names.
+# Keyed by a hash of the name so colours stay put when accounts are added.
+CHIP_COLORS = ("systemBlueColor", "systemPurpleColor", "systemTealColor",
+               "systemPinkColor", "systemIndigoColor", "systemBrownColor",
+               "systemMintColor", "systemCyanColor")
+
+
+def _chip_color(name: str):
+    import AppKit
+    idx = core.chip_index(name, len(CHIP_COLORS))
+    getter = getattr(AppKit.NSColor, CHIP_COLORS[idx], None) or AppKit.NSColor.systemBlueColor
+    return getter()
+
+
+def _chip(name: str, width: int = 0) -> tuple[str, str, str]:
+    """A filled rectangle behind the account name, like a terminal badge."""
+    label = f" {name} "
+    if width:
+        label = f" {name.ljust(width)} "
+    return (label, "chip_fg", name)
+
+
 def _tone(pct: Optional[float]) -> str:
     if pct is None:
         return "dim"
     return "ok" if pct < 60 else "warn" if pct < 85 else "hot"
 
 
-def _styled(segments: list[tuple[str, str]], size: float = 12.0):
-    """Build an NSAttributedString from (text, colour-name) runs."""
+def _styled(segments, size: float = 12.0):
+    """Build an NSAttributedString from runs.
+
+    A run is (text, tone) or (text, tone, chip_key); with a chip key the run is
+    drawn on a filled background in that account's colour.
+    """
     import AppKit
     colors = _colors()
     font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
     out = AppKit.NSMutableAttributedString.alloc().init()
-    for text, tone in segments:
-        attrs = {AppKit.NSFontAttributeName: font,
-                 AppKit.NSForegroundColorAttributeName: colors.get(tone, colors["text"])}
+    for run in segments:
+        text, tone = run[0], run[1]
+        chip_key = run[2] if len(run) > 2 else None
+        attrs = {AppKit.NSFontAttributeName: font}
+        if chip_key:
+            attrs[AppKit.NSBackgroundColorAttributeName] = _chip_color(chip_key)
+            attrs[AppKit.NSForegroundColorAttributeName] = AppKit.NSColor.whiteColor()
+        else:
+            attrs[AppKit.NSForegroundColorAttributeName] = colors.get(tone, colors["text"])
         out.appendAttributedString_(
             AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs))
     return out
 
 
-def _apply_style(item: "rumps.MenuItem", segments: list[tuple[str, str]]) -> None:
+def _apply_style(item: "rumps.MenuItem", segments) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
         item._menuitem.setAttributedTitle_(_styled(segments))
@@ -98,6 +131,32 @@ def _compact_reset(iso: Optional[str]) -> str:
     return f"{round(hours / 24)}d"
 
 
+def _reset_tone(lim: Optional[core.Limit]) -> str:
+    """How much the countdown matters, not merely how long it is.
+
+    A far-off reset on a barely-used bucket is noise, so it stays dim. Once a
+    bucket is nearly spent the countdown becomes the number you care about:
+    green if relief is close, red if you are locked out for a long while.
+    An idle window is green because that account can be poked.
+    """
+    if lim is None:
+        return "dim"
+    if not lim.resets_at:
+        return "ok"
+    if lim.percent < 85:
+        return "dim"
+    try:
+        dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
+    except ValueError:
+        return "dim"
+    mins = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
+    if mins < 60:
+        return "ok"
+    if mins < 360:
+        return "warn"
+    return "hot"
+
+
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
     pct = lim.percent if lim else None
     tone = _tone(pct)
@@ -112,9 +171,8 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         (f" {pct:3.0f}%", tone),
     ]
     if show_reset:
-        reset = _compact_reset(lim.resets_at if lim else None)
-        # an idle window is worth noticing: that account can be poked
-        out.append((f" \u21bb{reset:>4}", "ok" if reset == "idle" else "dim"))
+        out.append((f" \u21bb{_compact_reset(lim.resets_at if lim else None):>4}",
+                    _reset_tone(lim)))
     return out
 
 
@@ -256,9 +314,9 @@ class ManagerApp(rumps.App):
 
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
-        segments: list[tuple[str, str]] = [
+        segments = [
             ("● " if in_use else "○ ", "text" if in_use else "dim"),
-            (f"{acct.name:<{NAME_W}}", "text"),
+            _chip(acct.name, NAME_W),
         ]
         segments += _bucket("5h", acct.limit("session"))
         segments += _bucket("7d", acct.limit("weekly_all"))
@@ -294,8 +352,17 @@ class ManagerApp(rumps.App):
     def _project_item(self, proj: projects.ProjectActivity,
                       snap: Snapshot) -> rumps.MenuItem:
         email = snap.context_email.get(proj.context.path, "")
-        head = f"  {proj.name} — {_short(email)} ({proj.context.name}) · {proj.ago}"
+        acct_name = next((a.name for a in snap.accounts
+                          if (a.email or "").lower() == email.lower()), _short(email))
+        head = f"  {proj.name} — {acct_name} ({proj.context.name}) · {proj.ago}"
         item = rumps.MenuItem(head)
+        _apply_style(item, [
+            ("  ", "dim"),
+            _chip(acct_name, NAME_W),
+            (f"  {proj.name:<38}", "text"),
+            (f" {proj.context.name:<8}", "dim"),
+            (f" {proj.ago:>9}", "dim"),
+        ])
         item.add(rumps.MenuItem(f"{proj.sessions} session(s) · {proj.path}", callback=None))
         item.add(rumps.separator)
         item.add(rumps.MenuItem(f"Switch “{proj.context.name}” to:", callback=None))

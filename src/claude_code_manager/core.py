@@ -300,6 +300,35 @@ def recorded_email(config_dir: str) -> str:
         return ""
 
 
+CHIP_FILE = os.path.join(ACCOUNTS_DIR, ".chips.json")
+
+
+def chip_index(name: str, palette_size: int = 8) -> int:
+    """A stable, distinct colour slot per account.
+
+    Hashing the name is stateless but collides, which defeats the point of
+    colour-coding, so assignments are remembered: an account keeps its colour
+    for good, and a new one takes the lowest free slot.
+    """
+    try:
+        with open(CHIP_FILE) as f:
+            table = json.load(f)
+    except (OSError, ValueError):
+        table = {}
+    if name in table:
+        return int(table[name]) % palette_size
+    used = {int(v) for v in table.values()}
+    idx = next((i for i in range(palette_size) if i not in used), len(table) % palette_size)
+    table[name] = idx
+    try:
+        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+        with open(CHIP_FILE, "w") as f:
+            json.dump(table, f, indent=2)
+    except OSError:
+        pass
+    return idx
+
+
 def add_account_command(name: str) -> str:
     """Shell command that signs an account into its slot (needs a browser)."""
     slot = slot_dir(name)
