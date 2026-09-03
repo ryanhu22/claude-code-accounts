@@ -62,6 +62,13 @@ ccm add <account>        # prints the sign-in command for a new slot
 ccm-menubar              # the menu bar app
 ```
 
+### The menu bar app
+
+The row for each subscription shows all three usage buckets with a reset
+countdown. Hovering an account gives its email and plan, one click to point any
+context at it, poke, rename, a colour picker, and remove. Each account keeps a
+colour, shown as a chip beside every project it is paying for.
+
 ### Poking
 
 A weekly reset leaves an account at 0% with no window running: the 5-hour
