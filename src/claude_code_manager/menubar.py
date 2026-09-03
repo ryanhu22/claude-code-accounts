@@ -91,8 +91,13 @@ def _styled(segments, size: float = 12.0):
         chip_key = run[2] if len(run) > 2 else None
         attrs = {AppKit.NSFontAttributeName: font}
         if chip_key:
-            attrs[AppKit.NSBackgroundColorAttributeName] = _chip_color(chip_key)
-            attrs[AppKit.NSForegroundColorAttributeName] = AppKit.NSColor.whiteColor()
+            # Terminal-style badge: a faint wash of the hue behind text drawn in
+            # that same hue. A solid fill with white text loses badly on the
+            # lighter hues, and fails outright in light mode.
+            base = _chip_color(chip_key)
+            attrs[AppKit.NSBackgroundColorAttributeName] = base.colorWithAlphaComponent_(0.22)
+            attrs[AppKit.NSForegroundColorAttributeName] = base.blendedColorWithFraction_ofColor_(
+                0.42, AppKit.NSColor.labelColor()) or base
         else:
             attrs[AppKit.NSForegroundColorAttributeName] = colors.get(tone, colors["text"])
         out.appendAttributedString_(
