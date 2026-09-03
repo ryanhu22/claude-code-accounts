@@ -10,11 +10,23 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 from .core import HOME, Context, context_for, contexts
+
+
+def branch_of(path: str) -> Optional[str]:
+    """Checked-out branch, or None when detached or not a repo."""
+    try:
+        r = subprocess.run(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = r.stdout.strip() if r.returncode == 0 else ""
+    return name or None if name != "HEAD" else None
 
 
 @dataclass
@@ -23,16 +35,27 @@ class ProjectActivity:
     last_active: float # epoch seconds
     sessions: int
     context: Context
+    branch: Optional[str] = None
+
+    @property
+    def is_worktree(self) -> bool:
+        parts = self.path.rstrip("/").split("/")
+        return ".claude" in parts and "worktrees" in parts
 
     @property
     def name(self) -> str:
-        """Readable label. Worktrees are shown under their parent repo, since
-        their generated names ("snuggly-hopping-falcon") say nothing alone."""
+        """Readable label.
+
+        Worktree directories are generated names ("snuggly-hopping-falcon")
+        that say nothing about the work, so a worktree is labelled with its
+        parent repo and its branch, falling back to the directory name when
+        the branch is unavailable (detached HEAD, or git not answering).
+        """
         parts = self.path.rstrip("/").split("/")
-        if ".claude" in parts and "worktrees" in parts:
+        if self.is_worktree:
             i = parts.index("worktrees")
             repo = parts[max(0, i - 2)]
-            return f"{repo} / {parts[-1]}" if i + 1 < len(parts) else repo
+            return f"{repo} / {self.branch or parts[-1]}"
         return parts[-1] or self.path
 
     @property
@@ -104,8 +127,8 @@ def recent(minutes: int = 60) -> list[ProjectActivity]:
                 existing.sessions += len(live)
                 existing.last_active = max(existing.last_active, mt)
             else:
-                found[cwd] = ProjectActivity(path=cwd, last_active=mt,
-                                             sessions=len(live), context=context_for(cwd))
+                found[cwd] = ProjectActivity(path=cwd, last_active=mt, sessions=len(live),
+                                             context=context_for(cwd), branch=branch_of(cwd))
     return sorted(found.values(), key=lambda p: p.last_active, reverse=True)
 
 
