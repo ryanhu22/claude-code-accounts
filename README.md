@@ -6,6 +6,17 @@ freshly reset account's window on purpose.
 
 Ships a CLI (`ccm`) and a macOS menu bar app.
 
+Account names accept short forms: any unique prefix or substring of a slot
+name works, so `ccm swap rr` finds `rryanhuu` and `ccm swap 200` finds
+`ryanhu200`.
+
+### Start the menu bar app at login
+
+```sh
+cp packaging/com.claude-code-manager.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-code-manager.plist
+```
+
 ## Why
 
 Claude Code stores one login per config directory. That makes several
@@ -45,6 +56,8 @@ ccm where                # which context and account this directory uses
 ccm swap <account>       # point this directory's context at another account
 ccm poke <account>       # spend one token to start that account's 5h window
 ccm projects             # projects with Claude Code activity in the last hour
+ccm isolate              # give this project its own context
+ccm unroute              # drop this project's routing override
 ccm add <account>        # prints the sign-in command for a new slot
 ccm-menubar              # the menu bar app
 ```
