@@ -73,6 +73,20 @@ def cmd_projects(args) -> int:
     return 0
 
 
+def cmd_isolate(_args) -> int:
+    ok, msg = core.isolate(os.getcwd())
+    print(msg)
+    if ok:
+        print("`ccm swap` here now changes only this project. Undo: ccm unroute")
+    return 0 if ok else 1
+
+
+def cmd_unroute(_args) -> int:
+    ok, msg = core.unroute(os.getcwd())
+    print(msg)
+    return 0 if ok else 1
+
+
 def cmd_add(args) -> int:
     print(core.add_account_command(args.account))
     return 0
@@ -93,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("projects", help="projects with recent Claude Code activity")
     p.add_argument("--minutes", type=int, default=60)
     p.set_defaults(func=cmd_projects)
+    sub.add_parser("isolate", help="give this project its own context").set_defaults(func=cmd_isolate)
+    sub.add_parser("unroute", help="drop this project's routing override").set_defaults(func=cmd_unroute)
     p = sub.add_parser("add", help="print the command that signs an account in")
     p.add_argument("account")
     p.set_defaults(func=cmd_add)

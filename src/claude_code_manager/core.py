@@ -210,6 +210,30 @@ def account_names() -> list[str]:
         return []
 
 
+class UnknownAccount(Exception):
+    pass
+
+
+def resolve_account(query: str) -> str:
+    """Accept a short nickname for an account slot.
+
+    Exact name wins, then a unique prefix, then a unique substring, so "rr"
+    finds "account-c", "200" finds "account-a" and "acme" finds
+    "work" without anyone maintaining an alias table.
+    """
+    names = account_names()
+    if query in names:
+        return query
+    q = query.lower()
+    for pool in ([n for n in names if n.lower().startswith(q)],
+                 [n for n in names if q in n.lower()]):
+        if len(pool) == 1:
+            return pool[0]
+        if len(pool) > 1:
+            raise UnknownAccount(f"{query!r} matches {', '.join(pool)}")
+    raise UnknownAccount(f"no account matches {query!r} (have: {', '.join(names) or 'none'})")
+
+
 def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     """Any live login for an account, from wherever it currently exists.
 
@@ -294,13 +318,17 @@ def remove_account(name: str) -> bool:
     return ok
 
 
-def poke(name: str) -> tuple[bool, str]:
+def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     """Spend one token on an account to start its 5-hour window.
 
     A freshly reset account sits at 0% with no window running, so the countdown
     only starts on first use. This starts it deliberately, for about 22 input
     tokens, so the window is aligned with when you want it.
     """
+    try:
+        name = resolve_account(name)
+    except UnknownAccount as e:
+        return False, str(e)
     blob = live_blob(slot_dir(name))
     if not blob:
         return False, "not signed in"
@@ -388,8 +416,81 @@ def context_for(cwd: str) -> Context:
     return Context(name="default", path=named.get("default", DEFAULT_CONFIG))
 
 
+SHARED_ITEMS = ("CLAUDE.md", "commands", "agents", "skills", "hooks", "workflows",
+                "bin", "automations", "settings.json", "design", "appstore",
+                "plugins", "projects")
+
+
+def project_root(cwd: str) -> str:
+    """Main checkout for a directory: a worktree resolves to its parent repo."""
+    import subprocess as _sp
+    r = _sp.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
+                capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        gitdir = r.stdout.strip()
+        if not os.path.isabs(gitdir):
+            gitdir = os.path.join(cwd, gitdir)
+        return os.path.dirname(os.path.abspath(gitdir)) or cwd
+    return os.path.abspath(cwd)
+
+
+def _write_route(root: str, context_path: Optional[str]) -> None:
+    lines: list[str] = []
+    try:
+        with open(ROUTES_FILE) as f:
+            lines = [l.rstrip("\n") for l in f]
+    except OSError:
+        pass
+    key = f"path:{root}="
+    lines = [l for l in lines if not l.startswith(key)]
+    if context_path:
+        lines.append(key + context_path)
+    os.makedirs(os.path.dirname(ROUTES_FILE), exist_ok=True)
+    with open(ROUTES_FILE, "w") as f:
+        f.write("\n".join(l for l in lines if l.strip()) + "\n")
+
+
+def isolate(cwd: str) -> tuple[bool, str]:
+    """Give this project its own context, so swapping here affects only it.
+
+    Shared config and the transcripts directory are symlinked back to
+    ~/.claude, so settings, commands and history stay in one place and
+    `claude -c` still finds past conversations after the move.
+    """
+    root = project_root(cwd)
+    name = "".join(c if (c.isalnum() or c in "._-") else "-" for c in os.path.basename(root)) or "project"
+    ctx_path = os.path.join(CTX_DIR, name)
+    current = context_for(root)
+    if os.path.abspath(ctx_path) == os.path.abspath(current.path):
+        return True, f"{root} already has its own context"
+    os.makedirs(ctx_path, exist_ok=True)
+    for item in SHARED_ITEMS:
+        target = os.path.join(DEFAULT_CONFIG, item)
+        link = os.path.join(ctx_path, item)
+        if os.path.exists(target) and not os.path.lexists(link):
+            os.symlink(target, link)
+    blob = keychain.read_credentials(current.path)
+    if blob:
+        keychain.write_credentials(ctx_path, blob)      # start where it already was
+    _write_route(root, ctx_path)
+    who = whoami(blob.get("accessToken")) if blob else None
+    return True, (f"{root}\n  own context: {ctx_path.replace(HOME, '~')}"
+                  f"\n  account    : {who or 'unknown'}")
+
+
+def unroute(cwd: str) -> tuple[bool, str]:
+    """Drop this project's routing override; it follows the defaults again."""
+    root = project_root(cwd)
+    _write_route(root, None)
+    return True, f"override removed for {root}"
+
+
 def swap(account: str, context: Context) -> tuple[bool, str]:
     """Point a context at an account by copying that account's live login."""
+    try:
+        account = resolve_account(account)
+    except UnknownAccount as e:
+        return False, str(e)
     blob = live_blob(slot_dir(account))
     email = whoami(blob.get("accessToken")) if blob else None
     if not email:
