@@ -131,6 +131,7 @@ class Account:
     slot: str
     email: Optional[str] = None
     plan: Optional[str] = None
+    tier: Optional[str] = None
     limits: list[Limit] = field(default_factory=list)
     error: Optional[str] = None
     checked_at: float = 0.0
@@ -274,6 +275,7 @@ def load_account(name: str, with_usage: bool = True) -> Account:
         acct.error = "login expired"
         return acct
     acct.email, acct.plan = email, blob.get("subscriptionType")
+    acct.tier = (blob.get("rateLimitTier") or "").replace("default_claude_", "").replace("_", " ") or None
     if with_usage:
         try:
             acct.limits = _parse_limits(_get("/api/oauth/usage", blob["accessToken"]))
@@ -327,6 +329,65 @@ def chip_index(name: str, palette_size: int = 8) -> int:
     except OSError:
         pass
     return idx
+
+
+def set_chip_index(name: str, index: int) -> None:
+    try:
+        with open(CHIP_FILE) as f:
+            table = json.load(f)
+    except (OSError, ValueError):
+        table = {}
+    table[name] = int(index)
+    try:
+        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+        with open(CHIP_FILE, "w") as f:
+            json.dump(table, f, indent=2)
+    except OSError:
+        pass
+
+
+def rename_account(old: str, new: str) -> tuple[bool, str]:
+    """Rename a slot, moving its credentials with it.
+
+    The keychain service name is derived from the slot's path, so a rename is
+    a move of both: write the login under the new path's service, then drop the
+    old item. The credentials are read first, and nothing is deleted until the
+    new copy is in place.
+    """
+    import shutil
+    new = "".join(c for c in new.strip() if c.isalnum() or c in "-_")
+    if not new:
+        return False, "name must contain letters, digits, - or _"
+    if new == old:
+        return True, "unchanged"
+    if new in account_names():
+        return False, f"{new} already exists"
+    old_slot, new_slot = slot_dir(old), slot_dir(new)
+    blob = keychain.read_credentials(old_slot) or find_live_blob(recorded_email(old_slot))
+    if not blob:
+        return False, f"{old} has no login to move"
+    os.makedirs(new_slot, exist_ok=True)
+    for entry in os.listdir(old_slot):
+        try:
+            shutil.move(os.path.join(old_slot, entry), os.path.join(new_slot, entry))
+        except (OSError, shutil.Error):
+            pass
+    try:
+        keychain.write_credentials(new_slot, blob)
+    except RuntimeError as e:
+        return False, str(e)
+    keychain.delete(keychain.service_for(old_slot))
+    shutil.rmtree(old_slot, ignore_errors=True)
+    try:                                     # keep its colour through the rename
+        with open(CHIP_FILE) as f:
+            table = json.load(f)
+        if old in table:
+            table[new] = table.pop(old)
+            with open(CHIP_FILE, "w") as f:
+                json.dump(table, f, indent=2)
+    except (OSError, ValueError):
+        pass
+    return True, f"{old} is now {new}"
 
 
 def add_account_command(name: str) -> str:

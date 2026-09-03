@@ -66,7 +66,10 @@ CHIP_COLORS = ("systemBlueColor", "systemPurpleColor", "systemTealColor",
 
 def _chip_color(name: str):
     import AppKit
-    idx = core.chip_index(name, len(CHIP_COLORS))
+    if name.startswith("__palette"):
+        idx = int(name.removeprefix("__palette")) % len(CHIP_COLORS)
+    else:
+        idx = core.chip_index(name, len(CHIP_COLORS))
     getter = getattr(AppKit.NSColor, CHIP_COLORS[idx], None) or AppKit.NSColor.systemBlueColor
     return getter()
 
@@ -194,13 +197,6 @@ def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
 
-def _bar(pct: Optional[float], width: int = 10) -> str:
-    if pct is None:
-        return " " * width
-    filled = max(0, min(width, round(pct / 100 * width)))
-    return "█" * filled + "░" * (width - filled)
-
-
 def _short(email: Optional[str]) -> str:
     return (email or "?").split("@")[0]
 
@@ -291,13 +287,7 @@ class ManagerApp(rumps.App):
             self.menu.add(self._project_item(proj, snap))
         self.menu.add(rumps.separator)
 
-        manage = rumps.MenuItem("Manage accounts")
-        manage.add(rumps.MenuItem("Add an account…", callback=self._add_account))
-        remove = rumps.MenuItem("Remove an account")
-        for acct in snap.accounts:
-            remove.add(rumps.MenuItem(acct.name, callback=self._make_remove(acct.name)))
-        manage.add(remove)
-        self.menu.add(manage)
+        self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
 
         age = int(time.time() - snap.taken_at) if snap.taken_at else 0
         self.menu.add(rumps.MenuItem(f"Refresh now (updated {age}s ago)", callback=self.refresh_now))
@@ -339,28 +329,44 @@ class ManagerApp(rumps.App):
             segments.append((f"   {', '.join(used_by)}", "dim"))
         _apply_style(item, segments)
 
-        for lim in acct.limits:
-            when = f"resets in {lim.resets_in}" if lim.resets_at else "idle, no window running"
-            sub = rumps.MenuItem(f"{lim.label:>6}  {_bar(lim.percent)} {_pct(lim.percent)}  {when}",
-                                 callback=None)
-            _apply_style(sub, [(f"  {lim.label:<6}", "dim"),
-                               *_bucket("", lim, show_reset=False)[1:],
-                               (f"   {when}", "dim")])
-            item.add(sub)
+        # The row already carries every bucket, so the submenu is for identity
+        # and actions rather than a second copy of the usage.
+        detail = rumps.MenuItem(acct.email or "unknown account", callback=None)
+        _apply_style(detail, [("  ", "dim"), (acct.email or "unknown account", "text")])
+        item.add(detail)
+        plan = " · ".join(x for x in (acct.plan, acct.tier) if x)
+        if plan:
+            plan_item = rumps.MenuItem(plan, callback=None)
+            _apply_style(plan_item, [("  ", "dim"), (plan, "dim")])
+            item.add(plan_item)
         item.add(rumps.separator)
-        session = acct.limit("session")
-        if session and not session.resets_at:
-            item.add(rumps.MenuItem("Poke to start the 5h window",
-                                    callback=self._make_poke(acct.name)))
-        else:
-            item.add(rumps.MenuItem("Poke (window already running)",
-                                    callback=self._make_poke(acct.name)))
-        item.add(rumps.separator)
+
         for ctx in snap.contexts:
             same = snap.context_email.get(ctx.path, "").lower() == (acct.email or "").lower()
-            entry = rumps.MenuItem(f"Use for “{ctx.name}”" + ("  ✓" if same else ""),
-                                   callback=None if same else self._make_swap(acct.name, ctx))
-            item.add(entry)
+            item.add(rumps.MenuItem(f"Use for “{ctx.name}”" + ("  ✓" if same else ""),
+                                    callback=None if same else self._make_swap(acct.name, ctx)))
+        item.add(rumps.separator)
+
+        session = acct.limit("session")
+        idle = bool(session and not session.resets_at)
+        item.add(rumps.MenuItem(
+            "Poke to start the 5h window" if idle else "Poke (window already running)",
+            callback=self._make_poke(acct.name)))
+        item.add(rumps.separator)
+
+        item.add(rumps.MenuItem("Rename…", callback=self._make_rename(acct.name)))
+        palette = rumps.MenuItem("Colour")
+        current = core.chip_index(acct.name, len(CHIP_COLORS))
+        for idx, raw in enumerate(CHIP_COLORS):
+            label = raw.replace("system", "").replace("Color", "")
+            entry = rumps.MenuItem(f"{label}{'  ✓' if idx == current else ''}",
+                                   callback=self._make_recolor(acct.name, idx))
+            # show each choice in the colour it would apply
+            _apply_style(entry, [(f" {label:<8} ", "chip_fg", f"__palette{idx}"),
+                                 ("  ✓" if idx == current else "", "text")])
+            palette.add(entry)
+        item.add(palette)
+        item.add(rumps.MenuItem("Remove account…", callback=self._make_remove(acct.name)))
         return item
 
     def _project_item(self, proj: projects.ProjectActivity,
@@ -418,6 +424,27 @@ class ManagerApp(rumps.App):
             ok, msg = core.poke(account)
             rumps.notification("Claude Code Manager",
                                f"Poked {account}" if ok else f"Could not poke {account}", msg)
+            self.refresh_now(None)
+        return handler
+
+    def _make_rename(self, account: str):
+        def handler(_sender):
+            win = rumps.Window(title=f"Rename {account}",
+                               message="This renames the account slot and moves its stored\n"
+                                       "login with it. Contexts already using it are unaffected.",
+                               default_text=account, ok="Rename", cancel="Cancel",
+                               dimensions=(240, 22))
+            resp = win.run()
+            if resp.clicked != 1:
+                return
+            ok, msg = core.rename_account(account, resp.text)
+            rumps.notification("Claude Code Manager", "Renamed" if ok else "Rename failed", msg)
+            self.refresh_now(None)
+        return handler
+
+    def _make_recolor(self, account: str, index: int):
+        def handler(_sender):
+            core.set_chip_index(account, index)
             self.refresh_now(None)
         return handler
 
