@@ -27,6 +27,66 @@ PROJECT_WINDOW_MIN = 60
 ICON = "⇄"
 
 
+# Menu rows are drawn as attributed strings so the three usage buckets line up
+# in real columns. A proportional font cannot align with spaces, and a plain
+# title cannot colour the bucket that is nearly spent.
+BAR_W = 10
+NAME_W = 14
+FULL, EMPTY = "\u2588", "\u2591"          # █ ░
+
+
+def _colors():
+    import AppKit
+    return {
+        "ok": AppKit.NSColor.systemGreenColor(),
+        "warn": AppKit.NSColor.systemOrangeColor(),
+        "hot": AppKit.NSColor.systemRedColor(),
+        "dim": AppKit.NSColor.secondaryLabelColor(),
+        "text": AppKit.NSColor.labelColor(),
+    }
+
+
+def _tone(pct: Optional[float]) -> str:
+    if pct is None:
+        return "dim"
+    return "ok" if pct < 60 else "warn" if pct < 85 else "hot"
+
+
+def _styled(segments: list[tuple[str, str]], size: float = 12.0):
+    """Build an NSAttributedString from (text, colour-name) runs."""
+    import AppKit
+    colors = _colors()
+    font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
+    out = AppKit.NSMutableAttributedString.alloc().init()
+    for text, tone in segments:
+        attrs = {AppKit.NSFontAttributeName: font,
+                 AppKit.NSForegroundColorAttributeName: colors.get(tone, colors["text"])}
+        out.appendAttributedString_(
+            AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs))
+    return out
+
+
+def _apply_style(item: "rumps.MenuItem", segments: list[tuple[str, str]]) -> None:
+    """Style a row, falling back silently to its plain title if AppKit balks."""
+    try:
+        item._menuitem.setAttributedTitle_(_styled(segments))
+    except Exception:
+        pass
+
+
+def _bucket(label: str, pct: Optional[float]) -> list[tuple[str, str]]:
+    tone = _tone(pct)
+    if pct is None:
+        return [(f"  {label:>5} ", "dim"), (" " * BAR_W, "dim"), ("    —", "dim")]
+    filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
+    return [
+        (f"  {label:>5} ", "dim"),
+        (FULL * filled, tone),
+        (EMPTY * (BAR_W - filled), "dim"),
+        (f" {pct:3.0f}%", tone),
+    ]
+
+
 def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
@@ -152,19 +212,37 @@ class ManagerApp(rumps.App):
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.ok:
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
+            _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
+                                (f"  {acct.error}", "hot")])
             item.add(rumps.MenuItem("Sign in…", callback=self._make_add(acct.name)))
             return item
         used_by = [c.name for c in snap.contexts
                    if snap.context_email.get(c.path, "").lower() == (acct.email or "").lower()]
-        mark = "●" if used_by else "○"
-        head = f"{mark} {acct.name} — {_pct(acct.session_pct)} 5h · {_pct(acct.weekly_pct)} 7d"
-        if used_by:
-            head += f"   [{', '.join(used_by)}]"
+        in_use = bool(used_by)
+        # plain title stays unique: rumps keys its callback registry by it
+        head = f"{'●' if in_use else '○'} {acct.name} — {_pct(acct.session_pct)} 5h"
         item = rumps.MenuItem(head)
+
+        fable = next((l for l in acct.limits
+                      if l.kind not in ("session", "weekly_all")), None)
+        segments: list[tuple[str, str]] = [
+            ("● " if in_use else "○ ", "text" if in_use else "dim"),
+            (f"{acct.name:<{NAME_W}}", "text"),
+        ]
+        segments += _bucket("5h", acct.session_pct)
+        segments += _bucket("7d", acct.weekly_pct)
+        segments += _bucket(fable.label if fable else "model", fable.percent if fable else None)
+        if used_by:
+            segments.append((f"   {', '.join(used_by)}", "dim"))
+        _apply_style(item, segments)
+
         for lim in acct.limits:
-            when = f"  resets {lim.resets_in}" if lim.resets_at else "  idle"
-            item.add(rumps.MenuItem(f"{lim.label:>6}  {_bar(lim.percent)} {_pct(lim.percent)}{when}",
-                                    callback=None))
+            when = f"resets in {lim.resets_in}" if lim.resets_at else "idle, no window running"
+            sub = rumps.MenuItem(f"{lim.label:>6}  {_bar(lim.percent)} {_pct(lim.percent)}  {when}",
+                                 callback=None)
+            _apply_style(sub, [(f"  {lim.label:<6}", "dim"), *_bucket("", lim.percent)[1:],
+                               (f"   {when}", "dim")])
+            item.add(sub)
         item.add(rumps.separator)
         session = acct.limit("session")
         if session and not session.resets_at:
