@@ -11,6 +11,7 @@ touched off the main thread.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import subprocess
 import threading
@@ -74,17 +75,47 @@ def _apply_style(item: "rumps.MenuItem", segments: list[tuple[str, str]]) -> Non
         pass
 
 
-def _bucket(label: str, pct: Optional[float]) -> list[tuple[str, str]]:
+def _compact_reset(iso: Optional[str]) -> str:
+    """Short countdown for an inline row: 45m, 4h, 34h, 3d.
+
+    Computed from the absolute reset timestamp on every render, so it stays
+    right between refreshes instead of ageing with the fetch.
+    """
+    if not iso:
+        return "idle"
+    try:
+        dt = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    mins = round((dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60)
+    if mins <= 0:
+        return "now"
+    if mins < 60:
+        return f"{mins}m"
+    hours = round(mins / 60)
+    if hours < 48:
+        return f"{hours}h"
+    return f"{round(hours / 24)}d"
+
+
+def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
+    pct = lim.percent if lim else None
     tone = _tone(pct)
     if pct is None:
-        return [(f"  {label:>5} ", "dim"), (" " * BAR_W, "dim"), ("    —", "dim")]
+        return [(f"  {label:>5} ", "dim"), (" " * BAR_W, "dim"), ("    —", "dim"),
+                *([("      ", "dim")] if show_reset else [])]
     filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
-    return [
+    out = [
         (f"  {label:>5} ", "dim"),
         (FULL * filled, tone),
         (EMPTY * (BAR_W - filled), "dim"),
         (f" {pct:3.0f}%", tone),
     ]
+    if show_reset:
+        reset = _compact_reset(lim.resets_at if lim else None)
+        # an idle window is worth noticing: that account can be poked
+        out.append((f" \u21bb{reset:>4}", "ok" if reset == "idle" else "dim"))
+    return out
 
 
 def _pct(v: Optional[float]) -> str:
@@ -229,9 +260,9 @@ class ManagerApp(rumps.App):
             ("● " if in_use else "○ ", "text" if in_use else "dim"),
             (f"{acct.name:<{NAME_W}}", "text"),
         ]
-        segments += _bucket("5h", acct.session_pct)
-        segments += _bucket("7d", acct.weekly_pct)
-        segments += _bucket(fable.label if fable else "model", fable.percent if fable else None)
+        segments += _bucket("5h", acct.limit("session"))
+        segments += _bucket("7d", acct.limit("weekly_all"))
+        segments += _bucket(fable.label if fable else "model", fable)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
         _apply_style(item, segments)
@@ -240,7 +271,8 @@ class ManagerApp(rumps.App):
             when = f"resets in {lim.resets_in}" if lim.resets_at else "idle, no window running"
             sub = rumps.MenuItem(f"{lim.label:>6}  {_bar(lim.percent)} {_pct(lim.percent)}  {when}",
                                  callback=None)
-            _apply_style(sub, [(f"  {lim.label:<6}", "dim"), *_bucket("", lim.percent)[1:],
+            _apply_style(sub, [(f"  {lim.label:<6}", "dim"),
+                               *_bucket("", lim, show_reset=False)[1:],
                                (f"   {when}", "dim")])
             item.add(sub)
         item.add(rumps.separator)
