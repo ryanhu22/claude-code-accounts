@@ -52,13 +52,15 @@ _cc_context() {{  # config dir this terminal should launch Claude Code with
   val=$(grep "^default=" "$CCM_ROUTES" 2>/dev/null | tail -1 | cut -d= -f2-)
   echo "${{val:-$HOME/.claude}}"
 }}
-claude() {{ CLAUDE_CONFIG_DIR="$(_cc_context)" command claude "$@"; }}
+claude() {{  # an explicit CLAUDE_CONFIG_DIR wins: signing an account in sets it
+  CLAUDE_CONFIG_DIR="${{CLAUDE_CONFIG_DIR:-$(_cc_context)}}" command claude "$@"
+}}
 ccadd() {{  # one time per subscription: sign it into the directory it owns
   local name="$1"
   [ -z "$name" ] && {{ echo "usage: ccadd <account-name>"; return 1; }}
   mkdir -p "{accounts}/$name"
   echo "Opening Claude Code as $name. Type /login, sign in, then /exit."
-  CLAUDE_CONFIG_DIR="{accounts}/$name" command claude
+  CLAUDE_CONFIG_DIR="{accounts}/$name" command claude   # command: never the wrapper
 }}
 ccresume() {{ CLAUDE_CONFIG_DIR="$(_cc_context)" command claude -c; }}
 ccpick()   {{ CLAUDE_CONFIG_DIR="$(_cc_context)" command claude --resume; }}

@@ -494,7 +494,8 @@ class ManagerApp(rumps.App):
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
             _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
                                 (f"  {acct.error}", "hot")])
-            item.add(rumps.MenuItem("Sign in…", callback=self._make_add(acct.name)))
+            again = "Sign in again…" if acct.error == "login expired" else "Sign in…"
+            item.add(rumps.MenuItem(again, callback=self._make_add(acct.name)))
             return item
         used_by = core.rules_using(acct.name, snap.rules)
         in_use = bool(used_by)
@@ -855,20 +856,36 @@ class ManagerApp(rumps.App):
         return handler
 
     def _add_account(self, _sender, preset: str = "") -> None:
-        win = rumps.Window(
-            title="Add a Claude account",
-            message="Name this account slot (letters, digits, dashes).\n"
-                    "A Terminal window opens so you can run /login as that account.",
-            default_text=preset or "", ok="Open Terminal", cancel="Cancel", dimensions=(240, 22))
-        resp = win.run()
-        if resp.clicked != 1:
-            return
-        name = "".join(ch for ch in resp.text.strip() if ch.isalnum() or ch in "-_")
+        """Open Claude Code in an account's own directory so /login can run.
+
+        Signing in needs a browser round trip that only Claude Code can do, so
+        the most this can offer is to put the user in the right place: a fresh
+        Terminal already running Claude Code as that account, waiting for
+        /login. Names are asked for only when the account is new.
+        """
+        name = preset
+        if not name:
+            win = rumps.Window(
+                title="Add a Claude account",
+                message="Name this account (letters, digits, dashes). It is a label "
+                        "for you, not the email.\nA Terminal opens running Claude Code "
+                        "as that account, where you type /login.",
+                ok="Open Terminal", cancel="Cancel", dimensions=(240, 22))
+            resp = win.run()
+            if resp.clicked != 1:
+                return
+            name = resp.text
+        name = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
         if not name:
             return
-        slot = core.slot_dir(name)
-        script = (f'mkdir -p {slot}; echo "Type /login, sign in as {name}, then /exit"; '
-                  f'CLAUDE_CONFIG_DIR={slot} claude')
+        self._sign_in(name)
+
+    def _sign_in(self, name: str) -> None:
+        slot = core.ensure_account_dir(name)
+        # `command claude` on purpose: the shell wrapper would pick a directory
+        # from the rules and sign this account into somebody else's.
+        script = (f'echo "Type /login, sign in as {name}, then /exit"; '
+                  f'CLAUDE_CONFIG_DIR={slot} command claude')
         subprocess.run(["osascript", "-e",
                         f'tell application "Terminal" to do script "{script}"',
                         "-e", 'tell application "Terminal" to activate'], check=False)
