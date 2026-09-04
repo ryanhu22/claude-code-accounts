@@ -435,6 +435,11 @@ class Account:
     usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
 
     @property
+    def reading(self) -> bool:
+        """Whether the usage numbers on this account mean anything."""
+        return has_reading(self.limits)
+
+    @property
     def usage_age(self) -> float:
         return time.time() - self.usage_at if self.usage_at else 0.0
 
@@ -488,6 +493,18 @@ def human_delta(iso: Optional[str]) -> str:
     if mins < 48 * 60:
         return f"{mins // 60}h {mins % 60}m"
     return f"{mins // 1440}d {(mins % 1440) // 60}h"
+
+
+def has_reading(limits: list) -> bool:
+    """Whether a usage payload actually says anything.
+
+    Every window reading zero with no reset time is not an account that has
+    used nothing: a window that has been touched carries the time it rolls
+    over. It is the shape of an answer that failed to say anything, and taking
+    it as fact told the user an account with three sessions running had spent
+    nothing and had its whole allowance left.
+    """
+    return any(lim.percent or lim.resets_at for lim in limits)
 
 
 def _parse_limits(data: dict) -> list[Limit]:
@@ -608,11 +625,15 @@ def _usage(name: str, token: str, force: bool = False,
     now = time.time()
     # A forced check skips the wait, but not entirely: clicking refresh at a
     # rate limit should not add requests that can only prolong it.
+    # A cached payload that says nothing counts as no payload here, so the
+    # wait gets reported rather than swallowed: the row has no numbers to show
+    # and the reason it has none is the only thing left to say.
+    told = _parse_limits(cached) if cached else []
+    speak = None if has_reading(told) else _waiting(entry, now)
     if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
-        return (_parse_limits(cached) if cached else []), at, \
-            (None if cached else _waiting(entry, now))
+        return told, at, speak
     if cached and not force and now < entry.get("retry_after", 0):
-        return _parse_limits(cached), at, None
+        return told, at, speak
     try:
         data = _get("/api/oauth/usage", token)
     except Exception as e:

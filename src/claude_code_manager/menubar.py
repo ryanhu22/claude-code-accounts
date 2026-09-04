@@ -303,7 +303,8 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # number is, so a separator is enough.
         left = "" if pct is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
-        out.append((f"{'(' + left + ')':>6}" if left else "      ",
+        # Seven wide, so the longest countdown keeps its gap from the number.
+        out.append((f"{'(' + left + ')':>7}" if left else "       ",
                     _quiet(_reset_tone(lim))))
     else:
         out.append(("", "dim"))
@@ -902,7 +903,7 @@ class ManagerApp(rumps.App):
         """Replace the text title with the drawn gauge. Falls back to text if AppKit balks."""
         acct, name, sess = self._shown_account(snap)
         name = acct.name if acct else (_short(name) if name else "?")
-        if acct:
+        if acct and acct.reading:
             fable = next((l for l in acct.limits
                           if l.kind not in ("session", "weekly_all")), None)
             cells = [self._cell("5h", acct.limit("session")),
@@ -910,10 +911,12 @@ class ManagerApp(rumps.App):
             if fable:
                 cells.append(self._cell(fable.label, fable))
         else:
+            # A battery reads as what is left, so an empty answer drew as a
+            # full one: three hundreds and a confident bar, off no data at all.
             cells = [gauge.Cell("5h", None, "dim"), gauge.Cell("7d", None, "dim")]
         # The tab being followed is named in the menu's first row, not here:
         # the bar is shared with every other app and stays as narrow as it can.
-        dim = bool(acct and (acct.error or acct.stale))
+        dim = bool(acct and (acct.error or acct.stale or not acct.reading))
         try:
             img = gauge.status_image(name, _chip_color(name), cells, dim=dim)
             item = self._nsapp.nsstatusitem
@@ -980,6 +983,16 @@ class ManagerApp(rumps.App):
                       if l.kind not in ("session", "weekly_all")), None)
         segments = [("  ", "dim"), *_chip(acct.name, NAME_W), (" ", "dim"),
                     *_lamps(here)]
+        if not acct.reading:
+            # Nothing usable came back. Every window draws as unknown rather
+            # than as empty, because empty is a claim and this is the absence
+            # of one, and the note below says the fetch is still trying.
+            for label in ("5h", "7d", "fable"):
+                segments += _bucket(label, None)
+            # Says the app is still trying, because a row of dashes on its own
+            # reads as broken rather than as pending.
+            segments.append((f"   {acct.error or 'asking again'}", "dim"))
+            return segments
         weekly = acct.limit("weekly_all")
         segments += _bucket("5h", acct.limit("session"))
         segments += _bucket("7d", weekly)
