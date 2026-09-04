@@ -208,6 +208,13 @@ RESOLVER_BODY = """\
 # Prints the config dir a session in $PWD should use. The shell wrapper is a
 # one-liner that calls this, so changing how routing works never needs an
 # existing terminal to be restarted: only this file changes.
+# ccm prepares this terminal's own config dir and prints it. That dir is what
+# lets one session change account without touching its neighbours. The plain
+# text fallback below keeps launches working if ccm is missing or broken; it
+# resolves to the account's shared dir, which is correct, just not per session.
+if dir=$(ccm resolve 2>/dev/null) && [ -n "$dir" ]; then
+  echo "$dir"; exit 0
+fi
 ROUTES="{routes}"
 [ -f "$ROUTES" ] || {{ echo "$HOME/.claude"; exit 0 }}
 if [ -n "$TERM_SESSION_ID" ]; then

@@ -75,18 +75,44 @@ Account names take any unique prefix or substring, so `ccm use rr` finds
 Everything is in the menu bar too. Each session row offers the same three
 scopes, and a PROFILES section shows which account each group uses.
 
-## A running session never picks up a change
+## Changes reach running sessions
 
-It reads its credential once at launch and holds it in memory, so a rule change
-applies the next time that session starts: `ctrl+C` twice, then `claude -c`.
-Being idle does not help, and a rate limit is not an auth error, so it never
-re-reads. Nothing outside the process can rebind it. Session rows say so, and
-name the account each one will move to.
+A session re-reads its keychain item about every thirty seconds, so a rule
+change lands without a restart. Measured, by pointing a live session's
+directory at a credential that could only fail:
 
-Switching accounts also invalidates the prompt cache, which is keyed per
-account and per model, so the first turn after a move re-sends the
-conversation. Once per move, not per turn, and cheapest right after `/clear` or
-`/compact`.
+```
+msg1 (real credential)   is_error=False  'one'
+credential replaced with garbage tokens
+msg@35s                  is_error=True   'Failed to authenticate: ...'
+```
+
+That is what per-session config directories are for. Each session gets its own
+directory, so writing a credential into one moves that session and nothing
+else. Sessions started before they had one are the exception: there is nowhere
+to write that only they would see, so those still need a restart, and their row
+says so and offers to bring that terminal tab to the front.
+
+Switching accounts invalidates the prompt cache, which is keyed per account and
+per model, so the first turn after a move re-sends the conversation. Once per
+move, not per turn, and cheapest right after `/clear` or `/compact`.
+
+### Keeping the copies alive
+
+Several directories holding one account means several copies of one refresh
+token, and a refresh token is single use: whichever session refreshes first
+spends it for the rest. Racing Claude Code for it is not winnable, so the app
+does not try. Every 45 seconds it takes the newest credential of each lineage,
+whoever produced it, and hands it to the copies that are behind. A session left
+holding a spent token recovers on its own, because of that same thirty-second
+re-read.
+
+The account's own directory is authoritative. A session copy is promoted over
+it only when it is genuinely newer *and* the API confirms it belongs to that
+same account: a directory that has not caught up with a rule change is holding
+a different login, and copying that around would mix two accounts together.
+Writing a credential into a directory also drops the cached idea of whose
+directory it is, since that answer decides what gets copied where.
 
 ## The other commands
 
