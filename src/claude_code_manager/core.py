@@ -517,6 +517,19 @@ def _cache_write(store: dict, path: str = "") -> None:
         pass
 
 
+def _waiting(entry: dict, now: float) -> Optional[str]:
+    """Why this account's usage is not being fetched, counted from now.
+
+    The stored message is written once, when the 429 lands, so its countdown
+    would be as old as that moment. The deadline it was written from is
+    absolute, so the sentence is rebuilt from that each time it is read.
+    """
+    left = (entry.get("retry_after") or 0) - now
+    if left <= 0:
+        return entry.get("last_error") if not entry.get("data") else None
+    return f"rate limited, retrying in {max(1, round(left / 60))}m"
+
+
 def _usage(name: str, token: str, force: bool = False,
            fp: Optional[str] = None) -> tuple[list[Limit], float, Optional[str]]:
     """Usage for one account: cached, and backed off after a 429.
@@ -544,9 +557,12 @@ def _usage(name: str, token: str, force: bool = False,
     # A forced check skips the wait, but not entirely: clicking refresh at a
     # rate limit should not add requests that can only prolong it.
     if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
-        return (_parse_limits(cached) if cached else []), at, entry.get("last_error")
+        return (_parse_limits(cached) if cached else []), at, _waiting(entry, now)
     if cached and not force and now < entry.get("retry_after", 0):
-        return _parse_limits(cached), at, None
+        # Say why the row is old. Reporting no error here left the menu with
+        # nothing to show but the age of the numbers, which states a fact and
+        # withholds the reason for it.
+        return _parse_limits(cached), at, _waiting(entry, now)
     try:
         data = _get("/api/oauth/usage", token)
     except Exception as e:
