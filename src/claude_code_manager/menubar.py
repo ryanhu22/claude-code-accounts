@@ -270,8 +270,12 @@ def _status_tone(status: str) -> str:
 
 
 def _age(seconds: float) -> str:
+    """Compact age: 3m, 5h, 7d. Past two days, hours stop meaning anything."""
     mins = int(seconds // 60)
-    return f"{mins}m" if mins < 60 else f"{mins // 60}h"
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    return f"{hours}h" if hours < 48 else f"{hours // 24}d"
 
 
 def _short(email: Optional[str]) -> str:
@@ -482,7 +486,7 @@ class ManagerApp(rumps.App):
             *_context_bar(sess),
             _spent_cell(sess),
             (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
-            (f"{_age(sess.idle_for):>6}", "dim"),
+            (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
         ])
 
         where = rumps.MenuItem(sess.cwd.replace(core.HOME, "~") or "?", callback=None)
