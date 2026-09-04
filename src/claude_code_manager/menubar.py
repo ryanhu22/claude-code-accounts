@@ -52,6 +52,7 @@ def _fit(text: str, width: int) -> str:
 # hung below the track it was supposed to sit in. A black square (■) spans 7
 # points and its centre lands exactly on the bracket's centre.
 FILL = "\u25a0"                            # ■
+TICK = "\u00b7"                            # · a graduation, printed whether lit or not
 
 
 def _colors():
@@ -132,6 +133,11 @@ def _styled(segments, size: float = 12.0):
         text, tone = run[0], run[1]
         chip_key = run[2] if len(run) > 2 else None
         attrs = {AppKit.NSFontAttributeName: font}
+        if tone == "head":
+            # Letter spacing on a short uppercase label reads as a legend
+            # printed on the panel rather than as a row of the data below it.
+            attrs[AppKit.NSKernAttributeName] = 1.6
+            tone = "dim"
         if chip_key:
             # Terminal-style badge: a faint wash of the hue behind text drawn in
             # that same hue. A solid fill with white text loses badly on the
@@ -218,8 +224,17 @@ def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     if pct is None:
         return [("[", "dim"), ("\u2014".center(cells), "dim"), ("]", "dim")]
     filled = max(0, min(cells, round(pct / 100 * cells)))
-    return [("[", "dim"), (FILL * filled, _tone(pct)),
-            (" " * (cells - filled), "dim"), ("]", "dim")]
+    # Every step of the scale is printed, and the last one is printed in the
+    # caution colour. A gauge you have to compute against is a number with
+    # extra steps. A graduated one with its limit marked can be read without
+    # reading: how many steps are lit, and how near the marked one.
+    empty = cells - filled
+    rest = []
+    if empty > 1:
+        rest.append((TICK * (empty - 1), "dim"))
+    if empty:
+        rest.append((TICK, "warn"))
+    return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
 
 
 def _quiet(tone: str) -> str:
@@ -245,7 +260,11 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     tone = _quiet(_tone(pct))
     # Five cells, not ten. The bar is here to be seen without reading, and the
     # number beside it is the exact figure, so more cells only cost width.
-    out = [(f" {label:<5} ", "dim"), *_gauge(pct, BAR_W),
+    # The label is right aligned so its padding falls to the left, which puts
+    # the whitespace between instruments instead of inside one. Reading a panel
+    # depends on each instrument holding together as a unit, and even spacing
+    # made the row one long strip of characters.
+    out = [(f"  {label:>5} ", "dim"), *_gauge(pct, BAR_W),
            ("   —" if pct is None else f"{pct:3.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
@@ -254,7 +273,7 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # number is, so a separator is enough.
         left = "" if pct is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
-        out.append((f"{'(' + left + ')':>7}" if left else "       ",
+        out.append((f"{'(' + left + ')':>6}" if left else "      ",
                     _quiet(_reset_tone(lim))))
     else:
         out.append(("", "dim"))
@@ -768,7 +787,7 @@ class ManagerApp(rumps.App):
         in one menu reads as an accident.
         """
         head = rumps.MenuItem(title, callback=None)
-        _apply_style(head, [(title, "dim")])
+        _apply_style(head, [(title, "head")])
         self.menu.add(head)
 
     def _rebuild(self) -> None:
