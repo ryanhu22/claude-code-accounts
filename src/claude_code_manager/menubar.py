@@ -200,39 +200,50 @@ def _compact_reset(iso: Optional[str]) -> str:
     return f"{round(hours / 24)}d"
 
 
+# How long each window runs. The endpoint sends when a window ends and never
+# when it began, so this is what makes "four hours left" readable as a share
+# of the window rather than as a bare number.
+_WINDOW_SECONDS = {"session": 5 * 3600,
+                   "weekly_all": 7 * 86400,
+                   "weekly_scoped": 7 * 86400}
+
+
 def _reset_tone(lim: Optional[core.Limit]) -> str:
-    """The countdown's colour: how soon this window comes back.
+    """The countdown's colour: how close this window is to coming back.
 
-    Steps a reader can tell apart at a glance, not a grey ramp. Four weights
-    of the same grey on a three character number is a difference you have to
-    look for, and the point of this column is not having to look.
+    Measured as a share of the window, not as a count of hours. Absolute
+    thresholds cannot serve both scales at once: four hours left on a five
+    hour window is a window that has barely started, and thirteen hours left
+    on a seven day window is one about to roll over, yet an hours-based rule
+    called the first one urgent and the second one routine. Exactly backwards.
 
-    Green is relief inside the hour. Blue is later today, which is a different
-    kind of answer: worth planning around, not worth waiting for. Past a day
-    the number stops being news and goes quiet, because a weekly window with
-    six days left is not information anybody acts on.
+    So the last tenth of any window is green, whatever that tenth is worth in
+    hours. The last third is blue, meaning it is coming and worth planning
+    around. Past two thirds remaining the number stops being news and goes
+    quiet, because a window that just opened is not something anybody acts on.
 
     Once a window is nearly spent the wait is what stands between the user and
-    work, so it takes the warning colours instead: orange within the working
-    day, red beyond it. Green still means relief is close, whatever has been
-    spent.
+    work, so it takes the warning colours instead, on real time rather than a
+    share, because what matters then is how long you are stopped for: orange
+    within the working day, red beyond it. Green still wins in the last tenth,
+    since relief that close is the whole answer.
     """
-    if lim is None:
-        return "dim"
-    if not lim.resets_at:
-        return "dim"           # no clock running, and the word says so
+    if lim is None or not lim.resets_at:
+        return "dim"           # no clock running, and the word beside it says so
     try:
         dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
     except ValueError:
         return "dim"
-    mins = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
-    if mins < 60:
+    left = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    span = _WINDOW_SECONDS.get(lim.kind)
+    share = (left / span) if span else None
+    if share is not None and share <= 0.10:
         return "ok"
     if lim.spent >= 85:
-        return "warn" if mins < 360 else "hot"
-    if mins < 360:
-        return "time"
-    return "text" if mins < 1440 else "dim"
+        return "warn" if left < 6 * 3600 else "hot"
+    if share is None:
+        return "text"
+    return "time" if share <= 0.33 else "text" if share <= 0.66 else "dim"
 
 
 def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
