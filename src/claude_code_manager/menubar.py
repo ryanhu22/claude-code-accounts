@@ -21,10 +21,9 @@ from typing import Optional
 
 import rumps
 
-from . import core, projects
+from . import core, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
-PROJECT_WINDOW_MIN = 60
 ICON = "⇄"
 
 
@@ -212,6 +211,11 @@ def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
 
+def _status_tone(status: str) -> str:
+    """Working sessions stand out; idle ones stay quiet."""
+    return {"busy": "ok", "shell": "warn"}.get(status, "dim")
+
+
 def _age(seconds: float) -> str:
     mins = int(seconds // 60)
     return f"{mins}m" if mins < 60 else f"{mins // 60}h"
@@ -224,9 +228,10 @@ def _short(email: Optional[str]) -> str:
 class Snapshot:
     def __init__(self) -> None:
         self.accounts: list[core.Account] = []
-        self.projects: list[projects.ProjectActivity] = []
         self.contexts: list[core.Context] = []
         self.context_email: dict[str, str] = {}
+        self.sessions: list[sessions.Session] = []
+        self.pins: dict[str, str] = {}
         self.taken_at: float = 0.0
 
 
@@ -259,7 +264,8 @@ class ManagerApp(rumps.App):
         snap.accounts = [core.load_account(n, force=force) for n in core.account_names()]
         snap.contexts = core.contexts()
         snap.context_email = core.context_owners([c.path for c in snap.contexts], snap.accounts)
-        snap.projects = projects.recent(PROJECT_WINDOW_MIN)
+        snap.sessions = sessions.live(core.credential_dirs(), with_git=True)
+        snap.pins = core.term_pins()
         snap.taken_at = time.time()
         return snap
 
@@ -299,12 +305,13 @@ class ManagerApp(rumps.App):
             self.menu.add(self._account_item(acct, snap))
         self.menu.add(rumps.separator)
 
-        label = f"ACTIVE PROJECTS · last {PROJECT_WINDOW_MIN}m"
-        self.menu.add(rumps.MenuItem(label, callback=None))
-        if not snap.projects:
+        n = len(snap.sessions)
+        self.menu.add(rumps.MenuItem(
+            f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS", callback=None))
+        if not snap.sessions:
             self.menu.add(rumps.MenuItem("  none", callback=None))
-        for proj in snap.projects[:12]:
-            self.menu.add(self._project_item(proj, snap))
+        for sess in snap.sessions[:14]:
+            self.menu.add(self._session_item(sess, snap))
         self.menu.add(rumps.separator)
 
         self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
@@ -393,41 +400,86 @@ class ManagerApp(rumps.App):
         item.add(rumps.MenuItem("Remove account…", callback=self._make_remove(acct.name)))
         return item
 
-    def _project_item(self, proj: projects.ProjectActivity,
-                      snap: Snapshot) -> rumps.MenuItem:
-        email = snap.context_email.get(proj.context.path, "")
+    def _session_item(self, sess: sessions.Session, snap: Snapshot) -> rumps.MenuItem:
+        """One running session, with both ways to move it.
+
+        A login belongs to a config dir, so sessions sharing one always share
+        an account. Pinning gives this session a config dir of its own, which
+        is the only way to move it without taking its neighbours along.
+        """
+        email = snap.context_email.get(sess.env_config_dir, "")
         acct_name = next((a.name for a in snap.accounts
                           if (a.email or "").lower() == email.lower()), _short(email))
-        head = f"  {proj.name} — {acct_name} ({proj.context.name}) · {proj.ago}"
+        pinned = bool(sess.term_id) and sess.term_id in snap.pins
+        ctx = core.Context(name=core._ctx_name(sess.env_config_dir),
+                           path=sess.env_config_dir)
+        head = f"  {sess.label} — {acct_name} · {sess.status or sess.kind}"
         item = rumps.MenuItem(head)
-        # Fixed columns: chip, repo, branch, context, age. The branch is the
-        # part that differs between sibling worktrees, so it gets the emphasis
-        # and the repeated repo name is dimmed.
+        # Fixed columns: pin mark, chip, repo, branch, status, idle age. The
+        # branch is what separates sibling worktrees, so it carries the
+        # emphasis and the repeated repo name is dimmed.
         _apply_style(item, [
-            ("  ", "dim"),
+            ("\u25c9 " if pinned else "  ", "text" if pinned else "dim"),
             _chip(acct_name, NAME_W),
             ("  ", "dim"),
-            # emphasis follows whatever distinguishes the row: sibling
-            # worktrees differ by branch, separate repos differ by name
-            (_fit(proj.repo, REPO_W), "dim" if proj.is_worktree else "text"),
+            (_fit(sess.repo, REPO_W), "dim" if sess.is_worktree else "text"),
             (" ", "dim"),
-            (_fit(proj.detail, DETAIL_W), "text" if proj.is_worktree else "dim"),
-            (f" {proj.context.name:<8}", "dim"),
-            (f"{proj.ago:>9}", "dim"),
+            (_fit(sess.detail or sess.label, DETAIL_W), "text" if sess.is_worktree else "dim"),
+            (f" {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
+            (f"{_age(sess.idle_for):>6}", "dim"),
         ])
-        item.add(rumps.MenuItem(f"{proj.sessions} session(s) · {proj.path}", callback=None))
+
+        where = rumps.MenuItem(sess.cwd.replace(core.HOME, "~") or "?", callback=None)
+        _apply_style(where, [("  ", "dim"), (sess.cwd.replace(core.HOME, "~"), "dim")])
+        item.add(where)
         item.add(rumps.separator)
-        item.add(rumps.MenuItem(f"Switch “{proj.context.name}” to:", callback=None))
+
+        if sess.term_id:
+            item.add(rumps.MenuItem("This session only:", callback=None))
+            for acct in snap.accounts:
+                if not acct.signed_in:
+                    continue
+                same = pinned and (acct.email or "").lower() == email.lower()
+                item.add(rumps.MenuItem(
+                    f"   Pin to {acct.name} ({_pct(acct.session_pct)} 5h)" + ("  \u2713" if same else ""),
+                    callback=None if same else self._make_pin(sess, acct.name)))
+            if pinned:
+                item.add(rumps.MenuItem("   Remove pin", callback=self._make_unpin(sess)))
+            item.add(rumps.separator)
+
+        item.add(rumps.MenuItem(f"Every session on “{ctx.name}”:", callback=None))
         for acct in snap.accounts:
-            if not acct.ok:
+            if not acct.signed_in:
                 continue
             same = (acct.email or "").lower() == email.lower()
             item.add(rumps.MenuItem(
-                f"   {acct.name} ({_pct(acct.session_pct)} 5h)" + ("  ✓" if same else ""),
-                callback=None if same else self._make_swap(acct.name, proj.context)))
+                f"   {acct.name} ({_pct(acct.session_pct)} 5h)" + ("  \u2713" if same else ""),
+                callback=None if same else self._make_swap(acct.name, ctx)))
         item.add(rumps.separator)
-        item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(proj.path)))
+        item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(sess.cwd)))
         return item
+
+    def _make_pin(self, sess: sessions.Session, account: str):
+        def handler(_sender):
+            ok, msg = core.pin(sess.term_id, account, seed_from=sess.env_config_dir)
+            self._notify(f"{sess.label}: {msg}" if ok else msg,
+                         restart=sess.label if ok else "")
+            self.refresh_now(None)
+        return handler
+
+    def _make_unpin(self, sess: sessions.Session):
+        def handler(_sender):
+            ok, msg = core.unpin(sess.term_id)
+            self._notify(msg, restart=sess.label if ok else "")
+            self.refresh_now(None)
+        return handler
+
+    def _notify(self, message: str, restart: str = "") -> None:
+        if restart:
+            message += (f"\n\n{restart} is already running, so it keeps its current "
+                        "account until it restarts. In that terminal: press ctrl+C "
+                        "twice, then run claude -c")
+        rumps.alert(title="Claude Code Manager", message=message, ok="OK")
 
     # ------------------------------------------------------------------ actions
 
