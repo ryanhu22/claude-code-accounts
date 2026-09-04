@@ -38,6 +38,7 @@ SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
 DETAIL_W = 35
+SUB_DETAIL_W = 30          # the same field inside a submenu, which is narrower
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
 PROFILE_W = 16
@@ -618,15 +619,19 @@ def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, st
     answers "what is running HERE", so it drops the account chip, which is
     the thing the reader already knows by being where they are, and keeps
     what tells one session from another.
+
+    It also drops the context bar and the token count, which made this list
+    as wide as the menu it hangs off and forced a submenu to be wider than
+    its parent. Which tab, what it is doing, and whether it is working are
+    what this list is scanned for. The numbers are one hover away, spelled
+    out in full rather than abbreviated to fit a column.
     """
     return [
         ("    ", "dim"),
         (_fit(sess.repo, REPO_W), "dim"),
         (" ", "dim"),
-        (_fit(sess.detail or sess.label, DETAIL_W), "text"),
-        *_context_bar(sess),
-        _spent_cell(sess),
-        ("    " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        (_fit(sess.detail or sess.label, SUB_DETAIL_W), "text"),
+        ("  " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
         (f"{_age(sess.idle_for):>3}", "dim"),
         (f"   {why}" if why else "", "dim"),
     ]
@@ -1572,11 +1577,40 @@ class ManagerApp(rumps.App):
         else:
             self._line(item, f"runhead:{tag}", empty, tone="dim")
         for sess in here:
-            reachable = focus.bundle_for_program(sess.term_program) and sess.tty
-            row = rumps.MenuItem(f"run:{tag}:{sess.pid}",
-                                 callback=self._make_reveal(sess) if reachable else None)
+            reachable = bool(focus.bundle_for_program(sess.term_program) and sess.tty)
+            notes = _usage_notes(sess)
+            # A row with a submenu cannot also be clicked, so the jump to the
+            # tab moves inside the submenu rather than being lost. A session
+            # with nothing to show and nowhere to go stays a plain row.
+            detailed = bool(notes) or reachable
+            row = rumps.MenuItem(
+                f"run:{tag}:{sess.pid}",
+                callback=None)
             _apply_style(row, _session_line(sess))
+            if detailed:
+                self._session_notes(row, sess, notes, reachable, tag)
             item.add(row)
+
+    def _session_notes(self, row: rumps.MenuItem, sess: "sessions.Session",
+                       notes: list, reachable: bool, tag: str) -> None:
+        """What the condensed row leaves out, behind one hover.
+
+        Monospaced, because these are figures in tabular form. The bar is
+        repeated at the top so the hover opens with the same shape the wide
+        row in the main menu shows, and the exact counts follow it.
+        """
+        head = rumps.MenuItem(f"note:{tag}:{sess.pid}:bar", callback=None)
+        _apply_style(head, [("  ", "dim"), *_context_bar(sess), _spent_cell(sess)])
+        row.add(head)
+        for i, line in enumerate(notes):
+            note = rumps.MenuItem(f"note:{tag}:{sess.pid}:{i}", callback=None)
+            _apply_style(note, [("  ", "dim"), (line, "dim")])
+            row.add(note)
+        if reachable:
+            row.add(rumps.separator)
+            go = self._line(row, f"go:{tag}:{sess.pid}", "Take me to that tab",
+                            callback=self._make_reveal(sess))
+            _set_icon(go, "arrow.up.forward.app")
 
     def _scope_rows(self, title: str, scope: str, key: str, snap: Snapshot,
                     current: str, cwd: str, clearable: bool = False) -> list:
