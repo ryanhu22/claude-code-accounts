@@ -37,7 +37,7 @@ SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab
 # title cannot colour the bucket that is nearly spent.
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
-DETAIL_W = 35
+DETAIL_W = 44
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
 PROFILE_W = 16
@@ -64,6 +64,9 @@ def _colors():
         "hot": AppKit.NSColor.systemRedColor(),
         "dim": AppKit.NSColor.secondaryLabelColor(),
         "text": AppKit.NSColor.labelColor(),
+        # Time, kept away from the green/orange/red that all mean "how much of
+        # an allowance is left". A clock is not a quota.
+        "time": AppKit.NSColor.systemBlueColor(),
         # A four step grey ladder, for a column whose value is a magnitude
         # rather than a state. Alpha on labelColor rather than four fixed
         # greys, so it follows the appearance the menu is drawn in. The
@@ -197,6 +200,57 @@ def _compact_reset(iso: Optional[str]) -> str:
     return f"{round(hours / 24)}d"
 
 
+# How long each window runs, so the time already gone can be drawn as a share
+# of it rather than as a bare number the reader has to scale in their head.
+_WINDOW_SECONDS = {"session": 5 * 3600,
+                   "weekly_all": 7 * 86400,
+                   "weekly_scoped": 7 * 86400}
+CLOCK_W = 3                      # cells in the clock track
+
+
+def _elapsed(lim: Optional[core.Limit]) -> Optional[float]:
+    """How far through its window this limit is, nought to a hundred.
+
+    The endpoint sends when a window ends, never when it began, so the start
+    is taken from the length the window is known to run for. That is exact for
+    every window here: five hours, or seven days.
+    """
+    if lim is None or not lim.resets_at:
+        return None
+    span = _WINDOW_SECONDS.get(lim.kind)
+    if not span:
+        return None
+    try:
+        dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    left = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    return max(0.0, min(100.0, (span - left) / span * 100.0))
+
+
+def _clock(lim: Optional[core.Limit]) -> list[tuple[str, str]]:
+    """A track for the window's clock, beside the track for its usage.
+
+    Shading the countdown was not enough to see: four steps of grey on a three
+    character number is a difference you have to look for, and the whole point
+    is not having to. A track has a length, and a length is read without
+    reading. Read against the usage bar to its left it also answers the
+    question neither number does on its own, which is whether the spending is
+    keeping pace with the clock: a fuller clock than bar means the window
+    resets before the allowance runs out.
+
+    Blue, because this is time and everything else in the row is quota. Green
+    and orange already mean "how much is left", and a second meaning for them
+    here would make both mean nothing.
+    """
+    frac = _elapsed(lim)
+    if frac is None:
+        return [(" [", "dim"), (TICK * CLOCK_W, "dim"), ("]", "dim")]
+    filled = max(0, min(CLOCK_W, round(frac / 100 * CLOCK_W)))
+    return [(" [", "dim"), (FILL * filled, "time"),
+            (TICK * (CLOCK_W - filled), "dim"), ("]", "dim")]
+
+
 def _reset_tone(lim: Optional[core.Limit]) -> str:
     """How a countdown is drawn: brightness for how soon, colour for whether
     it blocks you.
@@ -294,10 +348,11 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     # and five accounts stack up as five bars that grow together.
     spent = lim.spent if lim else None
     tone = _tone(spent)
-    # The squares carry the colour and the number stays plain text while the
-    # window is healthy. Green on both put the same signal twice and left the
-    # menu mostly green, so the one figure that mattered had to compete with
-    # it. Warn and hot colour the number too, because then it matters.
+    # The number takes the same colour as its squares. It was left plain until
+    # a window passed 60%, on the argument that green in two places says one
+    # thing twice, but the effect was that the exact figure, which is the one
+    # a reader checks, was the only part of the instrument with nothing to say
+    # about itself. A bar and its number are one reading, so they match.
     # Five cells, not ten. The bar is here to be seen without reading, and the
     # number beside it is the exact figure, so more cells only cost width.
     # The label is right aligned so its padding falls to the left, which puts
@@ -309,9 +364,9 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     # percentage as from the next window's name, so it read as belonging to
     # whichever one the eye reached first. The row is the same width either
     # way; the space just moved to where it separates instead of joins.
-    out = [(f"   {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
+    out = [(f"  {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
            # Four wide, so a full window keeps its gap from the track.
-           ("    —" if spent is None else f"{spent:4.0f}%", _quiet(tone))]
+           ("    —" if spent is None else f"{spent:4.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -319,12 +374,13 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # number is, so a separator is enough.
         when = "" if spent is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
-        # Left aligned in a fixed field, so it hugs the number it belongs to
-        # and the slack falls on the far side, before the next window.
-        out.append((f" {'(' + when + ')':<7}" if when else "        ",
-                    _reset_tone(lim)))
+        # The track first, then the number it stands for. Parentheses used to
+        # hold this apart from the percentage on its left; the track does that
+        # now, so they came off and paid for most of its width.
+        out += _clock(lim)
+        out.append((f"{when:<6}" if when else "      ", _reset_tone(lim)))
     else:
-        out.append(("", "dim"))
+        out.append((" " * (CLOCK_W + 9), "dim"))
     return out
 
 
@@ -365,22 +421,27 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
 # totals here run from about two million to about two billion, so the steps
 # are decades rather than even splits: on a linear scale every session but the
 # heaviest would land in the same band.
-_SPEND_STEPS = ((10e6, "ink1"), (100e6, "ink2"), (1e9, "ink3"))
+_SPEND_STEPS = ((10e6, "ink2"), (100e6, "ink4"), (1e9, "warn"))
 
 
 def _spent_tone(total: int) -> str:
     """How loud a lifetime total is, by how big it is.
 
     One grey for every session made this column unreadable as anything but
-    text: twelve numbers of equal weight, none of which told you which tab has
-    been running all week. Weight by magnitude and the heavy ones surface
-    without a hue, which this column has no claim on. It is history, not a
-    warning, so it never takes a colour.
+    text: twelve numbers of equal weight, none of which said which tab has
+    been running all week. Four steps of grey were a difference you had to
+    look for.
+
+    The ramp is the one the quota bars use, because it measures the same
+    thing. A session that has spent two billion tokens and a window that is
+    nearly full are both answers to "what is eating the allowance", so they
+    are said the same way instead of two ways. Below ten million stays grey:
+    that is a tab someone opened, not a tab that is costing anything.
     """
     for cutoff, tone in _SPEND_STEPS:
         if total < cutoff:
             return tone
-    return "ink4"
+    return "hot"
 
 
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
