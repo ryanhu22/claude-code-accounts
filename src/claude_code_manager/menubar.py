@@ -755,12 +755,12 @@ class ManagerApp(rumps.App):
         the age of the usage are read from the clock at that moment rather
         than from whenever the menu was last built.
         """
-        # The dot means "some rule points here", so it counts every scope.
-        # The text beside it names only the rules that are not already drawn
-        # in the profiles section further down.
+        # The dot means "some rule points here", so it counts every scope. The
+        # text beside it names only the rules drawn nowhere else: the profiles
+        # section below covers both profiles and the default.
         in_use = bool(core.rules_using(acct.name, snap.rules))
         used_by = core.rules_using(acct.name, snap.rules,
-                                   scopes=("default", "project", "session"))
+                                   scopes=("project", "session"))
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
         segments = [
