@@ -120,8 +120,12 @@ def _draw_battery(x: float, cell: Cell, dim: bool) -> None:
         color = color.colorWithAlphaComponent_(0.6)
     num = _text(s, 7.5, AppKit.NSFontWeightBold, color, mono_digits=True)
     size = num.size()
+    # Centre the digits themselves, not their line box: the box carries
+    # descender space no digit uses, which would push the number upward.
+    font = AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(7.5, AppKit.NSFontWeightBold)
+    baseline = y + (BATTERY_H - font.capHeight()) / 2
     num.drawAtPoint_(AppKit.NSMakePoint(x + (BATTERY_W - size.width) / 2,
-                                        y + (BATTERY_H - size.height) / 2 + 0.5))
+                                        baseline - abs(font.descender())))
 
 
 def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
