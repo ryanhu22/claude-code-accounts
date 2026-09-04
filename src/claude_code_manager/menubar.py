@@ -26,6 +26,7 @@ from . import core, focus, gauge, oauth, sessions
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
 SESSION_POLL_SECONDS = 5       # local only: how soon a new session appears
+FLASH_SECONDS = 30             # how long the last rule change stays on screen
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 
@@ -378,6 +379,7 @@ class ManagerApp(rumps.App):
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
+        self._flash: tuple[str, str, float] = ("", "", 0.0)
         self._hide_from_dock()
         self.refresh_now(None)
         rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
@@ -547,6 +549,7 @@ class ManagerApp(rumps.App):
         self._follow_item = rumps.MenuItem("Following", callback=None)
         self._style_follow_row(snap)
         self.menu.add(self._follow_item)
+        self._add_flash()
         self.menu.add(rumps.separator)
 
         self.menu.add(rumps.MenuItem("SUBSCRIPTIONS", callback=None))
@@ -900,12 +903,36 @@ class ManagerApp(rumps.App):
             applied: dict[str, str] = {}
             ok, msg = core.assign(scope, key, account, cwd=cwd,
                                   live=self._snapshot.sessions, applied_out=applied)
-            if ok:
-                self._reflect_rules(applied)
-            self._notify(msg, restart=ok)
-            if ok:
-                self.refresh_now(None)
+            self._did(ok, msg, applied)
         return handler
+
+    def _add_flash(self) -> None:
+        """Show the result of the last rule change, for a short while.
+
+        A rule change used to end in an alert. An alert costs a click, and it
+        hides the menu that already shows the answer. This says the same thing
+        in the place the user is looking, and goes away on its own.
+        """
+        text, tone, at = self._flash
+        if not text or time.time() - at > FLASH_SECONDS:
+            return
+        item = rumps.MenuItem(text, callback=None)
+        _apply_style(item, [("  ", "dim"), (text, tone)])
+        self.menu.add(item)
+
+    def _did(self, ok: bool, message: str, applied: Optional[dict] = None) -> None:
+        """Finish a rule change: redraw now, and say what happened in the menu.
+
+        Only the rules moved, so nothing has to come back from the API before
+        the menu is right. A failure still needs an alert, because the menu the
+        user is about to open would otherwise look exactly as it did before.
+        """
+        self._flash = (message, "ok" if ok else "hot", time.time())
+        if ok:
+            self._reflect_rules(applied)
+        else:
+            self._rebuild()
+            self._notify(message)
 
     def _reflect_rules(self, applied: Optional[dict] = None) -> None:
         """Redraw immediately from the rules, without waiting on the network.
@@ -928,32 +955,28 @@ class ManagerApp(rumps.App):
 
     def _make_clear(self, scope: str, key: str, cwd: str):
         def handler(_sender):
-            ok, msg = core.clear(scope, key, cwd=cwd)
-            if ok:
-                self._reflect_rules()
-            self._notify(msg, restart=ok)
-            if ok:
-                self.refresh_now(None)
+            applied: dict[str, str] = {}
+            ok, msg = core.clear(scope, key, cwd=cwd,
+                                 live=self._snapshot.sessions, applied_out=applied)
+            self._did(ok, msg, applied)
         return handler
 
     def _make_join(self, profile: str, root: str):
         def handler(_sender):
-            ok, msg = core.profile_add_repo(profile, root)
-            if ok:
-                self._reflect_rules()
-            self._notify(msg, restart=ok)
-            if ok:
-                self.refresh_now(None)
+            applied: dict[str, str] = {}
+            ok, msg = core.profile_add_repo(profile, root,
+                                            live=self._snapshot.sessions,
+                                            applied_out=applied)
+            self._did(ok, msg, applied)
         return handler
 
     def _make_leave(self, profile: str, root: str):
         def handler(_sender):
-            ok, msg = core.profile_remove_repo(profile, root)
-            if ok:
-                self._reflect_rules()
-            self._notify(msg, restart=ok)
-            if ok:
-                self.refresh_now(None)
+            applied: dict[str, str] = {}
+            ok, msg = core.profile_remove_repo(profile, root,
+                                               live=self._snapshot.sessions,
+                                               applied_out=applied)
+            self._did(ok, msg, applied)
         return handler
 
     def _make_new_profile(self, root: str = ""):
@@ -966,11 +989,15 @@ class ManagerApp(rumps.App):
             resp = win.run()
             if resp.clicked != 1 or not resp.text.strip():
                 return
-            ok, msg = core.add_profile(resp.text.strip())
+            name = resp.text.strip()
+            applied: dict[str, str] = {}
+            ok, msg = core.add_profile(name)
             if ok and root:
-                core.profile_add_repo(resp.text.strip(), root)
-            self._notify(msg, restart=False)
-            self.refresh_now(None)
+                ok, msg = core.profile_add_repo(name, root,
+                                                live=self._snapshot.sessions,
+                                                applied_out=applied)
+                msg = f"profile “{name}” created, {msg}" if ok else msg
+            self._did(ok, msg, applied)
         return handler
 
     def _make_rename_profile(self, name: str):
@@ -980,8 +1007,7 @@ class ManagerApp(rumps.App):
                                dimensions=(240, 22))
             resp = win.run()
             if resp.clicked == 1 and resp.text.strip():
-                self._notify(core.rename_profile(name, resp.text.strip())[1], restart=False)
-                self.refresh_now(None)
+                self._did(*core.rename_profile(name, resp.text.strip()))
         return handler
 
     def _make_remove_profile(self, name: str):
@@ -991,15 +1017,13 @@ class ManagerApp(rumps.App):
                                    "No session is disturbed.",
                            ok="Remove", cancel="Cancel") != 1:
                 return
-            self._notify(core.remove_profile(name)[1], restart=False)
-            self.refresh_now(None)
+            applied: dict[str, str] = {}
+            ok, msg = core.remove_profile(name, live=self._snapshot.sessions,
+                                          applied_out=applied)
+            self._did(ok, msg, applied)
         return handler
 
-    def _notify(self, message: str, restart: bool = False) -> None:
-        if restart:
-            message += ("\n\nSessions already running keep their account until they "
-                        "restart. In that terminal: press ctrl+C twice, then run "
-                        "claude -c")
+    def _notify(self, message: str) -> None:
         rumps.alert(title="Claude Code Manager", message=message, ok="OK")
 
     # ------------------------------------------------------------------ actions
@@ -1030,7 +1054,7 @@ class ManagerApp(rumps.App):
     def _make_recolor(self, account: str, index: int):
         def handler(_sender):
             core.set_chip_index(account, index)
-            self.refresh_now(None)
+            self._rebuild()          # a colour is local; nothing to ask the API
         return handler
 
     def _make_remove(self, account: str):
