@@ -575,7 +575,9 @@ class ManagerApp(rumps.App):
         segments += _bucket(fable.label if fable else "model", fable)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
-        if acct.error:
+        if acct.mismatch:
+            segments.append((f"   {acct.mismatch}", "hot"))
+        elif acct.error:
             segments.append((f"   {acct.error}", "dim"))
         elif acct.stale:
             segments.append((f"   {_age(acct.usage_age)} old", "dim"))
@@ -614,6 +616,15 @@ class ManagerApp(rumps.App):
             callback=self._make_poke(acct.name)))
         item.add(rumps.separator)
 
+        # Signing in again is always a reasonable thing to want, and when a
+        # directory is holding the wrong account it is the only way out — so it
+        # cannot live only on rows that already look broken.
+        if acct.mismatch:
+            note = rumps.MenuItem(f"This is not {acct.name}: {acct.mismatch}", callback=None)
+            _apply_style(note, [("  ", "dim"), (f"This is not {acct.name}. "
+                                                f"Sign in again to fix it.", "hot")])
+            item.add(note)
+        item.add(self._browser_menu("Sign in again", acct.name))
         item.add(rumps.MenuItem("Rename…", callback=self._make_rename(acct.name)))
         palette = rumps.MenuItem("Colour")
         current = core.chip_index(acct.name, len(CHIP_COLORS))
