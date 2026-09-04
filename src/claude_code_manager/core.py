@@ -23,7 +23,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from . import keychain, locks, profiles, sessions
+from . import keychain, locks, oauth, profiles, sessions
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
@@ -330,6 +330,7 @@ def profile_result(token: Optional[str]) -> tuple[dict, Optional[str]]:
     if not label:
         label = "Max" if account.get("has_claude_max") else "Pro" if account.get("has_claude_pro") else ""
     return {"email": account.get("email"), "plan": label or None,
+            "tier": tier or None,          # raw, for writing a credential
             "extra_usage": org.get("has_extra_usage_enabled")}, None
 
 
@@ -614,13 +615,19 @@ def adopt(config_dir: str, blob: dict) -> bool:
         return False
 
 
+# Verdicts that mean the login itself is gone, rather than unreachable. Claude
+# Code empties the token fields in place when it finds a login it cannot use,
+# so a credential record can still exist with nothing usable inside it.
+GONE = ("no_credential", "rejected", "no_token", "no_refresh_token")
+
+
 def load_account(name: str, with_usage: bool = True, force: bool = False) -> Account:
     slot = slot_dir(name)
     acct = Account(name=name, slot=slot, checked_at=time.time())
     blob = live_blob(slot)
     info, err = identity(slot, blob)
     email = info.get("email")
-    if not email and err in ("no_credential", "rejected"):
+    if not email and err in GONE:
         # Positively refused, so this slot is stranded rather than signed out:
         # the live successor is sitting in whichever dir did the rotating.
         healed = find_live_blob(recorded_email(slot))
@@ -631,10 +638,11 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
             email = info.get("email") or recorded_email(slot)
     if not email:
         raw = keychain.read_credentials(slot)
-        # "expired" is a claim about the login and needs the server to have
-        # said so. A rate limit or a dead network proves nothing about it.
+        # "expired" is a claim about the login and needs evidence: the server
+        # refusing the token, or there being no token left to send. A rate
+        # limit or a dead network proves nothing about it.
         acct.error = ("not signed in" if not raw
-                      else "login expired" if err in ("rejected", "no_credential")
+                      else "login expired" if err in GONE
                       else "can't reach Anthropic")
         return acct
     acct.email = email
@@ -746,6 +754,55 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     except (OSError, ValueError):
         pass
     return True, f"{old} is now {new}"
+
+
+def sign_in_begin(name: str) -> oauth.Attempt:
+    """Start signing an account in. Returns the attempt to hand back later."""
+    return oauth.begin(name)
+
+
+def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
+    """Exchange a pasted code and store the credential for that account.
+
+    Written only after the API has confirmed the identity and the plan. A
+    credential that cannot report its own plan opens sessions as API billing,
+    so it is refused rather than saved: a login that half works is harder to
+    diagnose than one that never happened.
+    """
+    def post(body: dict) -> dict:
+        last: Exception = RuntimeError("no token endpoint answered")
+        for url in TOKEN_URLS:
+            try:
+                return _post(url, body, timeout=30)
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = json.loads(e.read()).get("error_description") or ""
+                except Exception:
+                    pass
+                last = RuntimeError(detail or f"HTTP {e.code}")
+            except Exception as e:
+                last = e
+        raise last
+
+    blob, result = oauth.finish(attempt, pasted, post, profile_result)
+    if not blob:
+        return False, result
+    email, slot = result, ensure_account_dir(attempt.account)
+    before = recorded_email(slot) or ""
+    if not adopt(slot, blob):
+        return False, "signed in, but the keychain refused to store it"
+    _cache_write({**_cache_read(IDENTITY_CACHE),
+                  os.path.abspath(slot): {"fp": fingerprint(blob), "email": email,
+                                          "plan": profile_result(blob["accessToken"])[0].get("plan"),
+                                          "at": time.time()}}, IDENTITY_CACHE)
+    if before and before.lower() != email.lower():
+        # The browser signs in as whoever it was already logged into, which is
+        # how an account once ended up holding another one's token.
+        return True, (f"“{attempt.account}” is now signed in as {email}, but it "
+                      f"used to be {before}. If that is wrong, sign in again in a "
+                      f"private window.")
+    return True, f"“{attempt.account}” is signed in as {email}"
 
 
 def add_account_command(name: str) -> str:

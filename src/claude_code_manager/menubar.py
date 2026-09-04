@@ -21,7 +21,7 @@ from typing import Optional
 
 import rumps
 
-from . import core, focus, gauge, sessions
+from . import core, focus, gauge, oauth, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 ICON = "⇄"
@@ -522,8 +522,8 @@ class ManagerApp(rumps.App):
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
             _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
                                 (f"  {acct.error}", "hot")])
-            again = "Sign in again…" if acct.error == "login expired" else "Sign in…"
-            item.add(rumps.MenuItem(again, callback=self._make_add(acct.name)))
+            again = "Sign in again" if acct.error == "login expired" else "Sign in"
+            item.add(self._browser_menu(again, acct.name))
             return item
         used_by = core.rules_using(acct.name, snap.rules)
         in_use = bool(used_by)
@@ -883,6 +883,44 @@ class ManagerApp(rumps.App):
             self._add_account(None, preset=name)
         return handler
 
+    def _browser_menu(self, title: str, name: str) -> rumps.MenuItem:
+        """Pick the browser to sign in with.
+
+        Which browser matters: it signs in as whoever that browser is already
+        logged into, and with several subscriptions that is exactly how the
+        wrong account gets attached to a name.
+        """
+        menu = rumps.MenuItem(title)
+        for label, app in oauth.installed_browsers():
+            menu.add(rumps.MenuItem(label, callback=self._make_sign_in(name, app)))
+        return menu
+
+    def _make_sign_in(self, name: str, app: str):
+        def handler(_sender):
+            self._sign_in(name, app)
+        return handler
+
+    def _sign_in(self, name: str, app: str = "") -> None:
+        """Open the sign-in page, then take the code the callback shows back."""
+        attempt = core.sign_in_begin(name)
+        err = oauth.open_in(attempt.url, app)
+        if err:
+            self._notify(f"Could not open a browser: {err}")
+            return
+        win = rumps.Window(
+            title=f"Signing in as “{name}”",
+            message=("Sign in in the browser, then copy the code it shows and "
+                     "paste it here.\n\nIf the browser was already signed in as "
+                     "someone else, that is the account you will get."),
+            ok="Sign in", cancel="Cancel", dimensions=(300, 22))
+        resp = win.run()
+        if resp.clicked != 1 or not resp.text.strip():
+            return
+        ok, msg = core.sign_in_finish(attempt, resp.text)
+        self._notify(msg)
+        if ok:
+            self.refresh_now(None)
+
     def _add_account(self, _sender, preset: str = "") -> None:
         """Open Claude Code in an account's own directory so /login can run.
 
@@ -906,18 +944,7 @@ class ManagerApp(rumps.App):
         name = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
         if not name:
             return
-        self._sign_in(name)
-
-    def _sign_in(self, name: str) -> None:
-        slot = core.ensure_account_dir(name)
-        # `command claude` on purpose: the shell wrapper would pick a directory
-        # from the rules and sign this account into somebody else's.
-        err = _run_in_terminal(
-            f"echo 'Type /login, sign in as {name}, then /exit'; "
-            f"CLAUDE_CONFIG_DIR={_sh_quote(slot)} command claude")
-        if err:
-            self._notify(f"Could not open Terminal: {err}\n\n"
-                         f"Run this yourself instead:\n\nccadd {name}")
+        self._sign_in(name)   # default browser; per-browser entries live on the row
 
     @staticmethod
     def _make_open(path: str):
