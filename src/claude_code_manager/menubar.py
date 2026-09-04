@@ -332,9 +332,12 @@ SPEC_NOTE_X = 180.0            # where anything after them starts
 
 
 SPEC_TABS = (("r", SPEC_FIGURE_X), ("l", SPEC_NOTE_X))
-# The account picker: a chip, then its five hour figure right aligned far
-# enough out that the longest account name clears it.
-PICK_TABS = (("r", 150.0),)
+# The account picker: a chip, then a label and a figure for each of the three
+# windows. Measured, not guessed: the widest chip is 81 points, a label runs to
+# 30 for "fable", and a figure to 37 for "100%".
+PICK_TABS = (("l", 112.0), ("r", 160.0),
+             ("l", 176.0), ("r", 224.0),
+             ("l", 240.0), ("r", 302.0))
 
 
 def _spec_line(label: str, figure: str, tone: str = "text", after=()):
@@ -506,6 +509,29 @@ def _quiet(tone: str) -> str:
     image keeps its green, because a battery there has no text beside it.
     """
     return "text" if tone == "ok" else tone
+
+
+def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
+    """Every window an account has, as label and figure pairs on tab stops.
+
+    Same three, same order and same colours as the row in the subscriptions
+    section, so a reader choosing an account here is comparing the numbers
+    they already know rather than a second set that happens to agree.
+    """
+    out: list[tuple[str, str, str]] = []
+    for kind in ("session", "weekly_all"):
+        lim = acct.limit(kind)
+        out += _window_cell(lim.label if lim else kind, lim)
+    scoped = next((l for l in acct.limits
+                   if l.kind not in ("session", "weekly_all")), None)
+    out += _window_cell(scoped.label if scoped else "fable", scoped)
+    return out
+
+
+def _window_cell(label: str, lim) -> list[tuple[str, str, str]]:
+    spent = lim.spent if lim else None
+    return [(f"\t{label}", "dim", "ui"),
+            (f"\t{_pct(spent)}", _tone(spent), "fig")]
 
 
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
@@ -1814,13 +1840,12 @@ class ManagerApp(rumps.App):
             entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
                                    callback=None if same else
                                    self._make_assign(scope, key, acct.name, cwd))
-            # The chip in its own colour, the figure on a tab stop. Padding
-            # the name to a width only lined these up while every glyph
-            # was the same size, which is what forced the fixed pitch face
-            # on a list that is five proper nouns and five percentages.
-            _apply_style(entry, [*_chip(acct.name),
-                                 (f"\t{_pct(acct.session_pct)}",
-                                  _tone(acct.session_pct), "fig")],
+            # All three windows, not only the five hour one. Picking a
+            # subscription for a session is the decision this list exists to
+            # serve, and one number out of three cannot settle it: an account
+            # at 5% of its five hours can still be the wrong choice if its
+            # week is nearly gone.
+            _apply_style(entry, [*_chip(acct.name), *_windows(acct)],
                          mono=False, tabs=PICK_TABS)
             # A real tick, in the gutter macOS ticks every other menu in. It
             # used to be a check character in front of the chip, which moved
