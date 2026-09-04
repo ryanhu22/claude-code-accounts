@@ -17,6 +17,8 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -33,17 +35,48 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_URLS = ("https://platform.claude.com/v1/oauth/token",
               "https://console.anthropic.com/v1/oauth/token")
 API = "https://api.anthropic.com"
-UA = "claude-cli/2.1.236 (external, cli)"
-OAUTH_HEADERS = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": UA}
+# The server gates new models on the Claude Code version the client claims, so
+# a number pinned here goes stale and starts refusing models the installed CLI
+# can use. Ask the CLI instead, and keep a recent one for when it cannot be
+# found. Seen as: "Claude Code 2.1.236 does not support this model; version
+# 2.1.251 or newer is required."
+UA_FALLBACK_VERSION = "2.1.261"
 ANTHROPIC_VERSION = "2023-06-01"
+# Poking sends one request per window that has no clock. The five hour and the
+# general weekly window start on any request; the Fable weekly window is scoped
+# to that model and only starts on a request to it.
 POKE_MODEL = "claude-haiku-4-5-20251001"
+POKE_MODEL_SCOPED = {"fable": "claude-fable-5-1"}
+
+_UA: Optional[str] = None
+
+
+def user_agent() -> str:
+    """What to call ourselves, at the version of the CLI that is installed."""
+    global _UA
+    if _UA is None:
+        version = UA_FALLBACK_VERSION
+        try:
+            out = subprocess.run(["claude", "--version"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            found = re.search(r"(\d+\.\d+\.\d+)", out)
+            if found:
+                version = found.group(1)
+        except Exception:
+            pass          # not on PATH, or slow to answer: the fallback is fine
+        _UA = f"claude-cli/{version} (external, cli)"
+    return _UA
+
+
+def oauth_headers() -> dict:
+    return {"anthropic-beta": "oauth-2025-04-20", "User-Agent": user_agent()}
 
 
 # --------------------------------------------------------------------------- http
 
 def _post(url: str, body: dict, token: Optional[str] = None, timeout: int = 30,
           extra_headers: Optional[dict] = None) -> dict:
-    headers = {"Content-Type": "application/json", **OAUTH_HEADERS, **(extra_headers or {})}
+    headers = {"Content-Type": "application/json", **oauth_headers(), **(extra_headers or {})}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
@@ -53,7 +86,7 @@ def _post(url: str, body: dict, token: Optional[str] = None, timeout: int = 30,
 
 def _get(path: str, token: str, timeout: int = 20) -> dict:
     req = urllib.request.Request(API + path, headers={
-        "Authorization": f"Bearer {token}", **OAUTH_HEADERS})
+        "Authorization": f"Bearer {token}", **oauth_headers()})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
@@ -1011,12 +1044,32 @@ def remove_account(name: str) -> bool:
     return ok
 
 
-def poke(name: str) -> tuple[bool, str]:  # noqa: D401
-    """Spend one token on an account to start its 5-hour window.
+def _one_poke(blob: dict, model: str) -> None:
+    """One minimal request, which is all it takes to start a window."""
+    _post(f"{API}/v1/messages", {
+        "model": model,
+        "max_tokens": 1,
+        "system": [{"type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
+        "messages": [{"role": "user", "content": "hi"}],
+    }, token=blob["accessToken"], timeout=45,
+        # The Messages API rejects a request without it; the OAuth
+        # endpoints do not use it, which is why it is not in oauth_headers().
+        extra_headers={"anthropic-version": ANTHROPIC_VERSION})
 
-    A freshly reset account sits at 0% with no window running, so the countdown
-    only starts on first use. This starts it deliberately, for about 22 input
-    tokens, so the window is aligned with when you want it.
+
+def poke(name: str) -> tuple[bool, str]:  # noqa: D401
+    """Spend a few tokens on an account to start every window that has no clock.
+
+    A freshly reset account sits at 0% with no window running, so a countdown
+    only starts on first use. This starts them deliberately, for about 22 input
+    tokens each, so the windows are aligned with when you want them.
+
+    There is more than one clock. The five hour window and the general weekly
+    window start on any request. A model-scoped weekly window, which is what
+    the Fable row is, only starts on a request to that model, so starting the
+    others left it reading "unused" and the account looked half awake. Each
+    window that still has no reset time gets the request that starts it.
     """
     try:
         name = resolve_account(name)
@@ -1025,22 +1078,45 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     blob = live_blob(slot_dir(name))
     if not blob:
         return False, "not signed in"
-    try:
-        _post(f"{API}/v1/messages", {
-            "model": POKE_MODEL,
-            "max_tokens": 1,
-            "system": [{"type": "text",
-                        "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
-            "messages": [{"role": "user", "content": "hi"}],
-        }, token=blob["accessToken"], timeout=45,
-            # The Messages API rejects a request without it; the OAuth
-            # endpoints do not use it, which is why it is not in OAUTH_HEADERS.
-            extra_headers={"anthropic-version": ANTHROPIC_VERSION})
-        return True, "window started"
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}"
-    except Exception as e:
-        return False, str(e)[:80]
+
+    # Which windows are stopped, and the cheapest set of models that starts
+    # them. A scoped window needs its own model; everything else rides along
+    # with any request, so the general model is only sent when it is the only
+    # thing that would start a window.
+    limits, _, _ = _usage(name, blob["accessToken"], force=True)
+    stopped = [lim for lim in limits if not lim.resets_at]
+    if limits and not stopped:
+        return True, "every window is already running"
+    # A request to a scoped model starts that window AND the general ones, so
+    # when a scoped window is stopped its own model is the whole job. The
+    # general model is only needed when nothing scoped is going out.
+    models: list[str] = []
+    for lim in stopped:
+        model = POKE_MODEL_SCOPED.get(lim.label)
+        if model and model not in models:
+            models.append(model)
+    if not models:
+        models = [POKE_MODEL]
+
+    started, failed = [], []
+    for model in models:
+        try:
+            _one_poke(blob, model)
+            started.append(model)
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = json.loads(e.read().decode()).get("error", {}).get("message", "")
+            except Exception:
+                pass
+            failed.append(f"{model}: {detail or f'HTTP {e.code}'}")
+        except Exception as e:
+            failed.append(f"{model}: {str(e)[:60]}")
+    if failed and not started:
+        return False, "; ".join(failed)
+    if failed:
+        return False, f"started {len(started)} of {len(models)}. {'; '.join(failed)}"
+    return True, f"{len(started)} window group(s) started"
 
 
 # --------------------------------------------------------------------------- contexts
