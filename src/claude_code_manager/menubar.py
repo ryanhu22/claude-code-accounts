@@ -200,6 +200,24 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     return "hot"
 
 
+def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
+    """A bar in a bracketed track, so the empty part is visible.
+
+    Blank space alone left no way to see how much room was left, and ░ at this
+    size draws as static. Brackets give the bar its extent in two characters
+    and keep the inside clean.
+
+    The fill keeps its real colour, green included. Green on a bar reads as a
+    quantity, which is what it is. Green on a number read as an alarm that
+    never fired, which is why the numbers stay plain until they should not.
+    """
+    if pct is None:
+        return [("[", "dim"), ("\u2014".center(cells), "dim"), ("]", "dim")]
+    filled = max(0, min(cells, round(pct / 100 * cells)))
+    return [("[", "dim"), (FULL * filled, _tone(pct)),
+            (" " * (cells - filled), "dim"), ("]", "dim")]
+
+
 def _quiet(tone: str) -> str:
     """Let a healthy value be plain text.
 
@@ -221,18 +239,10 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     """
     pct = lim.spent if lim else None
     tone = _quiet(_tone(pct))
-    if pct is None:
-        out = [(f" {label:<5} ", "dim"), (" " * BAR_W, "dim"), ("   —", tone)]
-    else:
-        # Five cells, not ten. The bar is here to be seen at a glance, and the
-        # number beside it is the precise reading, so more cells only cost
-        # width. Blank for the unfilled part, and a dim fill while the bucket
-        # is healthy, so the row stays quiet until it should not be.
-        filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
-        out = [(f" {label:<5} ", "dim"),
-               (FULL * filled, "dim" if tone == "text" else tone),
-               (" " * (BAR_W - filled), "dim"),
-               (f"{pct:3.0f}%", tone)]
+    # Five cells, not ten. The bar is here to be seen without reading, and the
+    # number beside it is the exact figure, so more cells only cost width.
+    out = [(f" {label:<5} ", "dim"), *_gauge(pct, BAR_W),
+           ("   —" if pct is None else f"{pct:3.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -267,23 +277,13 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
     long conversation actually raises: is this one about to compact?
     """
     pct = sess.context_pct
+    # A session that has just restarted has not been found in the transcripts
+    # yet. A dash inside the track reads as "not known", which is what it is,
+    # and it fills in on the next pass.
     if pct is None:
-        # A session that has just restarted has not been found in the
-        # transcripts yet. Blank space reads as a fault; a dash reads as
-        # "not known", which is what it is, and it fills in on the next pass.
-        return [("  ctx ", "dim"),
-                (("\u2014").center(CTX_BAR_W) + "    ", "dim")]
-    filled = max(0, min(CTX_BAR_W, round(pct / 100 * CTX_BAR_W)))
-    tone = _quiet(_tone(pct))
-    # The unfilled cells were drawn with ░, which at this size reads as static
-    # and fights the filled half for attention. The column is a fixed width, so
-    # blank space says "the rest" without drawing anything.
-    #
-    # A healthy bar fills dim rather than in the text colour. Solid black is
-    # the heaviest mark on the row, and a bar that says "there is room" should
-    # not outweigh one that says "there is not".
-    return [("  ctx ", "dim"), (FULL * filled, "dim" if tone == "text" else tone),
-            (" " * (CTX_BAR_W - filled), "dim"), (f"{pct:3.0f}%", tone)]
+        return [("  ctx ", "dim"), *_gauge(None, CTX_BAR_W), ("    ", "dim")]
+    return [("  ctx ", "dim"), *_gauge(pct, CTX_BAR_W),
+            (f"{pct:3.0f}%", _quiet(_tone(pct)))]
 
 
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
