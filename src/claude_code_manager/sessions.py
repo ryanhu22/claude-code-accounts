@@ -42,6 +42,8 @@ class Session:
     started_at: float = 0.0
     updated_at: float = 0.0
     term_id: str = ""            # terminal tab, from the process environment
+    term_program: str = ""       # TERM_PROGRAM: which terminal app hosts it
+    tty: str = ""                # controlling terminal, e.g. ttys003
     env_config_dir: str = ""     # CLAUDE_CONFIG_DIR the process actually launched with
     name_source: str = ""        # "user" when named deliberately, else "derived"
     branch: str = ""
@@ -127,24 +129,33 @@ def alive(pid: int) -> bool:
     return True
 
 
-def _environ(pid: int) -> dict[str, str]:
-    """The environment a running process was started with.
+def _environ(pid: int) -> tuple[dict[str, str], str]:
+    """The environment a running process was started with, and its tty.
 
-    `ps eww` prints it for our own processes, which is every Claude Code
+    `ps eww` prints both for our own processes, which is every Claude Code
     session we care about. Values are space separated, so a value containing a
-    space is truncated; the two keys read here never contain one.
+    space is truncated; the keys read here never contain one. The tty is the
+    second column of the process line; a process with no terminal shows `??`.
     """
     try:
         out = subprocess.run(["ps", "eww", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return {}, ""
+    lines = out.splitlines()
+    tty = ""
+    if len(lines) > 1:
+        cols = lines[1].split()
+        if len(cols) > 1 and cols[1] != "??":
+            # ps abbreviates `ttys013` to `s013`; the terminal's own report
+            # of a tab's tty is the long form, so keep that form here.
+            tty = cols[1] if cols[1].startswith("tty") else "tty" + cols[1]
     env = {}
     for word in out.split():
         key, sep, val = word.partition("=")
         if sep and key.isupper() and key.replace("_", "").isalnum():
             env[key] = val
-    return env
+    return env, tty
 
 
 def _read(path: str, config_dir: str) -> Optional[Session]:
@@ -209,8 +220,9 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
     out = list(found.values())
     if with_env:
         for s in out:
-            env = _environ(s.pid)
+            env, s.tty = _environ(s.pid)
             s.term_id = env.get("TERM_SESSION_ID", "")
+            s.term_program = env.get("TERM_PROGRAM", "")
             s.env_config_dir = env.get("CLAUDE_CONFIG_DIR", "") or s.config_dir
     if with_git:
         for s in out:
