@@ -329,6 +329,36 @@ def _session_segments(sess: "sessions.Session", running_on: str,
     ]
 
 
+def _reason(snap: "Snapshot", sess: "sessions.Session") -> str:
+    """Which rule decides this session's account, read from the snapshot.
+
+    core.resolve reloads the rules from disk on every call, and the menu asks
+    once per session while it draws. The snapshot already holds them.
+    """
+    return snap.rules.account_for(
+        (os.path.abspath(sess.cwd), core.project_root(sess.cwd)), sess.term_id)[1]
+
+
+def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, str]]:
+    """A session, seen from an account or a profile rather than on its own.
+
+    The wide row at the top of the menu answers "what is running". This
+    answers "what is running HERE", so it drops the account chip, which is
+    the thing the reader already knows by being where they are, and keeps
+    what tells one session from another.
+    """
+    return [
+        ("    ", "dim"),
+        (_fit(sess.repo, REPO_W), "dim"),
+        (" ", "dim"),
+        (_fit(sess.detail or sess.label, DETAIL_W), "text"),
+        *_context_bar(sess),
+        (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
+        (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
+        (f"   {why}" if why else "", "dim"),
+    ]
+
+
 def _why(reason: str) -> str:
     """Turn a resolution reason into something a person reads."""
     if reason.startswith("profile:"):
@@ -882,6 +912,12 @@ class ManagerApp(rumps.App):
             item.add(plan_item)
         item.add(rumps.separator)
 
+        self._running_block(
+            item, [s for s in snap.sessions
+                   if snap.running_on.get(s.env_config_dir) == acct.name],
+            "No sessions are running on this account", f"acct:{acct.name}")
+        item.add(rumps.separator)
+
         # An account row is the place to hand it whole groups at once. Inline,
         # for the same reason the scope pickers are: the list is short and a
         # submenu would put it one hover away for nothing.
@@ -942,7 +978,8 @@ class ManagerApp(rumps.App):
         r = snap.rules
         running_on = snap.running_on.get(sess.env_config_dir, "")
         root = core.project_root(sess.cwd)
-        wanted, reason = core.resolve(sess.cwd, sess.term_id)
+        wanted, reason = r.account_for(
+            (os.path.abspath(sess.cwd), root), sess.term_id)
         ruled = bool(sess.term_id) and sess.term_id in r.sessions
         prof = r.profile_for(root)
         head = f"  {sess.label} — {running_on or '?'} · {sess.status or sess.kind}"
@@ -971,6 +1008,16 @@ class ManagerApp(rumps.App):
                 item.add(rumps.MenuItem("Take me to that tab",
                                         callback=self._make_reveal(sess)))
             item.add(rumps.separator)   # only when there is something above it
+        elif running_on:
+            # Which account, and which rule chose it. The row shows the account
+            # as a chip; the rule behind it was only ever said when it was
+            # being disobeyed, so the answer to "why is this one here" was
+            # missing exactly when nothing was wrong.
+            line = f"Spending {running_on}, by {_why(reason)}"
+            d = rumps.MenuItem(f"why:{sess.pid}", callback=None)
+            _apply_style(d, [("  ", "dim"), (line, "dim")])
+            item.add(d)
+            item.add(rumps.separator)
 
         if sess.term_id:
             self._add_scope(item, "Use for this session", "session", sess.term_id,
@@ -1025,6 +1072,11 @@ class ManagerApp(rumps.App):
                         "profile", prof.name, snap, current=prof.account, cwd="")
         item.add(rumps.separator)
 
+        self._running_block(
+            item, [s for s in snap.sessions if prof.covers(core.project_root(s.cwd))],
+            "No sessions are running in these projects", f"prof:{prof.name}")
+        item.add(rumps.separator)
+
         # The projects in the profile are shown, not offered: clicking one had
         # to open a submenu holding a single "remove" item, which is a hover
         # spent on a menu that was never a choice. Removal is its own list.
@@ -1070,8 +1122,7 @@ class ManagerApp(rumps.App):
     def _default_item(self, snap: Snapshot) -> rumps.MenuItem:
         """Where anything with no rule goes."""
         name = snap.rules.default_account
-        loose = sum(1 for s in snap.sessions
-                    if core.resolve(s.cwd, s.term_id)[1] == "default")
+        loose = sum(1 for s in snap.sessions if _reason(snap, s) == "default")
         item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
         _apply_style(item, [
             ("  ", "dim"),
@@ -1080,9 +1131,34 @@ class ManagerApp(rumps.App):
             _chip(name, NAME_W) if name else (f"{'not set':<{NAME_W}}", "hot"),
             (f"   {loose} running" if loose else "", "dim"),
         ])
+        self._running_block(
+            item, [s for s in snap.sessions
+                   if _reason(snap, s) == "default"],
+            "No sessions are running without a rule", "default")
+        item.add(rumps.separator)
         self._add_scope(item, "Use for every project with no rule",
                         "default", "", snap, current=name, cwd="")
         return item
+
+    def _running_block(self, item: rumps.MenuItem, here: list, empty: str,
+                       tag: str) -> None:
+        """The sessions running on whatever this menu is about.
+
+        A subscription row says how much of a window is gone; a profile row
+        says how many projects it covers. Neither says who is spending it,
+        which is the question those numbers raise. Each line opens the tab it
+        names, so the account at 95% is one click from the terminal burning it.
+        """
+        head = rumps.MenuItem(f"runhead:{tag}", callback=None)
+        _apply_style(head, [("  ", "dim"),
+                            (f"Running now · {len(here)}" if here else empty, "dim")])
+        item.add(head)
+        for sess in here:
+            reachable = focus.bundle_for_program(sess.term_program) and sess.tty
+            row = rumps.MenuItem(f"run:{tag}:{sess.pid}",
+                                 callback=self._make_reveal(sess) if reachable else None)
+            _apply_style(row, _session_line(sess))
+            item.add(row)
 
     def _scope_rows(self, title: str, scope: str, key: str, snap: Snapshot,
                     current: str, cwd: str, clearable: bool = False) -> list:

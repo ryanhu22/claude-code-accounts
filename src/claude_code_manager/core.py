@@ -1433,7 +1433,10 @@ def rules_using(account: str, r: Optional[profiles.Rules] = None,
     if "session" in want:
         n = sum(1 for v in r.sessions.values() if v == account)
         if n:
-            out.append(f"{n} session{'s' if n != 1 else ''}")
+            # "session" on its own means a Claude Code session that is running.
+            # These are rules pinning one, which is a different thing and has
+            # to read as a different thing next to "Running now".
+            out.append(f"{n} session rule{'s' if n != 1 else ''}")
     return out
 
 
