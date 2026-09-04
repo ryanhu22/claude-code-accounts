@@ -188,15 +188,23 @@ def _icon_run(name: str, size: float = 12.0):
     return AppKit.NSAttributedString.attributedStringWithAttachment_(att)
 
 
-def _styled(segments, size: float = 12.0):
+def _styled(segments, size: float = 12.0, mono: bool = True):
     """Build an NSAttributedString from runs.
 
     A run is (text, tone) or (text, tone, chip_key); with a chip key the run is
     drawn on a filled background in that account's colour.
+
+    Two fonts, chosen by what the row is. A row of columns needs every glyph
+    the same width or the columns are not columns, so data is monospaced. A
+    row you click is a sentence, not a table, and monospacing one makes it look
+    like output rather than like a command: this menu had "Rename" and "Remove
+    account" set in the same face as a token count. Those use the font macOS
+    sets every other menu in.
     """
     import AppKit
     colors = _colors()
-    font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
+    font = (AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
+            if mono else AppKit.NSFont.menuFontOfSize_(0))
     out = AppKit.NSMutableAttributedString.alloc().init()
     for run in segments:
         text, tone = run[0], run[1]
@@ -262,10 +270,10 @@ def _set_icon(item: "rumps.MenuItem", name: str) -> None:
         item._menuitem.setImage_(img)
 
 
-def _apply_style(item: "rumps.MenuItem", segments) -> None:
+def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
-        item._menuitem.setAttributedTitle_(_styled(segments))
+        item._menuitem.setAttributedTitle_(_styled(segments, mono=mono))
     except Exception:
         pass
 
@@ -1241,9 +1249,16 @@ class ManagerApp(rumps.App):
 
         # The row already carries every bucket, so the submenu is for identity
         # and actions rather than a second copy of the usage.
+        # The slot name first, in its own colour. This menu opens off a row
+        # that is identified by that name and by that colour, and the title
+        # named only the email, so the one thing tying the two together was
+        # which row the pointer happened to be on. Five accounts and four
+        # gmail addresses made that a real question.
         who = rumps.MenuItem(f"who:{acct.name}", callback=None)
-        _apply_style(who, [("  ", "dim"), (acct.email or "unknown account", "text"),
-                           (f"   {acct.plan}" if acct.plan else "", "dim")])
+        _apply_style(who, [("  ", "dim"), *_chip(acct.name),
+                           ("   ", "dim"), (acct.email or "unknown account", "text"),
+                           (f"   {acct.plan}" if acct.plan else "", "dim")],
+                     mono=False)
         item.add(who)
         item.add(rumps.separator)
 
@@ -1270,10 +1285,10 @@ class ManagerApp(rumps.App):
         stopped = [lim for lim in acct.limits if not lim.resets_at]
         if acct.reading and stopped:
             names = ", ".join(lim.label for lim in stopped)
-            self._line(item, f"poke:{acct.name}",
-                       f"Start the {names} window now" if len(stopped) == 1
-                       else f"Start the {names} windows now",
-                       callback=self._make_poke(acct.name))
+            _set_icon(self._line(item, f"poke:{acct.name}",
+                                 f"Start the {names} window now" if len(stopped) == 1
+                                 else f"Start the {names} windows now",
+                                 callback=self._make_poke(acct.name)), "clock.arrow.circlepath")
             item.add(rumps.separator)
 
         # Signing in again is always a reasonable thing to want, and when a
@@ -1282,16 +1297,24 @@ class ManagerApp(rumps.App):
         if acct.mismatch:
             note = rumps.MenuItem(f"This is not {acct.name}: {acct.mismatch}", callback=None)
             _apply_style(note, [("  ", "dim"), (f"This is not {acct.name}. "
-                                                f"Sign in again to fix it.", "hot")])
+                                                f"Sign in again to fix it.", "hot")],
+                         mono=False)
+            _set_icon(note, "exclamationmark.triangle")
             item.add(note)
         self._signing_row(item, acct.name)
+        # Icons on every row of this run and on none above it. macOS reserves
+        # the image gutter for a whole run, so a run that is part icons and
+        # part not indents itself unevenly, and the session table above must
+        # keep the left edge it shares with the menu it opened from.
         signin = self._browser_menu("Sign in again", acct.name)
-        _apply_style(signin, [("  ", "dim"), ("Sign in again", "text")])
+        _apply_style(signin, [("  ", "dim"), ("Sign in again", "text")], mono=False)
+        _set_icon(signin, "person.crop.circle.badge.checkmark")
         item.add(signin)
-        self._line(item, f"rename:{acct.name}", "Rename\u2026",
-                   callback=self._make_rename(acct.name))
+        _set_icon(self._line(item, f"rename:{acct.name}", "Rename\u2026",
+                             callback=self._make_rename(acct.name)), "pencil")
         palette = rumps.MenuItem(f"colour:{acct.name}")
-        _apply_style(palette, [("  ", "dim"), ("Colour", "text")])
+        _apply_style(palette, [("  ", "dim"), ("Colour", "text")], mono=False)
+        _set_icon(palette, "paintpalette")
         current = core.chip_index(acct.name, len(CHIP_COLORS))
         for idx, entry_def in enumerate(CHIP_COLORS):
             label = entry_def[0]
@@ -1302,8 +1325,8 @@ class ManagerApp(rumps.App):
                                  ("  ✓" if idx == current else "", "text")])
             palette.add(entry)
         item.add(palette)
-        self._line(item, f"rm:{acct.name}", "Remove account\u2026",
-                   callback=self._make_remove(acct.name))
+        _set_icon(self._line(item, f"rm:{acct.name}", "Remove account\u2026",
+                             callback=self._make_remove(acct.name)), "trash")
         return item
 
     def _session_item(self, sess: sessions.Session, snap: Snapshot) -> rumps.MenuItem:
@@ -1517,7 +1540,7 @@ class ManagerApp(rumps.App):
         about what it is called.
         """
         row = rumps.MenuItem(f"lg:{key}", callback=None)
-        _apply_style(row, [("  ", "dim"), (text, "head")])
+        _apply_style(row, [("  ", "dim"), (text, "head")], mono=False)
         item.add(row)
         return row
 
@@ -1531,7 +1554,7 @@ class ManagerApp(rumps.App):
         the bottom of a menu looked like they belonged to another program.
         """
         row = rumps.MenuItem(key, callback=callback)
-        _apply_style(row, [(indent, "dim"), (label, tone)])
+        _apply_style(row, [(indent, "dim"), (label, tone)], mono=False)
         item.add(row)
         return row
 
