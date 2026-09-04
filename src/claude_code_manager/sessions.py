@@ -33,6 +33,7 @@ STALE_AFTER = 7 * 24 * 3600
 class Session:
     pid: int
     config_dir: str              # the dir whose registry listed it: its account
+    proc_start: str = ""         # tells a reused pid from the one before it
     session_id: str = ""
     cwd: str = ""
     name: str = ""
@@ -129,7 +130,10 @@ def alive(pid: int) -> bool:
     return True
 
 
-def _environ(pid: int) -> tuple[dict[str, str], str]:
+_ENV_CACHE: dict[tuple[int, str], tuple[dict[str, str], str]] = {}
+
+
+def _environ(pid: int, proc_start: str = "") -> tuple[dict[str, str], str]:
     """The environment a running process was started with, and its tty.
 
     `ps eww` prints both for our own processes, which is every Claude Code
@@ -137,6 +141,13 @@ def _environ(pid: int) -> tuple[dict[str, str], str]:
     space is truncated; the keys read here never contain one. The tty is the
     second column of the process line; a process with no terminal shows `??`.
     """
+    # Neither answer can change while the process lives, so this is asked once
+    # per process rather than on every pass. The start time is part of the key
+    # because pids are reused, and the answer must not survive onto another
+    # process that happens to get the same one.
+    key = (pid, proc_start)
+    if key in _ENV_CACHE:
+        return _ENV_CACHE[key]
     try:
         out = subprocess.run(["ps", "eww", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5).stdout
@@ -155,6 +166,9 @@ def _environ(pid: int) -> tuple[dict[str, str], str]:
         key, sep, val = word.partition("=")
         if sep and key.isupper() and key.replace("_", "").isalnum():
             env[key] = val
+    if len(_ENV_CACHE) > 256:
+        _ENV_CACHE.clear()
+    _ENV_CACHE[key] = (env, tty)
     return env, tty
 
 
@@ -168,6 +182,7 @@ def _read(path: str, config_dir: str) -> Optional[Session]:
     if not isinstance(pid, int) or not alive(pid):
         return None
     return Session(
+        proc_start=d.get("procStart") or "",
         pid=pid,
         config_dir=config_dir,
         session_id=d.get("sessionId") or "",
@@ -182,15 +197,46 @@ def _read(path: str, config_dir: str) -> Optional[Session]:
     )
 
 
+_BRANCH_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _head_stamp(path: str) -> float:
+    """When this checkout's HEAD last moved, or 0 if it cannot be told.
+
+    Checking out a branch rewrites HEAD, so its mtime says whether the cached
+    answer is still good without running git at all.
+    """
+    for head in (os.path.join(path, ".git", "HEAD"), os.path.join(path, ".git")):
+        try:
+            if os.path.isfile(head):
+                return os.path.getmtime(head)
+            if os.path.isfile(os.path.join(path, ".git")):   # a worktree's pointer
+                with open(os.path.join(path, ".git")) as f:
+                    gitdir = f.read().strip().split("gitdir:", 1)[-1].strip()
+                return os.path.getmtime(os.path.join(gitdir, "HEAD"))
+        except OSError:
+            continue
+    return 0.0
+
+
 def branch_of(path: str) -> str:
     """Checked-out branch, or "" when detached or not a repo."""
+    stamp = _head_stamp(path)
+    hit = _BRANCH_CACHE.get(path)
+    if stamp and hit and hit[0] == stamp:
+        return hit[1]
     try:
         r = subprocess.run(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return ""
     name = r.stdout.strip() if r.returncode == 0 else ""
-    return name if name and name != "HEAD" else ""
+    branch = name if name and name != "HEAD" else ""
+    if stamp:
+        if len(_BRANCH_CACHE) > 256:
+            _BRANCH_CACHE.clear()
+        _BRANCH_CACHE[path] = (stamp, branch)
+    return branch
 
 
 def transcript_roots(config_dirs: Iterable[str]) -> list[str]:
@@ -220,7 +266,7 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
     out = list(found.values())
     if with_env:
         for s in out:
-            env, s.tty = _environ(s.pid)
+            env, s.tty = _environ(s.pid, s.proc_start)
             s.term_id = env.get("TERM_SESSION_ID", "")
             s.term_program = env.get("TERM_PROGRAM", "")
             s.env_config_dir = env.get("CLAUDE_CONFIG_DIR", "") or s.config_dir
