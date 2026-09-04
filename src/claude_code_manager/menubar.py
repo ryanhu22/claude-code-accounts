@@ -995,8 +995,12 @@ class ManagerApp(rumps.App):
             return
         age = time.time() - snap.taken_at if snap.taken_at else 0.0
         when = "just now" if age < 45 else f"{_age(age)} ago"
+        # The menu face, like every other row in this block. This one row was
+        # left monospaced, so the only fixed pitch text below the session list
+        # was a command sitting between two commands that were not.
         _apply_style(self._refresh_item,
-                     [("Refresh now", "text"), (f"   updated {when}", "dim")])
+                     [("Refresh now", "text"), (f"   updated {when}", "dim")],
+                     mono=False)
 
     def _repaint(self) -> None:
         """Redraw the text that changes without the menu changing shape."""
