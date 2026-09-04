@@ -134,6 +134,60 @@ def _tone(pct: Optional[float]) -> str:
     return "ok" if pct < 60 else "warn" if pct < 85 else "hot"
 
 
+def _icon_run(name: str, size: float = 12.0):
+    """One SF Symbol, sized to exactly one monospace cell.
+
+    Squared to the cell so a row that carries an icon keeps every column after
+    it in the same place as a row that does not, which is the whole reason
+    this is a text attachment and not the menu item's image.
+    """
+    import AppKit
+    font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
+    cell = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+        "M", {AppKit.NSFontAttributeName: font}).size().width
+    img = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    if img is None:
+        return AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            " ", {AppKit.NSFontAttributeName: font})
+    conf = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+        size - 1.0, AppKit.NSFontWeightRegular)
+    img = img.imageWithSymbolConfiguration_(conf) or img
+    # Coloured here rather than left as a template. A template takes its colour
+    # from the control that draws it, and inside an attachment there is no
+    # control to take it from, so it came out black in dark mode. The menu is
+    # rebuilt every time it opens, so this is re-read from the appearance often
+    # enough to follow a theme change.
+    try:
+        tinted = img.imageWithSymbolConfiguration_(
+            AppKit.NSImageSymbolConfiguration.configurationWithHierarchicalColor_(
+                AppKit.NSColor.secondaryLabelColor()))
+        img = tinted or img
+    except Exception:
+        img.setTemplate_(True)
+    # Drawn centred inside a box exactly two cells wide, rather than stretched
+    # to fill one. Symbols are not square and they are not all the same shape
+    # (a folder is 18 by 14, a dashed square is 15 by 14), so scaling each to
+    # a square squashed them by different amounts and left the two rows with
+    # icons of visibly different proportions. A fixed box keeps the column,
+    # and fitting inside it keeps the shape.
+    box_w, box_h = cell * 2, cell * 1.7
+    src = img.size()
+    scale = min(box_w / src.width, box_h / src.height) if src.width and src.height else 1.0
+    w, h = src.width * scale, src.height * scale
+    boxed = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(box_w, box_h))
+    boxed.lockFocus()
+    img.drawInRect_fromRect_operation_fraction_(
+        AppKit.NSMakeRect((box_w - w) / 2, (box_h - h) / 2, w, h),
+        AppKit.NSZeroRect, AppKit.NSCompositingOperationSourceOver, 1.0)
+    boxed.unlockFocus()
+    att = AppKit.NSTextAttachment.alloc().init()
+    att.setImage_(boxed)
+    # Dropped below the baseline so the glyph sits on the same optical line as
+    # the text beside it rather than riding above it.
+    att.setBounds_(AppKit.NSMakeRect(0, -2.5, box_w, box_h))
+    return AppKit.NSAttributedString.attributedStringWithAttachment_(att)
+
+
 def _styled(segments, size: float = 12.0):
     """Build an NSAttributedString from runs.
 
@@ -147,6 +201,14 @@ def _styled(segments, size: float = 12.0):
     for run in segments:
         text, tone = run[0], run[1]
         chip_key = run[2] if len(run) > 2 else None
+        if tone == "icon":
+            # An SF Symbol inside the text, not on the menu item. A menu item's
+            # image lives in a gutter macOS reserves for a whole run of items,
+            # so one of those indented a section heading and every row under
+            # it. An attachment is a character: it sits where it is put and
+            # moves nothing.
+            out.appendAttributedString_(_icon_run(text, size))
+            continue
         attrs = {AppKit.NSFontAttributeName: font}
         if tone == "head":
             # Letter spacing on a short uppercase label reads as a legend
@@ -1358,13 +1420,14 @@ class ManagerApp(rumps.App):
             ("  ", "dim"),
             *(_chip(prof.account, NAME_W) if prof.account
               else [(f"{'unassigned':<{NAME_W}}", "warn")]),
-            # The same lamp a subscription row uses, in the same column. Both
-            # rows are answering "how many sessions, and is any of them
-            # working", and the answer was a lit mark and a number up there
-            # and the words "6 running" down here.
-            ("  ", "dim"), *_lamps(here),
-            ("  ", "dim"),
+            # The same lamp a subscription row uses, but after the profile
+            # name rather than after the account. These sessions are running
+            # because of this profile's rule, not because of the account it
+            # points at, and next to the chip it read as the account's count,
+            # which is the number one row up in the section above.
+            ("  ", "dim"), ("folder", "icon"),
             (_fit(prof.name, PROFILE_W), "text"),
+            ("  ", "dim"), *_lamps(here),
             (f"  {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
         ])
         self._add_scope(item, f"Use for every project in “{prof.name}”",
@@ -1424,9 +1487,11 @@ class ManagerApp(rumps.App):
         _apply_style(item, [
             ("  ", "dim"),
             *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
-            ("  ", "dim"), *_lamps(loose),
-            ("  ", "dim"),
+            # Dashed, because this is not a profile anybody made. It is
+            # what collects whatever the named ones did not.
+            ("  ", "dim"), ("square.dashed", "icon"),
             (_fit("everything else", PROFILE_W), "dim"),
+            ("  ", "dim"), *_lamps(loose),
             # No project count. This rule covers whatever is not in a profile,
             # so it has nothing to count, and a number here would sit under
             # the row above meaning something else.
