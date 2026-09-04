@@ -38,6 +38,7 @@ from typing import Iterator
 # toucher can stall well past 10s (laptop sleep, a blocked event loop) while it
 # still legitimately owns the lock.
 STALE_SECONDS = 60.0
+CONFIG_STALE_SECONDS = 10.0   # the config lock keeps proper-lockfile's defaults
 TOUCH_SECONDS = 3.0          # a little faster than Claude Code's 5s, for margin
 # Claude Code holds the lock for one token-endpoint round trip. Waiting ~9s per
 # lock outlasts that without ever stalling us for long. Two locks are taken in
@@ -56,7 +57,7 @@ def lock_dirs(config_dir: str) -> tuple[str, str]:
 
 
 @contextlib.contextmanager
-def _one(path: str, timeout: float) -> Iterator[None]:
+def _one(path: str, timeout: float, staleness: float = STALE_SECONDS) -> Iterator[None]:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     start = time.monotonic()
     while True:
@@ -73,7 +74,7 @@ def _one(path: str, timeout: float) -> Iterator[None]:
             held = os.stat(path).st_mtime
         except FileNotFoundError:
             continue                      # released between mkdir and stat
-        if time.time() - held > STALE_SECONDS:
+        if time.time() - held > staleness:
             try:
                 os.rmdir(path)            # dead holder per the protocol
             except OSError:
@@ -111,4 +112,20 @@ def credentials(config_dir: str, timeout: float = TIMEOUT_SECONDS) -> Iterator[N
     """
     primary, legacy = lock_dirs(config_dir)
     with _one(primary, timeout), _one(legacy, timeout):
+        yield
+
+
+@contextlib.contextmanager
+def config(config_dir: str, timeout: float = TIMEOUT_SECONDS) -> Iterator[None]:
+    """Hold Claude Code's lock on a config dir's .claude.json.
+
+    That file is rewritten whole, so a read-modify-write racing Claude Code's
+    own would drop whichever change lost. It keeps proper-lockfile's older
+    defaults: stale after 10s rather than 60.
+    """
+    base = os.path.abspath(config_dir).rstrip("/")
+    home = os.path.expanduser("~")
+    target = (os.path.join(home, ".claude.json") if base == os.path.join(home, ".claude")
+              else os.path.join(base, ".claude.json"))
+    with _one(target + ".lock", timeout, staleness=CONFIG_STALE_SECONDS):
         yield

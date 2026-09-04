@@ -1,16 +1,15 @@
-"""Accounts, contexts, usage, and swapping.
+"""Accounts, their credentials, and their usage.
 
-Two kinds of directory, kept strictly separate:
+Every account owns exactly one config directory, ``~/.claude-accts/<name>``,
+holding that subscription's login. Sessions run in it directly, and shared
+settings and transcripts are symlinked back to ``~/.claude`` so every account
+sees the same commands, skills and history.
 
-* **Account slots** (``~/.claude-accts/<name>``) each hold one subscription's
-  login and nothing else. No Claude session ever runs in a slot, so its login
-  stays valid and its usage is always readable.
-* **Contexts** are the config dirs sessions actually run in. They own history
-  and settings. Swapping copies a slot's live login into a context.
-
-Nothing here ever mints a credential: it copies whole login blobs that Claude
-Code itself wrote, so a swapped context keeps `subscriptionType`, scopes and
-rate-limit tier and behaves exactly like a real login.
+One directory per account is what makes the rules in `profiles` cheap: pointing
+a project at another subscription rewrites a rule, and never copies a
+credential. Nothing here mints one either. The only credentials that exist are
+the ones Claude Code wrote at login, which is why a session started this way
+keeps its real `subscriptionType`, scopes and rate-limit tier.
 """
 from __future__ import annotations
 
@@ -24,14 +23,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from . import keychain, locks, sessions
+from . import keychain, locks, profiles, sessions
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
-CTX_DIR = os.environ.get("CCM_CONTEXTS_DIR", os.path.join(HOME, ".claude-ctx"))
 DEFAULT_CONFIG = os.path.join(HOME, ".claude")
-ROUTES_FILE = os.environ.get("CCM_ROUTES", os.path.join(HOME, ".claude", "subs.conf"))
-SWAP_LOG = os.path.join(HOME, ".claude", "swap.log")
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_URLS = ("https://platform.claude.com/v1/oauth/token",
@@ -158,9 +154,16 @@ def carry_identity(config_dir: str, old_fp: Optional[str], new_fp: Optional[str]
 
 
 def credential_dirs() -> list[str]:
-    """Every config dir that may hold a copy of a login: slots and contexts."""
+    """Every config dir that may hold a login.
+
+    One per account, the default dir Claude Code falls back to, and any other
+    dir a session is running in: a session started before the rules existed, or
+    launched through a path alias, still bills real work and has to be counted.
+    """
     seen, out = set(), []
-    for d in [slot_dir(n) for n in account_names()] + [c.path for c in contexts()]:
+    candidates = ([slot_dir(n) for n in account_names()] + [DEFAULT_CONFIG]
+                  + sessions.discover_config_dirs(HOME))
+    for d in candidates:
         key = os.path.abspath(d)
         if key not in seen:
             seen.add(key)
@@ -530,8 +533,7 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     if not email:
         return None
     slots = {os.path.abspath(slot_dir(n)) for n in account_names()}
-    candidates = ([prefer] if prefer else []) + [slot_dir(n) for n in account_names()] \
-        + [c.path for c in contexts()]
+    candidates = ([prefer] if prefer else []) + credential_dirs()
     for cand in dict.fromkeys(c for c in candidates if c):
         # never refresh a context: a session may be running there
         blob = live_blob(cand) if os.path.abspath(cand) in slots else keychain.read_credentials(cand)
@@ -733,17 +735,6 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
 
 # --------------------------------------------------------------------------- contexts
 
-@dataclass
-class Context:
-    name: str
-    path: str
-
-    @property
-    def email(self) -> str:
-        blob = keychain.read_credentials(self.path)
-        return (identity(self.path, blob)[0].get("email") if blob else "") or recorded_email(self.path)
-
-
 def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
     """Which account each context is signed in as, without asking the API.
 
@@ -769,94 +760,26 @@ def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, 
     return out
 
 
-def _routes() -> tuple[dict[str, str], list[tuple[str, str]], dict[str, str]]:
-    """The routing table: named contexts, per-path rules, per-terminal pins."""
-    named: dict[str, str] = {}
-    paths: list[tuple[str, str]] = []
-    terms: dict[str, str] = {}
-    try:
-        for line in open(ROUTES_FILE):
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            if line.startswith("path:"):
-                pth, dst = line[5:].split("=", 1)
-                paths.append((pth.rstrip("/"), dst))
-            elif line.startswith("term:"):
-                tid, dst = line[5:].split("=", 1)
-                terms[tid] = dst
-            else:
-                k, v = line.split("=", 1)
-                named[k] = v
-    except OSError:
-        pass
-    return named, paths, terms
-
-
-def contexts() -> list[Context]:
-    named, paths, _ = _routes()
-    out = [Context(name=k, path=v) for k, v in sorted(named.items())]
-    if not out:
-        out = [Context(name="default", path=DEFAULT_CONFIG)]
-    seen = {os.path.abspath(c.path) for c in out}
-    for _, dst in paths:
-        if os.path.abspath(dst) not in seen:
-            out.append(Context(name=os.path.basename(dst.rstrip("/")), path=dst))
-            seen.add(os.path.abspath(dst))
-    # A dir reached through a path alias has its own login and appears in no
-    # rule, so anything with a session running now counts as a context too.
-    for d in sessions.discover_config_dirs(HOME):
-        if os.path.abspath(d) not in seen:
-            out.append(Context(name=_ctx_name(d).lstrip("."), path=d))
-            seen.add(os.path.abspath(d))
-    try:
-        for n in sorted(os.listdir(CTX_DIR)):
-            d = os.path.join(CTX_DIR, n)
-            # Claude Code's legacy credential lock is a sibling directory
-            # (`<config dir>.lock`), so it briefly looks like another context.
-            if n.endswith(".lock") or n.startswith("."):
-                continue
-            if os.path.isdir(d) and os.path.abspath(d) not in seen:
-                out.append(Context(name=n, path=d))
-                seen.add(os.path.abspath(d))
-    except OSError:
-        pass
-    return out
-
-
-def context_for(cwd: str, term_id: str = "") -> Context:
-    """Which context a session runs in.
-
-    A terminal pin wins outright: it is the one rule the user set for exactly
-    this session. Otherwise the longest matching path rule wins, then the
-    named defaults.
-    """
-    named, paths, terms = _routes()
-    if term_id and term_id in terms:
-        return Context(name=_ctx_name(terms[term_id]), path=terms[term_id])
-    cands = {os.path.abspath(cwd), os.path.realpath(cwd)}
-    best, best_len = None, -1
-    for pth, dst in paths:
-        if any((c + "/").startswith(pth + "/") for c in cands) and len(pth) > best_len:
-            best, best_len = dst, len(pth)
-    if best:
-        return Context(name=os.path.basename(best.rstrip("/")), path=best)
-    work = named.get("work")
-    if work and any((c + "/").startswith(os.path.join(HOME, "Desktop", "acme")) for c in cands):
-        return Context(name="work", path=work)
-    return Context(name="default", path=named.get("default", DEFAULT_CONFIG))
-
-
 SHARED_ITEMS = ("CLAUDE.md", "commands", "agents", "skills", "hooks", "workflows",
                 "bin", "automations", "settings.json", "design", "appstore",
                 "plugins", "projects")
 
 
 def project_root(cwd: str) -> str:
-    """Main checkout for a directory: a worktree resolves to its parent repo."""
+    """Main checkout for a directory: a worktree resolves to its parent repo.
+
+    A path that no longer exists still answers, as itself: rules outlive the
+    directories they were written for, and one deleted worktree must not stop
+    the whole table from resolving.
+    """
     import subprocess as _sp
-    r = _sp.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
-                capture_output=True, text=True)
+    if not cwd or not os.path.isdir(cwd):
+        return os.path.abspath(cwd or HOME)
+    try:
+        r = _sp.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
+                    capture_output=True, text=True, timeout=5)
+    except (OSError, _sp.SubprocessError):
+        return os.path.abspath(cwd)
     if r.returncode == 0 and r.stdout.strip():
         gitdir = r.stdout.strip()
         if not os.path.isabs(gitdir):
@@ -869,173 +792,305 @@ def _ctx_name(path: str) -> str:
     return os.path.basename(path.rstrip("/")) or path
 
 
-def _write_rule(key: str, context_path: Optional[str]) -> None:
-    lines: list[str] = []
-    try:
-        with open(ROUTES_FILE) as f:
-            lines = [l.rstrip("\n") for l in f]
-    except OSError:
-        pass
-    lines = [l for l in lines if not l.startswith(key)]
-    if context_path:
-        lines.append(key + context_path)
-    os.makedirs(os.path.dirname(ROUTES_FILE), exist_ok=True)
-    with open(ROUTES_FILE, "w") as f:
-        f.write("\n".join(l for l in lines if l.strip()) + "\n")
+# --------------------------------------------------------------------------- rules
 
+def account_dir(name: str) -> str:
+    """The config dir an account owns.
 
-def _write_route(root: str, context_path: Optional[str]) -> None:
-    _write_rule(f"path:{root}=", context_path)
-
-
-def _seed_context(ctx_path: str, blob: Optional[dict]) -> None:
-    """Create a context dir that shares config and history with ~/.claude.
-
-    Settings, commands and transcripts are symlinked back, so a session that
-    moves here keeps every one of them and `claude -c` still finds the
-    conversation it was in. Only the login differs, which is the whole point.
+    One directory per account, which is what makes a rule change free: the
+    login already lives there, so pointing a project somewhere else copies no
+    credential and cannot leave one half written.
     """
-    os.makedirs(ctx_path, exist_ok=True)
+    return slot_dir(name)
+
+
+def ensure_account_dir(name: str) -> str:
+    """Make an account's directory usable as a working config dir.
+
+    Settings, commands, agents and transcripts are symlinked back to ~/.claude
+    so every account shares one set of them and `claude -c` finds the same
+    history whichever subscription is paying.
+    """
+    path = account_dir(name)
+    os.makedirs(path, exist_ok=True)
     for item in SHARED_ITEMS:
         target = os.path.join(DEFAULT_CONFIG, item)
-        link = os.path.join(ctx_path, item)
+        link = os.path.join(path, item)
         if os.path.exists(target) and not os.path.lexists(link):
-            os.symlink(target, link)
-    if blob:
-        adopt(ctx_path, blob)
+            try:
+                os.symlink(target, link)
+            except OSError:
+                pass
+    return path
 
 
-def isolate(cwd: str) -> tuple[bool, str]:
-    """Give this project its own context, so swapping here affects only it.
+def rules() -> profiles.Rules:
+    return profiles.load()
 
-    Shared config and the transcripts directory are symlinked back to
-    ~/.claude, so settings, commands and history stay in one place and
-    `claude -c` still finds past conversations after the move.
+
+def save_rules(r: profiles.Rules) -> None:
+    for name in {r.default_account, *(p.account for p in r.profiles),
+                 *r.projects.values(), *r.sessions.values()}:
+        if name:
+            ensure_account_dir(name)
+    profiles.save(r, account_dir)
+
+
+def resolve(cwd: str, term_id: str = "") -> tuple[str, str]:
+    """Which account a session in `cwd` should bill to, and why.
+
+    A worktree resolves to its parent checkout first, so it inherits whatever
+    rule covers the repository even when it lives outside the repo directory.
     """
-    root = project_root(cwd)
-    name = "".join(c if (c.isalnum() or c in "._-") else "-" for c in os.path.basename(root)) or "project"
-    ctx_path = os.path.join(CTX_DIR, name)
-    current = context_for(root)
-    if os.path.abspath(ctx_path) == os.path.abspath(current.path):
-        return True, f"{root} already has its own context"
-    blob = keychain.read_credentials(current.path)
-    _seed_context(ctx_path, blob)                       # start where it already was
-    _write_route(root, ctx_path)
-    who = identity(current.path, blob)[0].get("email") if blob else None
-    return True, (f"{root}\n  own context: {ctx_path.replace(HOME, '~')}"
-                  f"\n  account    : {who or 'unknown'}")
+    r = rules()
+    for path in (os.path.abspath(cwd), project_root(cwd)):
+        account, reason = r.account_for(path, term_id)
+        if reason != "default":
+            return account, reason
+    return r.default_account, "default"
+
+
+def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
+    """Move one project's Claude Code settings to another config dir.
+
+    `.claude.json` keeps per-project trust, allowed tools and MCP servers under
+    the project's path. Sending a project to a different account would
+    otherwise drop all of it and re-ask for trust, so the entry is copied
+    across under Claude Code's own config lock.
+    """
+    src, dst = _config_json(src_dir), _config_json(dst_dir)
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return False
+    try:
+        with open(src) as f:
+            entry = (json.load(f).get("projects") or {}).get(project)
+    except (OSError, ValueError):
+        return False
+    if not entry:
+        return False
+    try:
+        with locks.config(dst_dir):
+            try:
+                with open(dst) as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = {}
+            projects_map = data.setdefault("projects", {})
+            if project in projects_map:
+                return False               # already knows this project
+            projects_map[project] = entry
+            tmp = dst + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, dst)
+    except (locks.LockBusy, OSError):
+        return False
+    return True
+
+
+def _config_json(config_dir: str) -> str:
+    """Claude Code's config file for a dir. The default dir keeps it in $HOME."""
+    if os.path.abspath(config_dir) == os.path.abspath(DEFAULT_CONFIG):
+        return os.path.join(HOME, ".claude.json")
+    return os.path.join(config_dir, ".claude.json")
+
+
+def account_for_email(email: str) -> str:
+    """The account name signed in as an email, if we have one."""
+    email = (email or "").lower()
+    if not email:
+        return ""
+    for name in account_names():
+        blob = keychain.read_credentials(slot_dir(name))
+        if blob and (identity(slot_dir(name), blob)[0].get("email") or "").lower() == email:
+            return name
+    return ""
+
+
+def account_of_dir(config_dir: str, accts: Iterable["Account"]) -> str:
+    """Which account a config dir is signed in as, by name.
+
+    An account's own directory answers by its name alone. Anything else, such
+    as a directory a session was launched with before the rules existed, is
+    matched on the credential it holds.
+    """
+    if not config_dir:
+        return ""
+    base = os.path.basename(os.path.abspath(config_dir).rstrip("/"))
+    accts = list(accts)
+    if os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR:
+        if any(a.name == base for a in accts):
+            return base
+    blob = keychain.read_credentials(config_dir)
+    if not blob:
+        return ""
+    fp = fingerprint(blob)
+    for a in accts:
+        if fp and fingerprint(keychain.read_credentials(a.slot)) == fp:
+            return a.name
+    email = identity(config_dir, blob)[0].get("email") or recorded_email(config_dir)
+    return next((a.name for a in accts if (a.email or "").lower() == email.lower()), email)
+
+
+def rules_using(account: str, r: Optional[profiles.Rules] = None) -> list[str]:
+    """Every rule pointing at an account, described for a human."""
+    r = r or rules()
+    out = []
+    if r.default_account == account:
+        out.append("default")
+    out += [f"profile {p.name}" for p in r.profiles if p.account == account]
+    out += [f"project {os.path.basename(k.rstrip('/'))}" for k, v in r.projects.items() if v == account]
+    n = sum(1 for v in r.sessions.values() if v == account)
+    if n:
+        out.append(f"{n} session{'s' if n != 1 else ''}")
+    return out
+
+
+def bootstrap() -> profiles.Rules:
+    """Start a rule set for someone who has none.
+
+    Everything goes to whichever account the default config dir is already
+    signed in as, and no profiles are made up: a profile is a statement about
+    how someone organises their repositories, which only they can make.
+    """
+    r = rules()
+    if r.default_account or r.profiles or r.projects:
+        return r
+    blob = keychain.read_credentials(DEFAULT_CONFIG)
+    guess = account_for_email(identity(DEFAULT_CONFIG, blob)[0].get("email") or "")
+    r.default_account = guess or (account_names() or [""])[0]
+    if r.default_account:
+        save_rules(r)
+    return r
+
+
+def assign(scope: str, key: str, account: str, cwd: str = "") -> tuple[bool, str]:
+    """Point one scope at an account. The scope decides how far it reaches.
+
+    Nothing is copied and no session is disturbed: this rewrites the rules and
+    the table the shell reads, and takes effect the next time a session starts.
+    Project settings follow the project so a move does not re-ask for trust.
+    """
+    try:
+        account = resolve_account(account)
+    except UnknownAccount as e:
+        return False, str(e)
+    r = rules()
+    moved: list[str] = []
+    if scope == "session":
+        if not key:
+            return False, "this session has no terminal id, so it cannot be pinned"
+        before = account_dir(r.account_for(project_root(cwd or HOME))[0] or account)
+        r.set_session(key, account)
+        moved = [project_root(cwd)] if cwd else []
+        where = "this session"
+    elif scope == "project":
+        root = project_root(key or cwd)
+        before = account_dir(r.account_for(root)[0] or account)
+        r.set_project(root, account)
+        moved, where = [root], f"“{os.path.basename(root)}”"
+    elif scope == "profile":
+        prof = r.profile(key)
+        if not prof:
+            return False, f"no profile named {key}"
+        before = account_dir(prof.account or account)
+        r.set_profile_account(key, account)
+        moved = prof.paths
+        where = f"profile “{key}” ({len(prof.repos)} repo{'s' if len(prof.repos) != 1 else ''})"
+    elif scope == "default":
+        before = account_dir(r.default_account or account)
+        r.default_account = account
+        where = "everything with no rule"
+    else:
+        return False, f"unknown scope {scope}"
+    save_rules(r)
+    for root in moved:
+        carry_project_state(root, before, account_dir(account))
+    return True, f"{where} now uses {account}"
+
+
+def clear(scope: str, key: str, cwd: str = "") -> tuple[bool, str]:
+    """Drop a rule so the level above it decides again."""
+    r = rules()
+    if scope == "session":
+        if key not in r.sessions:
+            return False, "this session has no rule of its own"
+        r.set_session(key, None)
+        where = "this session"
+    elif scope == "project":
+        root = project_root(key or cwd)
+        found = r.project_rule_for(root)
+        if not found:
+            return False, "this project has no rule of its own"
+        r.projects.pop(found, None)
+        where = f"“{os.path.basename(root)}”"
+    else:
+        return False, f"unknown scope {scope}"
+    save_rules(r)
+    return True, f"{where} follows its profile again"
+
+
+def add_profile(name: str, account: str = "") -> tuple[bool, str]:
+    name = name.strip()
+    if not name:
+        return False, "a profile needs a name"
+    r = rules()
+    if r.profile(name):
+        return False, f"there is already a profile named {name}"
+    if account:
+        try:
+            account = resolve_account(account)
+        except UnknownAccount as e:
+            return False, str(e)
+    r.profiles.append(profiles.Profile(name=name, account=account or r.default_account))
+    save_rules(r)
+    return True, f"profile “{name}” created"
+
+
+def remove_profile(name: str) -> tuple[bool, str]:
+    r = rules()
+    if not r.profile(name):
+        return False, f"no profile named {name}"
+    r.profiles = [p for p in r.profiles if p.name != name]
+    save_rules(r)
+    return True, f"profile “{name}” removed; its repos follow the default again"
+
+
+def rename_profile(old: str, new: str) -> tuple[bool, str]:
+    r = rules()
+    prof = r.profile(old)
+    new = new.strip()
+    if not prof:
+        return False, f"no profile named {old}"
+    if not new or r.profile(new):
+        return False, "pick a name that is not already taken"
+    prof.name = new
+    save_rules(r)
+    return True, f"“{old}” is now “{new}”"
+
+
+def profile_add_repo(name: str, path: str) -> tuple[bool, str]:
+    r = rules()
+    prof = r.profile(name)
+    if not prof:
+        return False, f"no profile named {name}"
+    root = project_root(path)
+    before = account_dir(r.account_for(root)[0] or prof.account)
+    r.add_repo(name, root)
+    save_rules(r)
+    if prof.account:
+        carry_project_state(root, before, account_dir(prof.account))
+    return True, f"{os.path.basename(root)} joined “{name}”"
+
+
+def profile_remove_repo(name: str, path: str) -> tuple[bool, str]:
+    r = rules()
+    if not r.profile(name):
+        return False, f"no profile named {name}"
+    r.remove_repo(name, project_root(path))
+    save_rules(r)
+    return True, f"{os.path.basename(project_root(path))} left “{name}”"
 
 
 # --------------------------------------------------------------------------- session pins
 
-def term_pins() -> dict[str, str]:
-    return _routes()[2]
-
-
-def pin_dir(term_id: str) -> str:
-    """The context dir backing one terminal's pin.
-
-    Keyed by the terminal's own id rather than a pid or a tty number, so
-    restarting Claude Code in that tab lands back on the same account and a
-    recycled pid can never inherit somebody else's pin.
-    """
-    return os.path.join(CTX_DIR, "term-" + term_id.replace("-", "")[:8].lower())
-
-
-def pin(term_id: str, account: str, seed_from: Optional[str] = None) -> tuple[bool, str]:
-    """Give one session its own account, without moving the rest of its project.
-
-    A login belongs to a config dir, so a session can only differ from its
-    neighbours by having a config dir of its own. That dir is created here,
-    sharing settings and transcripts with ~/.claude, and the routing table
-    sends this terminal to it from now on.
-    """
-    if not term_id:
-        return False, "this session has no terminal id, so it cannot be pinned"
-    try:
-        account = resolve_account(account)
-    except UnknownAccount as e:
-        return False, str(e)
-    ctx_path = pin_dir(term_id)
-    fresh = not os.path.isdir(ctx_path)
-    if fresh:
-        seed = keychain.read_credentials(seed_from) if seed_from else None
-        _seed_context(ctx_path, seed)
-    _write_rule(f"term:{term_id}=", ctx_path)
-    ok, msg = swap(account, Context(name=_ctx_name(ctx_path), path=ctx_path))
-    if not ok:
-        if fresh:
-            _write_rule(f"term:{term_id}=", None)       # leave no half-made pin
-        return False, msg
-    return True, msg
-
-
-def unpin(term_id: str) -> tuple[bool, str]:
-    """Send a session back to its project's account on its next start."""
-    if term_id not in term_pins():
-        return False, "this session is not pinned"
-    _write_rule(f"term:{term_id}=", None)
-    return True, "pin removed; this session follows its project again"
-
-
-def prune_pins(live_term_ids: Iterable[str], max_age: float = 14 * 24 * 3600) -> list[str]:
-    """Drop pins for terminals that are gone.
-
-    A terminal id disappears for good when its tab closes, so a pin nothing has
-    used in a fortnight is dead weight. Anything with a session running now is
-    kept whatever its age.
-    """
-    alive, dropped, cutoff = set(live_term_ids), [], time.time() - max_age
-    for tid, path in term_pins().items():
-        if tid in alive:
-            continue
-        try:
-            if os.path.getmtime(path) > cutoff:
-                continue
-        except OSError:
-            pass                       # dir already gone: the rule is pure litter
-        _write_rule(f"term:{tid}=", None)
-        dropped.append(tid)
-    return dropped
-
-
-def unroute(cwd: str) -> tuple[bool, str]:
-    """Drop this project's routing override; it follows the defaults again."""
-    root = project_root(cwd)
-    _write_route(root, None)
-    return True, f"override removed for {root}"
-
-
-def swap(account: str, context: Context) -> tuple[bool, str]:
-    """Point a context at an account by copying that account's live login."""
-    try:
-        account = resolve_account(account)
-    except UnknownAccount as e:
-        return False, str(e)
-    slot = slot_dir(account)
-    blob = live_blob(slot)
-    email = identity(slot, blob)[0].get("email")
-    if not email:
-        healed = find_live_blob(recorded_email(slot))
-        if healed:
-            blob, email = healed, identity(slot, healed)[0].get("email")
-    if not blob or not email:
-        return False, f"{account} has no usable login (add it again)"
-    before = context.email or "unknown"
-    # Under Claude Code's own locks: a swap that lands inside a session's
-    # refresh window is overwritten by the OLD account's refreshed token, and
-    # the swap looks like it silently did nothing.
-    try:
-        with locks.credentials(context.path):
-            keychain.write_credentials(context.path, blob)
-    except locks.LockBusy:
-        return False, "Claude Code is refreshing credentials right now; try again in a few seconds"
-    except RuntimeError as e:
-        return False, str(e)
-    try:
-        with open(SWAP_LOG, "a") as f:
-            f.write(f"{_dt.datetime.now().isoformat(timespec='seconds')}  "
-                    f"{context.path.replace(HOME, '~')}  {before} -> {email}  via=menubar\n")
-    except OSError:
-        pass
-    return True, f"{context.name} now uses {email}"
