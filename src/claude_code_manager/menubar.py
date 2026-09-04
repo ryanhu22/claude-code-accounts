@@ -355,6 +355,37 @@ def _short(email: Optional[str]) -> str:
     return (email or "?").split("@")[0]
 
 
+_WATCHER: Optional[type] = None
+
+
+def _watcher_class() -> type:
+    """The NSMenu delegate that redraws the menu before it appears.
+
+    Every duration in this menu is computed when the menu is built: how old
+    the usage numbers are, when each window resets, how long a session has sat
+    idle. Between builds those numbers are frozen, so a row that read
+    "updated 59s ago" kept saying it for the next three minutes. Filling a
+    menu from its delegate is the supported way to populate one late, so the
+    rebuild happens there and every duration is true when it is read.
+
+    Defined on first use, so importing this module does not need AppKit, and
+    cached, because an Objective-C class name registers exactly once.
+    """
+    global _WATCHER
+    if _WATCHER is None:
+        import AppKit
+
+        class CCMMenuWatcher(AppKit.NSObject):
+            def menuWillOpen_(self, _menu):
+                try:
+                    self.owner._on_menu_open()
+                except Exception:
+                    pass      # a failed redraw must not stop the menu opening
+
+        _WATCHER = CCMMenuWatcher
+    return _WATCHER
+
+
 class Snapshot:
     def __init__(self) -> None:
         self.accounts: list[core.Account] = []
@@ -379,15 +410,58 @@ class ManagerApp(rumps.App):
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
+        self._account_rows: dict[str, rumps.MenuItem] = {}
+        self._refresh_item: Optional[rumps.MenuItem] = None
         self._flash: tuple[str, str, float] = ("", "", 0.0)
+        self._drawn_at = 0.0
         self._hide_from_dock()
         self.refresh_now(None)
+        self._watch_menu()
         rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
         rumps.Timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS).start()
         rumps.Timer(self._on_sessions_tick, SESSION_POLL_SECONDS).start()
         rumps.Timer(self._on_sync_tick, 1).start()
 
     # ------------------------------------------------------------------ plumbing
+
+    def _watch_menu(self) -> None:
+        """Ask to be told when the menu is about to open. Optional by design.
+
+        Without it the menu still works; its durations are merely as old as
+        the last rebuild, which is what they were before.
+        """
+        try:
+            # NSMenu does not retain its delegate, so the app holds it.
+            self._watcher = _watcher_class().alloc().init()
+            self._watcher.owner = self
+            self.menu._menu.setDelegate_(self._watcher)
+        except Exception:
+            self._watcher = None
+
+    def _style_refresh_row(self, snap: Snapshot) -> None:
+        if self._refresh_item is None:
+            return
+        age = time.time() - snap.taken_at if snap.taken_at else 0.0
+        when = "just now" if age < 45 else f"{_age(age)} ago"
+        _apply_style(self._refresh_item,
+                     [("Refresh now", "text"), (f"   updated {when}", "dim")])
+
+    def _on_menu_open(self) -> None:
+        """Make the durations in the menu true at the moment they are read.
+
+        Only the text that counts against the clock is repainted: when each
+        window resets, how old the usage is. Rebuilding the whole menu here
+        would be correct too, and it measured about 0.4 s, which reads as a
+        stall between the click and the menu. Session rows are left alone
+        because the five-second poll already repaints them in place.
+        """
+        snap = self._snapshot
+        for acct in snap.accounts:
+            row = self._account_rows.get(acct.name)
+            if row is not None:
+                _apply_style(row, self._account_segments(acct, snap))
+        self._style_refresh_row(snap)
+        self._apply_title(snap)
 
     @staticmethod
     def _hide_from_dock() -> None:
@@ -541,10 +615,12 @@ class ManagerApp(rumps.App):
     # ------------------------------------------------------------------ menu
 
     def _rebuild(self) -> None:
+        self._drawn_at = time.time()
         snap = self._snapshot
         self._apply_title(snap)
         self.menu.clear()
         self._session_rows = {}
+        self._account_rows = {}
 
         self._follow_item = rumps.MenuItem("Following", callback=None)
         self._style_follow_row(snap)
@@ -575,11 +651,12 @@ class ManagerApp(rumps.App):
 
         self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
         self.menu.add(rumps.MenuItem(
-            "Follow the front terminal" + ("  \u2713" if self._tracker.enabled else ""),
+            "Show the front tab's account" + ("  \u2713" if self._tracker.enabled else ""),
             callback=self._toggle_follow))
 
-        age = int(time.time() - snap.taken_at) if snap.taken_at else 0
-        self.menu.add(rumps.MenuItem(f"Refresh now (updated {age}s ago)", callback=self.refresh_now))
+        self._refresh_item = rumps.MenuItem("Refresh now", callback=self.refresh_now)
+        self._style_refresh_row(snap)
+        self.menu.add(self._refresh_item)
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
     # ------------------------------------------------------------------ title
@@ -639,7 +716,7 @@ class ManagerApp(rumps.App):
             return
         f = self._tracker.focus
         if not self._tracker.enabled:
-            segs = [("\u25cb ", "dim"), ("Showing the default context", "text"),
+            segs = [("\u25cb ", "dim"), ("Showing the default account", "text"),
                     ("   following is off", "dim")]
         elif f.session is not None:
             where = f"{f.session.repo} \u00b7 {f.session.detail or f.session.label}"
@@ -647,7 +724,7 @@ class ManagerApp(rumps.App):
                     (_fit(where, 44).rstrip(), "text"),
                     ("   front tab" if f.exact else f"   {f.note}", "dim")]
         else:
-            segs = [("\u25cf ", "dim"), ("Showing the default context", "text"),
+            segs = [("\u25cf ", "dim"), ("Showing the default account", "text"),
                     (f"   {f.note or 'nothing to follow yet'}", "dim")]
         _apply_style(self._follow_item, segs)
 
@@ -670,6 +747,34 @@ class ManagerApp(rumps.App):
         self._tracker.enabled = not self._tracker.enabled
         self._rebuild()
 
+    @staticmethod
+    def _account_segments(acct: core.Account, snap: Snapshot) -> list:
+        """One account row. Split out because the countdowns in it age.
+
+        The row is repainted whenever the menu opens, so the reset times and
+        the age of the usage are read from the clock at that moment rather
+        than from whenever the menu was last built.
+        """
+        used_by = core.rules_using(acct.name, snap.rules)
+        fable = next((l for l in acct.limits
+                      if l.kind not in ("session", "weekly_all")), None)
+        segments = [
+            ("● " if used_by else "○ ", "text" if used_by else "dim"),
+            _chip(acct.name, NAME_W),
+        ]
+        segments += _bucket("5h", acct.limit("session"))
+        segments += _bucket("7d", acct.limit("weekly_all"))
+        segments += _bucket(fable.label if fable else "model", fable)
+        if used_by:
+            segments.append((f"   {', '.join(used_by)}", "dim"))
+        if acct.mismatch:
+            segments.append((f"   {acct.mismatch}", "hot"))
+        elif acct.error:
+            segments.append((f"   {acct.error}", "dim"))
+        elif acct.stale:
+            segments.append((f"   usage {_age(acct.usage_age)} old", "dim"))
+        return segments
+
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.signed_in:
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
@@ -683,25 +788,8 @@ class ManagerApp(rumps.App):
         # plain title stays unique: rumps keys its callback registry by it
         head = f"{'●' if in_use else '○'} {acct.name} — {_pct(acct.session_pct)} 5h"
         item = rumps.MenuItem(head)
-
-        fable = next((l for l in acct.limits
-                      if l.kind not in ("session", "weekly_all")), None)
-        segments = [
-            ("● " if in_use else "○ ", "text" if in_use else "dim"),
-            _chip(acct.name, NAME_W),
-        ]
-        segments += _bucket("5h", acct.limit("session"))
-        segments += _bucket("7d", acct.limit("weekly_all"))
-        segments += _bucket(fable.label if fable else "model", fable)
-        if used_by:
-            segments.append((f"   {', '.join(used_by)}", "dim"))
-        if acct.mismatch:
-            segments.append((f"   {acct.mismatch}", "hot"))
-        elif acct.error:
-            segments.append((f"   {acct.error}", "dim"))
-        elif acct.stale:
-            segments.append((f"   {_age(acct.usage_age)} old", "dim"))
-        _apply_style(item, segments)
+        _apply_style(item, self._account_segments(acct, snap))
+        self._account_rows[acct.name] = item
 
         # The row already carries every bucket, so the submenu is for identity
         # and actions rather than a second copy of the usage.
