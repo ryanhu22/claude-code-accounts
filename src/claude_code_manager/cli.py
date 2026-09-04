@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import core, sessions
+from . import core, sessions, shell
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -86,6 +86,12 @@ def _rule_table(r, accts) -> None:
         print()
         for tid, account in r.sessions.items():
             print(f"{D}session{X} {tid[:13]:<28} {chip(account)}")
+
+
+def cmd_shell_init(args) -> int:
+    """Print the shell wrapper to eval from an rc file."""
+    print(shell.init(core.ACCOUNTS_DIR, args.shell), end="")
+    return 0
 
 
 def cmd_profiles(_args) -> int:
@@ -201,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
         g.add_argument("--profile", metavar="NAME", help="every repo in a profile")
         g.add_argument("--default", action="store_true", help="everything with no rule")
         p.set_defaults(func=cmd_use)
+    p = sub.add_parser("shell-init", help="print the shell wrapper to eval in your rc file")
+    p.add_argument("shell", nargs="?", default="zsh", choices=("zsh", "bash"))
+    p.set_defaults(func=cmd_shell_init)
     sub.add_parser("profiles", help="show every rule, least specific first").set_defaults(func=cmd_profiles)
     p = sub.add_parser("profile", help="create and edit profiles")
     p.add_argument("action", choices=("new", "rm", "rename", "add", "drop"))
