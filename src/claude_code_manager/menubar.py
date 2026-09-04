@@ -212,19 +212,56 @@ def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
 
-def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
-    """How full this session's context window is.
+def _compact_tokens(n: int) -> str:
+    """A token count at a glance: 940, 12.3K, 236M, 2.1B."""
+    for cutoff, suffix, div in ((1e9, "B", 1e9), (1e6, "M", 1e6), (1e4, "K", 1e3)):
+        if n >= cutoff:
+            v = n / div
+            return f"{v:.0f}{suffix}" if v >= 100 else f"{v:.1f}{suffix}"
+    return str(n)
 
-    Read from the last request the session made, so it answers the question a
+
+def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
+    """How full this session's context window is, labelled so it reads as that.
+
+    Taken from the last request the session made, so it answers the question a
     long conversation actually raises: is this one about to compact?
     """
     pct = sess.context_pct
     if pct is None:
-        return [(" " * (CTX_BAR_W + 5), "dim")]
+        return [("  ctx ", "dim"), (" " * (CTX_BAR_W + 4), "dim")]
     filled = max(0, min(CTX_BAR_W, round(pct / 100 * CTX_BAR_W)))
     tone = _tone(pct)
-    return [(" ", "dim"), (FULL * filled, tone), (EMPTY * (CTX_BAR_W - filled), "dim"),
+    return [("  ctx ", "dim"), (FULL * filled, tone), (EMPTY * (CTX_BAR_W - filled), "dim"),
             (f"{pct:3.0f}%", tone)]
+
+
+def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
+    """Lifetime tokens for the row. Dim: it is history, not a warning."""
+    total = sess.spent.total
+    return (f"{_compact_tokens(total) + ' tok' if total else '':>10}", "dim")
+
+
+def _usage_notes(sess: "sessions.Session") -> list[str]:
+    """The numbers behind the row, spelled out.
+
+    The four figures are kept apart because they are not interchangeable: a
+    cache read costs a fraction of a fresh input token, and a long conversation
+    re-reads its whole context every turn, so cache reads dominate the total
+    and a single number would hide what was really spent.
+    """
+    out = []
+    if sess.context_tokens:
+        pct = f" ({sess.context_pct:.0f}% full)" if sess.context_pct else ""
+        out.append(f"Context now: {sess.context_tokens:,} of {sess.window:,}{pct}")
+    if sess.model:
+        out.append(f"Model: {sess.model}")
+    t = sess.spent
+    if t.total:
+        out.append(f"Lifetime: {t.total:,} tokens over {t.turns:,} turns")
+        out.append(f"    input {t.input:,} · cache write {t.cache_write:,}")
+        out.append(f"    cache read {t.cache_read:,} · output {t.output:,}")
+    return out
 
 
 def _status_tone(status: str) -> str:
@@ -443,19 +480,18 @@ class ManagerApp(rumps.App):
             (" ", "dim"),
             (_fit(sess.detail or sess.label, DETAIL_W), "text"),
             *_context_bar(sess),
-            (f" {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
+            _spent_cell(sess),
+            (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
             (f"{_age(sess.idle_for):>6}", "dim"),
         ])
 
         where = rumps.MenuItem(sess.cwd.replace(core.HOME, "~") or "?", callback=None)
         _apply_style(where, [("  ", "dim"), (sess.cwd.replace(core.HOME, "~"), "dim")])
         item.add(where)
-        if sess.context_tokens:
-            note = (f"{sess.context_tokens:,} of {sess.window:,} context tokens"
-                    f" · {sess.model or 'unknown model'}")
-            ctx_item = rumps.MenuItem(note, callback=None)
-            _apply_style(ctx_item, [("  ", "dim"), (note, "dim")])
-            item.add(ctx_item)
+        for note in _usage_notes(sess):
+            note_item = rumps.MenuItem(note, callback=None)
+            _apply_style(note_item, [("  ", "dim"), (note, "dim")])
+            item.add(note_item)
         item.add(rumps.separator)
 
         if sess.term_id:

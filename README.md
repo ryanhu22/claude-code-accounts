@@ -151,9 +151,22 @@ in order of preference: the branch for a worktree (which is also *which*
 worktree), a name that was chosen deliberately, or the title Claude Code wrote
 for the conversation.
 
-Each row also carries a context bar: how full that session's context window is,
+Each row also carries a `ctx` bar: how full that session's context window is,
 taken from the last request it made. It answers the question a long
-conversation raises, which is whether this one is about to compact.
+conversation raises, which is whether this one is about to compact. Beside it
+is what the session has spent over its whole life.
+
+Lifetime tokens are counted incrementally. A transcript is append only, so each
+pass resumes from the byte the last one stopped at and the offset is kept on
+disk, which makes the first pass over a large transcript happen once ever: ten
+sessions over 200MB of transcripts cost 0.36s cold and nothing after.
+
+The submenu breaks the total into four figures rather than leaving one number
+to speak for the session, because they are not interchangeable. A cache read
+costs a fraction of a fresh input token, and a long conversation re-reads its
+whole context every turn, so cache reads dominate the total. One real session
+here: 2.09 billion cache reads against 29 million cache writes and 3.3 million
+output tokens.
 
 Both come from a tail read of the session's transcript, cached against the
 file's size and mtime, so a refresh that changed nothing costs nothing. A tail

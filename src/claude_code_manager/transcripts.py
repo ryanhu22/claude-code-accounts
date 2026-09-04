@@ -16,7 +16,7 @@ from __future__ import annotations
 import glob
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 # Enough tail to hold several assistant turns and the periodic title record.
@@ -38,6 +38,113 @@ def window_for(model: str) -> int:
         if any(n in model for n in names):
             return size
     return DEFAULT_WINDOW
+
+
+@dataclass
+class Totals:
+    """Everything one session has spent, over its whole life.
+
+    Kept as four separate figures because they are not interchangeable: a cache
+    read is a fraction of the price of a fresh input token, and a long
+    conversation re-reads its whole cache every turn, so cache_read dominates
+    the sum and would flatter any single "tokens used" number that hid it.
+    """
+    input: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    output: int = 0
+    turns: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input + self.cache_write + self.cache_read + self.output
+
+    @property
+    def fresh(self) -> int:
+        """Everything but cache reads: the part that was actually processed."""
+        return self.input + self.cache_write + self.output
+
+
+TOKEN_CACHE = os.path.join(os.path.expanduser("~"), ".claude-accts", ".tokens.json")
+_tokens: Optional[dict] = None
+
+
+def _tokens_load() -> dict:
+    global _tokens
+    if _tokens is None:
+        try:
+            with open(TOKEN_CACHE) as f:
+                _tokens = json.load(f)
+        except (OSError, ValueError):
+            _tokens = {}
+    return _tokens
+
+
+def _tokens_save() -> None:
+    try:
+        os.makedirs(os.path.dirname(TOKEN_CACHE), exist_ok=True)
+        tmp = TOKEN_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_tokens_load(), f)
+        os.replace(tmp, TOKEN_CACHE)
+    except OSError:
+        pass
+
+
+def lifetime(path: str) -> Totals:
+    """Every token this session has spent, counted once.
+
+    A transcript is append only, so the count is resumed from where the last
+    pass stopped rather than rebuilt: only the bytes written since then are
+    read. The offset is kept on disk, so this survives a restart too, and the
+    first pass over a large transcript happens once ever.
+    """
+    if not path:
+        return Totals()
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return Totals()
+    store = _tokens_load()
+    e = store.get(path) or {}
+    offset = int(e.get("offset") or 0)
+    if offset > size:
+        e, offset = {}, 0          # rewritten or replaced: start over
+    t = Totals(input=int(e.get("input") or 0), cache_write=int(e.get("cache_write") or 0),
+               cache_read=int(e.get("cache_read") or 0), output=int(e.get("output") or 0),
+               turns=int(e.get("turns") or 0))
+    if offset == size:
+        return t
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            for line in f:
+                if not line.endswith(b"\n"):
+                    break          # a half-written last line; count it next time
+                offset += len(line)
+                if b'"usage"' not in line:
+                    continue       # cheap filter: most records carry no usage
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                u = ((d.get("message") or {}).get("usage")) or {}
+                t.input += int(u.get("input_tokens") or 0)
+                t.cache_write += int(u.get("cache_creation_input_tokens") or 0)
+                t.cache_read += int(u.get("cache_read_input_tokens") or 0)
+                t.output += int(u.get("output_tokens") or 0)
+                t.turns += 1
+    except OSError:
+        return t
+    store[path] = {"offset": offset, "input": t.input, "cache_write": t.cache_write,
+                   "cache_read": t.cache_read, "output": t.output, "turns": t.turns}
+    if len(store) > 500:
+        for gone in [k for k in store if not os.path.exists(k)]:
+            del store[gone]
+    _tokens_save()
+    return t
 
 
 @dataclass
