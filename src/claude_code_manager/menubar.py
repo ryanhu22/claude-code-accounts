@@ -344,7 +344,7 @@ def _spec_line(label: str, figure: str, tone: str = "text", after=()):
     digits hold their column because the face has tabular figures, not because
     every glyph in the row is the same width.
     """
-    runs = [(label, "dim", "ui"), ("\t" + figure, tone, "fig")]
+    runs = [(label, "dim", "ui"), ("\t" + figure, tone, "mono")]
     if after:
         runs.append(("\t", "dim", "ui"))
         runs += [(text, "dim" if kind == "mono" else kind,
@@ -692,35 +692,6 @@ def _reason(snap: "Snapshot", sess: "sessions.Session") -> str:
         (os.path.abspath(sess.cwd), core.project_root(sess.cwd)), sess.term_id)[1]
 
 
-def _clip(text: str, width: float, kind: str = "ui") -> str:
-    """Cut a string to fit a column, measured rather than counted.
-
-    _fit counts characters, which is the same as measuring only in a fixed
-    pitch face. Once the words are set in the menu face a name of twelve
-    narrow letters and one of twelve wide ones are different widths, and a
-    tab stop does not truncate: text that overruns simply pushes past it and
-    takes the next column with it.
-    """
-    import AppKit
-    font = _face(kind)
-    attrs = {AppKit.NSFontAttributeName: font}
-
-    def w(t):
-        return AppKit.NSAttributedString.alloc().initWithString_attributes_(
-            t, attrs).size().width
-
-    if w(text) <= width:
-        return text
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if w(text[:mid] + "\u2026") <= width:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + "\u2026"
-
-
 def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, str]]:
     """A session, seen from an account or a profile rather than on its own.
 
@@ -729,25 +700,19 @@ def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, st
     reader already knows by being where they are, and keeps what tells one
     session from another.
 
-    Columns on tab stops rather than on a character grid, so the words can be
-    set in the face macOS sets menus in. Padding to a width only aligns
-    anything while every glyph is the same size, and a repository name and a
-    branch are words, not figures.
+    Monospaced, and staying that way. Repository and branch are the two
+    columns a reader runs their eye down to tell five sessions apart, and a
+    fixed pitch face is what makes a column of words a column.
     """
     return [
-        (_clip(sess.repo, RUN_REPO_W), "dim", "ui"),
-        ("\t" + _clip(sess.detail or sess.label, RUN_DETAIL_W), "text", "ui"),
-        ("\t" + (sess.status or sess.kind), _status_tone(sess.status), "ui"),
-        ("\t" + _age(sess.idle_for), "dim", "fig"),
-        (("\t" + why) if why else "", "dim", "ui"),
+        ("    ", "dim"),
+        (_fit(sess.repo, REPO_W), "dim"),
+        (" ", "dim"),
+        (_fit(sess.detail or sess.label, SUB_DETAIL_W), "text"),
+        ("  " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        (f"{_age(sess.idle_for):>3}", "dim"),
+        (f"   {why}" if why else "", "dim"),
     ]
-
-
-# repository, what it is doing, whether it is working, how long since it last
-# did. The last is right aligned because it is a figure.
-RUN_TABS = (("l", 104.0), ("l", 324.0), ("l", 380.0), ("r", 414.0), ("l", 424.0))
-RUN_REPO_W = 82.0          # indent 16 to the first stop at 104, less a gap
-RUN_DETAIL_W = 210.0       # 104 to 324, less a gap
 
 
 def _why(reason: str) -> str:
@@ -1721,7 +1686,7 @@ class ManagerApp(rumps.App):
             row = rumps.MenuItem(
                 f"run:{tag}:{sess.pid}",
                 callback=None)
-            _apply_style(row, _session_line(sess), mono=False, tabs=RUN_TABS)
+            _apply_style(row, _session_line(sess))
             if detailed:
                 self._session_notes(row, sess, reachable, tag)
             item.add(row)
