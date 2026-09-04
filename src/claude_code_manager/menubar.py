@@ -237,24 +237,44 @@ def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
 
 
-def _lamps(here: list, width: int = 4) -> list[tuple[str, str]]:
-    """One lamp per session running on this account, lit if it is working.
+# One mark per running session, its height standing for how alive the session
+# is. Every glyph is the same width in SF Mono, unlike the braille a spinner
+# would want, so a row of them cannot knock the columns askew.
+LEVELS = ("\u2588", "\u2586", "\u2584", "\u2582", "\u2581")   # █ ▆ ▄ ▂ ▁
+STEPS = (300, 3600, 86400)          # 5 minutes, an hour, a day
 
-    A count is read; lamps are seen. Three of them beside a name says "three
-    terminals are on this subscription" without the eye stopping to parse a
-    word, which is the whole point of an instrument.
 
-    Working sessions come first so the lit ones cluster together, and a menu
-    cannot animate: AppKit does not run timers while a menu is open, so this
-    is the state at the moment it was drawn and nothing pulses.
+def _lamps(here: list, width: int = 5) -> list[tuple[str, str]]:
+    """One mark per session on this account, tall while the session is alive.
+
+    Idle is not one state. A session that stopped two minutes ago and one that
+    stopped last week were both drawn as the same hollow dot, which threw away
+    the only thing that told them apart. Height is how recently the session did
+    anything: full for one working now, then falling by the step as it goes
+    quiet, down to a flat line for one that has sat for a day or more.
+
+    So the row reads as a skyline. A busy account is tall and green, an account
+    somebody left open a week ago is a flat grey rule, and the shape says which
+    before any of it is read.
     """
-    lit = sorted(here, key=lambda s: (s.status or "") != "busy")
-    shown = lit[:width]
-    out = [("\u25cf" if (s.status or "") == "busy" else "\u25cb",
-            "text" if (s.status or "") == "busy" else "dim") for s in shown]
-    over = f"+{len(here) - len(shown)}" if len(here) > width else ""
+    def rank(sess):
+        if (sess.status or "") == "busy":
+            return 0
+        age = sess.idle_for
+        return 1 + sum(1 for step in STEPS if age > step)
+
+    ordered = sorted(here, key=rank)
+    if len(here) <= width:
+        shown, over = ordered, ""
+    else:
+        # Room for the count of the ones not drawn, so the column keeps its
+        # width however many sessions an account is carrying.
+        room = max(1, width - len(f"+{len(here)}"))
+        shown, over = ordered[:room], f"+{len(here) - room}"
+    out = [(LEVELS[rank(sess)], "ok" if rank(sess) == 0 else "dim")
+           for sess in shown]
     out.append((over, "dim"))
-    out.append((" " * max(0, width + 1 - len(shown) - len(over)), "dim"))
+    out.append((" " * max(0, width - len(shown) - len(over)), "dim"))
     return out
 
 
@@ -549,6 +569,8 @@ def _watcher_class() -> type:
                 except Exception:
                     pass      # a failed redraw must not stop the menu opening
 
+
+
         _WATCHER = CCMMenuWatcher
     return _WATCHER
 
@@ -626,6 +648,9 @@ class ManagerApp(rumps.App):
 
     def _on_menu_open(self) -> None:
         """Make the durations in the menu true at the moment they are read.
+
+        Also the point where the meters start moving, since nothing needs to
+        move while nobody is looking.
 
         Only the text that counts against the clock is repainted: when each
         window resets, how old the usage is. Rebuilding the whole menu here
