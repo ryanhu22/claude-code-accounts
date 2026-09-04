@@ -440,8 +440,14 @@ class Account:
 
     @property
     def stale(self) -> bool:
-        """True once the usage numbers are old enough to warn about."""
-        return self.usage_age > 420
+        """True once the usage numbers are old enough to warn about.
+
+        Above a rate limit plus a refresh cycle. The limit clears in 300
+        seconds and the cycle is 180, so numbers can reach about 480 seconds
+        old with nothing wrong at all, and a threshold under that reported the
+        ordinary case as a fault.
+        """
+        return self.usage_age > 600
 
     def limit(self, kind: str) -> Optional[Limit]:
         return next((l for l in self.limits if l.kind == kind), None)
