@@ -59,9 +59,24 @@ def _colors():
 # Each account keeps one colour everywhere it appears, so a glance at the
 # project list tells you which subscription is paying without reading names.
 # Keyed by a hash of the name so colours stay put when accounts are added.
-CHIP_COLORS = ("systemBlueColor", "systemPurpleColor", "systemTealColor",
-               "systemPinkColor", "systemIndigoColor", "systemBrownColor",
-               "systemMintColor", "systemCyanColor")
+# Twelve hues spread around the wheel, ORDERED so that sequential assignment
+# is maximally distinct: the first five accounts get blue, orange, green,
+# magenta, cyan rather than five neighbouring blues. Saturation and brightness
+# are tuned to survive both the 22% background wash and the light-mode blend.
+CHIP_COLORS = (
+    ("Blue",    0.58, 0.80, 0.95),
+    ("Orange",  0.07, 0.85, 0.98),
+    ("Green",   0.33, 0.75, 0.80),
+    ("Magenta", 0.85, 0.70, 0.92),
+    ("Cyan",    0.51, 0.75, 0.88),
+    ("Crimson", 0.99, 0.75, 0.92),
+    ("Olive",   0.18, 0.80, 0.78),
+    ("Violet",  0.74, 0.65, 0.95),
+    ("Teal",    0.46, 0.75, 0.78),
+    ("Amber",   0.12, 0.85, 0.92),
+    ("Pink",    0.93, 0.55, 0.98),
+    ("Indigo",  0.66, 0.70, 0.90),
+)
 
 
 def _chip_color(name: str):
@@ -70,8 +85,8 @@ def _chip_color(name: str):
         idx = int(name.removeprefix("__palette")) % len(CHIP_COLORS)
     else:
         idx = core.chip_index(name, len(CHIP_COLORS))
-    getter = getattr(AppKit.NSColor, CHIP_COLORS[idx], None) or AppKit.NSColor.systemBlueColor
-    return getter()
+    _, hue, sat, bri = CHIP_COLORS[idx]
+    return AppKit.NSColor.colorWithHue_saturation_brightness_alpha_(hue, sat, bri, 1.0)
 
 
 def _chip(name: str, width: int = 0) -> tuple[str, str, str]:
@@ -334,7 +349,7 @@ class ManagerApp(rumps.App):
         detail = rumps.MenuItem(acct.email or "unknown account", callback=None)
         _apply_style(detail, [("  ", "dim"), (acct.email or "unknown account", "text")])
         item.add(detail)
-        plan = " · ".join(x for x in (acct.plan, acct.tier) if x)
+        plan = acct.plan
         if plan:
             plan_item = rumps.MenuItem(plan, callback=None)
             _apply_style(plan_item, [("  ", "dim"), (plan, "dim")])
@@ -357,8 +372,8 @@ class ManagerApp(rumps.App):
         item.add(rumps.MenuItem("Rename…", callback=self._make_rename(acct.name)))
         palette = rumps.MenuItem("Colour")
         current = core.chip_index(acct.name, len(CHIP_COLORS))
-        for idx, raw in enumerate(CHIP_COLORS):
-            label = raw.replace("system", "").replace("Color", "")
+        for idx, entry_def in enumerate(CHIP_COLORS):
+            label = entry_def[0]
             entry = rumps.MenuItem(f"{label}{'  ✓' if idx == current else ''}",
                                    callback=self._make_recolor(acct.name, idx))
             # show each choice in the colour it would apply
