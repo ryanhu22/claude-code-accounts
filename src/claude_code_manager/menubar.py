@@ -463,6 +463,7 @@ class ManagerApp(rumps.App):
         self._account_rows: dict[str, rumps.MenuItem] = {}
         self._refresh_item: Optional[rumps.MenuItem] = None
         self._flash: tuple[str, str, float] = ("", "", 0.0)
+        self._done: list = []
         self._drawn_at = 0.0
         self._hide_from_dock()
         self.refresh_now(None)
@@ -559,7 +560,19 @@ class ManagerApp(rumps.App):
         self._busy = True
         threading.Thread(target=self._worker, args=(force,), daemon=True).start()
 
+    def _later(self, fn) -> None:
+        """Queue work that has to happen on the main thread. Call from anywhere."""
+        with self._lock:
+            self._done.append(fn)
+
     def _on_sync_tick(self, _timer) -> None:
+        with self._lock:
+            done, self._done = self._done, []
+        for fn in done:
+            try:
+                fn()
+            except Exception:
+                pass          # one failed follow-up must not stop the rest
         with self._lock:
             notice, self._notice = self._notice, None
         if notice is not None:
@@ -1069,7 +1082,7 @@ class ManagerApp(rumps.App):
             # from what is already known first, then go and check usage.
             applied: dict[str, str] = {}
             ok, msg = core.assign(scope, key, account, cwd=cwd,
-                                  live=self._snapshot.sessions, applied_out=applied)
+                                  live=[], applied_out=applied)
             self._did(ok, msg, applied)
         return handler
 
@@ -1096,10 +1109,51 @@ class ManagerApp(rumps.App):
         """
         self._flash = (message, "ok" if ok else "hot", time.time())
         if ok:
-            self._reflect_rules(applied)
+            self._reflect_rules(applied)      # rebuilds, so the flash appears
+            self._apply_later(message)
         else:
             self._rebuild()
             self._notify(message)
+
+    def _report(self, ok: bool, message: str) -> None:
+        """Say what happened, in the menu, without calling it a rule change.
+
+        A rebuild rather than a repaint: the flash is a row, so showing one
+        changes what the menu is made of.
+        """
+        self._flash = (message, "ok" if ok else "hot", time.time())
+        self._rebuild()
+
+    def _apply_later(self, note: str) -> None:
+        """Hand the rules just written to the sessions already running.
+
+        Writing a rule takes about a millisecond. Handing it out does not: the
+        account named may hold an expired credential, and refreshing one is two
+        requests at a fifteen second timeout each, plus the file locks shared
+        with Claude Code. AppKit draws on the thread that would be waiting, so
+        doing this inline froze the menu bar item for as long as it took. The
+        menu already shows the new rule; this is only the part that reaches
+        into running sessions, and it reports back when it lands.
+        """
+        def work() -> None:
+            try:
+                moved, applied = core.apply_now(self._snapshot.sessions)
+            except Exception:
+                return        # the 45 second sync picks the sessions up anyway
+            if not applied:
+                return
+            n = len(moved)
+            done = (f"{note}. {n} running session{'s' if n != 1 else ''} "
+                    f"switch{'es' if n == 1 else ''} within about 30 seconds"
+                    if moved else note)
+            self._later(lambda: self._settle(done, applied))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _settle(self, message: str, applied: dict) -> None:
+        """Report a rule that has reached the sessions it applies to."""
+        self._flash = (message, "ok", time.time())
+        self._reflect_rules(applied)
 
     def _reflect_rules(self, applied: Optional[dict] = None) -> None:
         """Redraw immediately from the rules, without waiting on the network.
@@ -1124,7 +1178,7 @@ class ManagerApp(rumps.App):
         def handler(_sender):
             applied: dict[str, str] = {}
             ok, msg = core.clear(scope, key, cwd=cwd,
-                                 live=self._snapshot.sessions, applied_out=applied)
+                                 live=[], applied_out=applied)
             self._did(ok, msg, applied)
         return handler
 
@@ -1132,8 +1186,7 @@ class ManagerApp(rumps.App):
         def handler(_sender):
             applied: dict[str, str] = {}
             ok, msg = core.profile_add_repo(profile, root,
-                                            live=self._snapshot.sessions,
-                                            applied_out=applied)
+                                            live=[], applied_out=applied)
             self._did(ok, msg, applied)
         return handler
 
@@ -1141,8 +1194,7 @@ class ManagerApp(rumps.App):
         def handler(_sender):
             applied: dict[str, str] = {}
             ok, msg = core.profile_remove_repo(profile, root,
-                                               live=self._snapshot.sessions,
-                                               applied_out=applied)
+                                               live=[], applied_out=applied)
             self._did(ok, msg, applied)
         return handler
 
@@ -1161,8 +1213,7 @@ class ManagerApp(rumps.App):
             ok, msg = core.add_profile(name)
             if ok and root:
                 ok, msg = core.profile_add_repo(name, root,
-                                                live=self._snapshot.sessions,
-                                                applied_out=applied)
+                                                live=[], applied_out=applied)
                 msg = f"profile “{name}” created, {msg}" if ok else msg
             self._did(ok, msg, applied)
         return handler
@@ -1185,8 +1236,7 @@ class ManagerApp(rumps.App):
                            ok="Remove", cancel="Cancel") != 1:
                 return
             applied: dict[str, str] = {}
-            ok, msg = core.remove_profile(name, live=self._snapshot.sessions,
-                                          applied_out=applied)
+            ok, msg = core.remove_profile(name, live=[], applied_out=applied)
             self._did(ok, msg, applied)
         return handler
 
@@ -1197,11 +1247,18 @@ class ManagerApp(rumps.App):
 
     def _make_poke(self, account: str):
         def handler(_sender):
-            ok, msg = core.poke(account)
-            rumps.notification("Claude Code Manager",
-                               f"Poked {account}" if ok else f"Could not poke {account}", msg)
-            self.refresh_now(None)
+            # Up to a 45 second request. Never on the drawing thread.
+            threading.Thread(target=self._poke, args=(account,), daemon=True).start()
         return handler
+
+    def _poke(self, account: str) -> None:
+        ok, msg = core.poke(account)
+        self._later(lambda: self._poked(ok, f"{account}: {msg}"))
+
+    def _poked(self, ok: bool, message: str) -> None:
+        self._report(ok, message)
+        if ok:
+            self.refresh_now(None)   # a started window is the point; show it
 
     def _make_rename(self, account: str):
         def handler(_sender):
