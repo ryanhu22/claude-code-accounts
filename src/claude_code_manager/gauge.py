@@ -16,12 +16,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Menu bar space is shared with everything else the user runs, so every
-# dimension here is the smallest that still reads at a glance.
+# dimension here is the smallest that still reads at a glance. Captions sit
+# above their battery rather than beside it: the bar has spare height and no
+# spare width, and a label over a gauge is how a dashboard cluster reads.
 HEIGHT = 18.0                 # status bar content height; the bar itself is 22
 BATTERY_W, BATTERY_H = 22.0, 10.0
+BATTERY_Y = 0.0
+CAPTION_SIZE, CAPTION_Y = 6.5, 10.0
 NUB_W, NUB_H = 1.5, 3.5
-CHIP_H, CHIP_PAD = 14.0, 4.0
-GAP = 5.0                     # between cells
+CHIP_H, CHIP_PAD = 14.0, 3.5
+GAP = 4.0                     # between cells
 
 
 @dataclass
@@ -89,7 +93,7 @@ def _draw_battery(x: float, cell: Cell, dim: bool) -> None:
     import AppKit
     label = AppKit.NSColor.labelColor()
     frame = label.colorWithAlphaComponent_(0.28 if dim else 0.42)
-    y = (HEIGHT - BATTERY_H) / 2
+    y = BATTERY_Y
     frame.setStroke()
     outline = _rounded(x + 0.5, y + 0.5, BATTERY_W - 1, BATTERY_H - 1, 3.0)
     outline.setLineWidth_(1.0)
@@ -128,7 +132,8 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
     # text in that hue, so the bar and the list agree on who is paying. The
     # text colour depends on the appearance, so it is chosen inside draw().
     wash = chip_color.colorWithAlphaComponent_(0.12 if dim else 0.22)
-    captions = [_text(c.caption, 8.0, AppKit.NSFontWeightMedium, secondary) for c in cells]
+    captions = [_text(c.caption, CAPTION_SIZE, AppKit.NSFontWeightMedium, secondary)
+                for c in cells]
 
     def name_text():
         ink = _ink(chip_color)
@@ -136,10 +141,8 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
                      ink.colorWithAlphaComponent_(0.6) if dim else ink)
 
     chip_w = name_text().size().width + 2 * CHIP_PAD
-    width = 1 + chip_w
-    for cap in captions:
-        width += GAP + cap.size().width + 2 + BATTERY_W + 1 + NUB_W
-    width += 1
+    cell_w = BATTERY_W + 1 + NUB_W
+    width = 1 + chip_w + len(cells) * (GAP + cell_w) + 1
 
     def draw(_rect) -> bool:
         x = 1.0
@@ -152,10 +155,9 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
         for cap, cell in zip(captions, cells):
             x += GAP
             cs = cap.size()
-            cap.drawAtPoint_(AppKit.NSMakePoint(x, (HEIGHT - cs.height) / 2))
-            x += cs.width + 2
+            cap.drawAtPoint_(AppKit.NSMakePoint(x + (BATTERY_W - cs.width) / 2, CAPTION_Y))
             _draw_battery(x, cell, dim)
-            x += BATTERY_W + 1 + NUB_W
+            x += cell_w
         return True
 
     img = AppKit.NSImage.imageWithSize_flipped_drawingHandler_(
