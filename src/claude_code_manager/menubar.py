@@ -29,6 +29,7 @@ SESSION_POLL_SECONDS = 5       # local only: how soon a new session appears
 FLASH_SECONDS = 30             # how long the last rule change stays on screen
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
+SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab open
 
 
 # Menu rows are drawn as attributed strings so the three usage buckets line up
@@ -581,7 +582,9 @@ class ManagerApp(rumps.App):
         self._lock = threading.Lock()
         self._busy = False
         self._syncing = False
-        self._notice: Optional[tuple[str, bool]] = None
+        # Accounts with a browser tab open for a sign-in, keyed to the attempt
+        # that opened it. Main thread only, like every other menu state.
+        self._signing_in: dict[str, oauth.Attempt] = {}
         self._again = False
         self._polling = False
         self._fresh_sessions: Optional[tuple] = None
@@ -704,13 +707,6 @@ class ManagerApp(rumps.App):
                 fn()
             except Exception:
                 pass          # one failed follow-up must not stop the rest
-        with self._lock:
-            notice, self._notice = self._notice, None
-        if notice is not None:
-            message, refresh = notice
-            self._notify(message)
-            if refresh:
-                self.refresh_now(None)
         with self._lock:
             snap, self._pending = self._pending, None
         if snap is not None:
@@ -964,8 +960,7 @@ class ManagerApp(rumps.App):
         self._tracker.enabled = not self._tracker.enabled
         self._rebuild()
 
-    @staticmethod
-    def _account_segments(acct: core.Account, snap: Snapshot) -> list:
+    def _account_segments(self, acct: core.Account, snap: Snapshot) -> list:
         """One account row. Split out because the countdowns in it age.
 
         The row is repainted whenever the menu opens, so the reset times and
@@ -979,6 +974,10 @@ class ManagerApp(rumps.App):
         here = [s for s in snap.sessions
                 if snap.running_on.get(s.env_config_dir) == acct.name]
         used_by = core.rules_using(acct.name, snap.rules, scopes=("project",))
+        # Ahead of the mismatch and the error in the tail: both are what the
+        # sign-in is there to fix, and while the browser tab is open the news
+        # is that it is being fixed, not what was wrong.
+        pending = acct.name in self._signing_in
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
         segments = [("  ", "dim"), *_chip(acct.name, NAME_W), (" ", "dim"),
@@ -991,7 +990,8 @@ class ManagerApp(rumps.App):
                 segments += _bucket(label, None)
             # Says the app is still trying, because a row of dashes on its own
             # reads as broken rather than as pending.
-            segments.append((f"   {acct.error or 'asking again'}", "dim"))
+            segments.append(SIGNING_TAIL if pending
+                            else (f"   {acct.error or 'asking again'}", "dim"))
             return segments
         weekly = acct.limit("weekly_all")
         segments += _bucket("5h", acct.limit("session"))
@@ -1006,7 +1006,9 @@ class ManagerApp(rumps.App):
             segments += _bucket(fable.label, fable, show_reset=not twice)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
-        if acct.mismatch:
+        if pending:
+            segments.append(SIGNING_TAIL)
+        elif acct.mismatch:
             segments.append((f"   {acct.mismatch}", "hot"))
         elif acct.error:
             segments.append((f"   {acct.error}", "dim"))
@@ -1018,7 +1020,9 @@ class ManagerApp(rumps.App):
         if not acct.signed_in:
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
             _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
-                                (f"  {acct.error}", "hot")])
+                                SIGNING_TAIL if acct.name in self._signing_in
+                                else (f"  {acct.error}", "hot")])
+            self._signing_row(item, acct.name)
             again = "Sign in again" if acct.error == "login expired" else "Sign in"
             item.add(self._browser_menu(again, acct.name))
             return item
@@ -1073,6 +1077,7 @@ class ManagerApp(rumps.App):
             _apply_style(note, [("  ", "dim"), (f"This is not {acct.name}. "
                                                 f"Sign in again to fix it.", "hot")])
             item.add(note)
+        self._signing_row(item, acct.name)
         signin = self._browser_menu("Sign in again", acct.name)
         _apply_style(signin, [("  ", "dim"), ("Sign in again", "text")])
         item.add(signin)
@@ -1628,54 +1633,77 @@ class ManagerApp(rumps.App):
         """Sign an account in. The browser hands the code back by itself."""
         try:
             cb = oauth.Callback()
-        except OSError:
-            self._sign_in_by_paste(name, app)      # cannot listen; ask for the code
+        except OSError as e:
+            self._notify(f"Could not sign in as “{name}”. The app could not open "
+                         f"a local port for the browser to call back on.\n\n{e}")
             return
         attempt = core.sign_in_begin(name, cb.redirect_uri)
+        # The server is made before the attempt, because the authorize URL
+        # needs the port, so it learns which sign-in it is waiting for only
+        # now. Anything on this machine can reach that port; without this it
+        # would take a redirect meant for some other sign-in.
+        cb.expect(attempt.state)
         err = oauth.open_in(attempt.url, app)
         if err:
             cb.close()
             self._notify(f"Could not open a browser: {err}")
             return
+        # Keyed to the attempt, so a second click on "Sign in again" while the
+        # first tab is still open takes the account over. The first wait still
+        # runs out five minutes later, and without the key it announced a
+        # timeout for an account that had signed in by then.
+        self._signing_in[name] = attempt
+        # Clicking closes the menu, and the browser can sit open for minutes,
+        # so say the click landed and mark the account until the code is back.
+        self._report(True, f"Signing in as “{name}”…")
 
         def wait() -> None:
+            # Every way out lands in _signed_in, because that is what clears
+            # the mark. A raise here used to die with the thread; now it would
+            # leave the row reading "signing in" for good.
             try:
                 if not cb.wait(300):
-                    self._post_notice(f"Signing in as “{name}” timed out. Try again.")
-                    return
-                if cb.error or not cb.code:
-                    self._post_notice(f"Sign-in was refused: {cb.error or 'no code came back'}")
-                    return
-                ok, msg = core.sign_in_finish(attempt, f"{cb.code}#{cb.state}")
-                self._post_notice(msg, refresh=ok)
+                    outcome = (False, f"Signing in as “{name}” timed out. Try again.")
+                elif cb.error or not cb.code:
+                    outcome = (False, f"Sign-in was refused: {cb.error or 'no code came back'}")
+                else:
+                    outcome = core.sign_in_finish(attempt, f"{cb.code}#{cb.state}")
+            except Exception as e:
+                outcome = (False, f"Signing in as “{name}” failed: {e}")
             finally:
                 cb.close()
+            self._later(lambda: self._signed_in(name, attempt, *outcome))
 
         threading.Thread(target=wait, daemon=True).start()
 
-    def _sign_in_by_paste(self, name: str, app: str) -> None:
-        """Fallback for when nothing local can listen: the user pastes the code."""
-        attempt = core.sign_in_begin(name)
-        err = oauth.open_in(attempt.url, app)
-        if err:
-            self._notify(f"Could not open a browser: {err}")
-            return
-        win = rumps.Window(
-            title=f"Signing in as “{name}”",
-            message="Sign in in the browser, then paste the code it shows here.",
-            ok="Sign in", cancel="Cancel", dimensions=(300, 22))
-        resp = win.run()
-        if resp.clicked != 1 or not resp.text.strip():
-            return
-        ok, msg = core.sign_in_finish(attempt, resp.text)
-        self._notify(msg)
-        if ok:
-            self.refresh_now(None)
+    def _signed_in(self, name: str, attempt: oauth.Attempt, ok: bool, message: str) -> None:
+        """Finish a sign-in on the main thread: drop the mark, say what happened.
 
-    def _post_notice(self, message: str, refresh: bool = False) -> None:
-        """Hand a message to the main thread. AppKit is not thread safe."""
-        with self._lock:
-            self._notice = (message, refresh)
+        This used to end in an alert. An alert costs a click, and it hides the
+        menu that already shows the account signed in. A failure still needs
+        one: the menu closed on the click, and the flash row lives 30 seconds
+        in a menu nobody is looking at.
+        """
+        if self._signing_in.get(name) is not attempt:
+            return            # a newer attempt owns this account's mark
+        del self._signing_in[name]
+        self._report(ok, message)
+        if ok:
+            # Forced, for the reason a poke is: an account that just signed in
+            # has numbers worth having now, and an ordinary refresh is skipped
+            # outright while the account sits inside a rate limit.
+            self._on_refresh_tick(None, force=True)
+        else:
+            self._notify(message)
+
+    def _signing_row(self, item: rumps.MenuItem, name: str) -> None:
+        """The row in an account's menu that says a sign-in is in flight."""
+        if name not in self._signing_in:
+            return
+        row = rumps.MenuItem(f"signing:{name}", callback=None)
+        _apply_style(row, [("  ", "dim"), ("Signing in…", "warn"),
+                           ("   finish in the browser", "dim")])
+        item.add(row)
 
     def _add_account(self, _sender, preset: str = "") -> None:
         """Open Claude Code in an account's own directory so /login can run.
