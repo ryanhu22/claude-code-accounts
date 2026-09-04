@@ -19,7 +19,7 @@ import json
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 from . import transcripts
@@ -49,6 +49,7 @@ class Session:
     context_tokens: int = 0
     model: str = ""
     context_pct: Optional[float] = None
+    spent: "transcripts.Totals" = field(default_factory=lambda: transcripts.Totals())
 
     @property
     def is_worktree(self) -> bool:
@@ -217,9 +218,11 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
     if with_transcript:
         roots = transcript_roots(config_dirs)
         for s in out:
-            g = transcripts.digest(transcripts.find(s.session_id, roots))
+            path = transcripts.find(s.session_id, roots)
+            g = transcripts.digest(path)
             s.title, s.context_tokens = g.title, g.context_tokens
             s.model, s.context_pct = g.model, g.context_pct
+            s.spent = transcripts.lifetime(path)
     return sorted(out, key=lambda s: s.updated_at, reverse=True)
 
 
