@@ -996,32 +996,21 @@ class ManagerApp(rumps.App):
             "No sessions are running on this account", f"acct:{acct.name}")
         item.add(rumps.separator)
 
-        # An account row is the place to hand it whole groups at once. Inline,
-        # for the same reason the scope pickers are: the list is short and a
-        # submenu would put it one hover away for nothing.
-        self._legend(item, f"use:{acct.name}", "Use this account for")
-        groups = [("default", "", "every project with no rule",
-                   snap.rules.default_account == acct.name)]
-        groups += [("profile", p.name, f"profile “{p.name}”", p.account == acct.name)
-                   for p in snap.rules.profiles]
-        for scope, key, label, same in groups:
-            row = rumps.MenuItem(f"use:{acct.name}:{scope}:{key}",
-                                 callback=None if same else
-                                 self._make_assign(scope, key, acct.name, ""))
-            _apply_style(row, [("    ", "dim"), ("\u2713 " if same else "  ", "text"),
-                               (label, "dim" if same else "text")])
-            item.add(row)
-        item.add(rumps.separator)
+        # There is no "use this account for" block here. It listed the profiles
+        # and the default and let you point them at this account, which is the
+        # profiles section read backwards. One place to set a rule is enough,
+        # and the profiles section is the one that shows what every rule is.
 
-        # Poking a window that is already running does nothing, so it says so
-        # instead of offering an action that cannot have an effect.
+        # Only offered when it can do something. A five hour window starts on
+        # the first request and this sends one, so an account nobody has used
+        # yet has its clock stopped. Once the clock is running there is nothing
+        # to start, and the row said so, which is a state the account row above
+        # already shows and not a thing to click.
         session = acct.limit("session")
         if session and not session.resets_at:
-            self._line(item, f"poke:{acct.name}", "Start the 5h window",
+            self._line(item, f"poke:{acct.name}", "Start the 5h window now",
                        callback=self._make_poke(acct.name))
-        else:
-            self._line(item, f"poke:{acct.name}", "The 5h window is already running",
-                       tone="dim")
+            item.add(rumps.separator)
 
         # Signing in again is always a reasonable thing to want, and when a
         # directory is holding the wrong account it is the only way out — so it
