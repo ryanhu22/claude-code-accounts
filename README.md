@@ -107,3 +107,29 @@ property of the repo, not of the terminal you happen to be in.
 ## License
 
 MIT
+
+## Why credential writes take Claude Code's locks
+
+An account's login is one value copied into several keychain items: one per
+account slot, plus one per context that swapped to it. A refresh token is
+single use, so rotating it in any one copy spends it for all of them. Two
+things then go wrong, and both look to the user like being signed out at
+random:
+
+- **Refresh collision.** Our refresh lands inside a running session's refresh.
+  The token rotates twice, one copy keeps the spent generation, and its next
+  refresh fails with `invalid_grant`.
+- **Overwritten swap.** A swap lands in the same window and Claude Code saves
+  the old account's refreshed token on top of it. The swap silently reverts.
+
+So every credential write runs under Claude Code's own advisory locks
+(`<config dir>/.oauth_refresh.lock` then `<config dir>.lock`, a proper-lockfile
+directory pair), re-reads the credential once the lock is held, and pushes the
+rotated token to every other copy of the same generation before returning. The
+lock protocol was documented by [claude-swap](https://github.com/realiti4/claude-swap),
+which verified it against the Claude Code 2.1.218 bundle.
+
+Usage reads are cached and backed off. `/api/oauth/usage` is rate limited per
+account and running sessions poll it too, so the busiest account is exactly the
+one whose row fails to load. A 429 serves the last payload instead of blanking
+the row; reset times in it are absolute, so a cached row still counts down.
