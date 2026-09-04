@@ -743,6 +743,29 @@ def recorded_email(config_dir: str) -> str:
 CHIP_FILE = os.path.join(ACCOUNTS_DIR, ".chips.json")
 
 
+_CHIPS: tuple[float, dict] = (-1.0, {})
+
+
+def _chip_table() -> dict:
+    """The colour table, re-read only when the file behind it changes.
+
+    Every chip drawn asks for its colour, and a menu redraw draws hundreds, so
+    this is read far more often than it is written.
+    """
+    global _CHIPS
+    try:
+        stamp = os.path.getmtime(CHIP_FILE)
+    except OSError:
+        return {}
+    if stamp != _CHIPS[0]:
+        try:
+            with open(CHIP_FILE) as f:
+                _CHIPS = (stamp, json.load(f))
+        except (OSError, ValueError):
+            _CHIPS = (stamp, {})
+    return _CHIPS[1]
+
+
 def chip_index(name: str, palette_size: int = 8) -> int:
     """A stable, distinct colour slot per account.
 
@@ -750,32 +773,20 @@ def chip_index(name: str, palette_size: int = 8) -> int:
     colour-coding, so assignments are remembered: an account keeps its colour
     for good, and a new one takes the lowest free slot.
     """
-    try:
-        with open(CHIP_FILE) as f:
-            table = json.load(f)
-    except (OSError, ValueError):
-        table = {}
+    table = _chip_table()
     if name in table:
         return int(table[name]) % palette_size
     used = {int(v) for v in table.values()}
     idx = next((i for i in range(palette_size) if i not in used), len(table) % palette_size)
-    table[name] = idx
-    try:
-        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
-        with open(CHIP_FILE, "w") as f:
-            json.dump(table, f, indent=2)
-    except OSError:
-        pass
+    set_chip_index(name, idx)
     return idx
 
 
 def set_chip_index(name: str, index: int) -> None:
-    try:
-        with open(CHIP_FILE) as f:
-            table = json.load(f)
-    except (OSError, ValueError):
-        table = {}
+    global _CHIPS
+    table = dict(_chip_table())
     table[name] = int(index)
+    _CHIPS = (-1.0, {})
     try:
         os.makedirs(ACCOUNTS_DIR, exist_ok=True)
         with open(CHIP_FILE, "w") as f:
@@ -1401,14 +1412,25 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     save_rules(r)
     for root in moved:
         carry_project_state(root, before, account_dir(account))
-    moved_live, applied = apply_now(live)
+    return True, landed(f"{where} now uses {account}", live, applied_out)
+
+
+def landed(where: str, live: Optional[Iterable["sessions.Session"]] = None,
+           applied_out: Optional[dict] = None) -> str:
+    """Push the rules that were just saved to live sessions, and report.
+
+    Every rule edit ends the same way, so the sentence a user reads is written
+    once. `applied_out` gives the caller what each directory was handed, so a
+    menu can redraw from it instead of reading the directories back.
+    """
+    moved, applied = apply_now(live)
     if applied_out is not None:
-        applied_out.update(applied)      # so a caller can redraw without re-reading
-    if moved_live:
-        n = len(moved_live)
-        return True, (f"{where} now uses {account}. {n} running session"
-                      f"{'s' if n != 1 else ''} switch within about 30 seconds.")
-    return True, f"{where} now uses {account}"
+        applied_out.update(applied)
+    if not moved:
+        return where
+    n = len(moved)
+    return (f"{where}. {n} running session{'s' if n != 1 else ''} "
+            f"switch{'' if n != 1 else 'es'} within about 30 seconds")
 
 
 def apply_now(live: Optional[Iterable["sessions.Session"]] = None
@@ -1442,7 +1464,9 @@ def apply_now(live: Optional[Iterable["sessions.Session"]] = None
     return moved, applied
 
 
-def clear(scope: str, key: str, cwd: str = "") -> tuple[bool, str]:
+def clear(scope: str, key: str, cwd: str = "",
+          live: Optional[Iterable["sessions.Session"]] = None,
+          applied_out: Optional[dict] = None) -> tuple[bool, str]:
     """Drop a rule so the level above it decides again."""
     r = rules()
     if scope == "session":
@@ -1460,10 +1484,12 @@ def clear(scope: str, key: str, cwd: str = "") -> tuple[bool, str]:
     else:
         return False, f"unknown scope {scope}"
     save_rules(r)
-    return True, f"{where} follows its profile again"
+    return True, landed(f"{where} follows its profile again", live, applied_out)
 
 
-def add_profile(name: str, account: str = "") -> tuple[bool, str]:
+def add_profile(name: str, account: str = "",
+                live: Optional[Iterable["sessions.Session"]] = None,
+                applied_out: Optional[dict] = None) -> tuple[bool, str]:
     name = name.strip()
     if not name:
         return False, "a profile needs a name"
@@ -1477,16 +1503,19 @@ def add_profile(name: str, account: str = "") -> tuple[bool, str]:
             return False, str(e)
     r.profiles.append(profiles.Profile(name=name, account=account or r.default_account))
     save_rules(r)
-    return True, f"profile “{name}” created"
+    return True, landed(f"profile “{name}” created", live, applied_out)
 
 
-def remove_profile(name: str) -> tuple[bool, str]:
+def remove_profile(name: str,
+                   live: Optional[Iterable["sessions.Session"]] = None,
+                   applied_out: Optional[dict] = None) -> tuple[bool, str]:
     r = rules()
     if not r.profile(name):
         return False, f"no profile named {name}"
     r.profiles = [p for p in r.profiles if p.name != name]
     save_rules(r)
-    return True, f"profile “{name}” removed; its repos follow the default again"
+    return True, landed(f"profile “{name}” removed; its repos follow the default again",
+                        live, applied_out)
 
 
 def rename_profile(old: str, new: str) -> tuple[bool, str]:
@@ -1502,7 +1531,9 @@ def rename_profile(old: str, new: str) -> tuple[bool, str]:
     return True, f"“{old}” is now “{new}”"
 
 
-def profile_add_repo(name: str, path: str) -> tuple[bool, str]:
+def profile_add_repo(name: str, path: str,
+                     live: Optional[Iterable["sessions.Session"]] = None,
+                     applied_out: Optional[dict] = None) -> tuple[bool, str]:
     r = rules()
     prof = r.profile(name)
     if not prof:
@@ -1513,16 +1544,20 @@ def profile_add_repo(name: str, path: str) -> tuple[bool, str]:
     save_rules(r)
     if prof.account:
         carry_project_state(root, before, account_dir(prof.account))
-    return True, f"{os.path.basename(root)} joined “{name}”"
+    return True, landed(f"{os.path.basename(root)} joined “{name}”",
+                        live, applied_out)
 
 
-def profile_remove_repo(name: str, path: str) -> tuple[bool, str]:
+def profile_remove_repo(name: str, path: str,
+                        live: Optional[Iterable["sessions.Session"]] = None,
+                        applied_out: Optional[dict] = None) -> tuple[bool, str]:
     r = rules()
     if not r.profile(name):
         return False, f"no profile named {name}"
     r.remove_repo(name, project_root(path))
     save_rules(r)
-    return True, f"{os.path.basename(project_root(path))} left “{name}”"
+    return True, landed(f"{os.path.basename(project_root(path))} left “{name}”",
+                        live, applied_out)
 
 
 # --------------------------------------------------------------------------- session pins
