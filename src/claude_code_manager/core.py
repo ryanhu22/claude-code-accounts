@@ -605,7 +605,11 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     return None
 
 
-def adopt(config_dir: str, blob: dict, email: str = "") -> bool:
+def is_account_dir(config_dir: str) -> bool:
+    return os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR
+
+
+def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) -> bool:
     """Write a credential into a config dir under Claude Code's locks.
 
     Putting a credential in a dir can change whose dir it is, so the cached
@@ -614,6 +618,17 @@ def adopt(config_dir: str, blob: dict, email: str = "") -> bool:
     another's, which then spreads: the answer is used to decide what to copy
     where.
     """
+    # An account's own directory may only ever hold that account's login. It is
+    # named for one subscription and everything else treats it as the truth
+    # about that subscription, so writing another account's credential there
+    # does not just misreport it: the wrong login then gets copied outward to
+    # every session the account owns. Claude Code keeps its own record of who a
+    # directory last authenticated as, which makes an independent check.
+    if is_account_dir(config_dir) and not rebind:
+        expected = recorded_email(config_dir)
+        actual = (email or identity(config_dir, blob)[0].get("email") or "").lower()
+        if expected and actual and expected.lower() != actual.lower():
+            return False
     try:
         with locks.credentials(config_dir):
             keychain.write_credentials(config_dir, blob)
@@ -662,6 +677,12 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
         return acct
     acct.email = email
     acct.plan = info.get("plan") or blob.get("subscriptionType")
+    # An account holding somebody else's login still answers every question,
+    # it just answers them about the wrong subscription — which reads as two
+    # accounts reporting identical usage rather than as a fault. Say it.
+    was = recorded_email(slot)
+    if was and email and was.lower() != email.lower():
+        acct.error = f"holds {email}, not {was}"
     if with_usage:
         acct.limits, acct.usage_at, acct.error = _usage(name, blob["accessToken"], force)
     return acct
@@ -805,7 +826,7 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
         return False, result
     email, slot = result, ensure_account_dir(attempt.account)
     before = recorded_email(slot) or ""
-    if not adopt(slot, blob):
+    if not adopt(slot, blob, email=email, rebind=True):
         return False, "signed in, but the keychain refused to store it"
     _cache_write({**_cache_read(IDENTITY_CACHE),
                   os.path.abspath(slot): {"fp": fingerprint(blob), "email": email,
