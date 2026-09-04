@@ -257,7 +257,9 @@ def _lamps(here: list, width: int = 4) -> list[tuple[str, str]]:
     if not here:
         return [(" " * width, "dim")]
     working = any((sess.status or "") == "busy" for sess in here)
-    tone = "text" if working else "dim"
+    # Green for the same reason a busy session row is green: one colour, one
+    # meaning, and this lamp is that meaning summed up for the account.
+    tone = "ok" if working else "dim"
     return [(LIVE if working else QUIET, tone),
             (f" {len(here)}", tone),
             (" " * max(0, width - 2 - len(str(len(here)))), "dim")]
@@ -353,7 +355,10 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
     """Lifetime tokens for the row. Dim: it is history, not a warning."""
     total = sess.spent.total
-    return (f"{_compact_tokens(total) + ' tok' if total else '':>10}", "dim")
+    # Twelve wide, not ten: two of those are the gap that separates this from
+    # the context number on its left, which is a different instrument reading
+    # a different thing.
+    return (f"{_compact_tokens(total) + ' tok' if total else '':>12}", "dim")
 
 
 def _usage_notes(sess: "sessions.Session") -> list[str]:
@@ -427,8 +432,12 @@ def _session_segments(sess: "sessions.Session", running_on: str) -> list[tuple[s
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
         _spent_cell(sess),
-        ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
-        (f"{_age(sess.idle_for):>5}", "dim"),
+        # Four spaces before the status and one after it. The status used to
+        # sit two from the token count and four from its own age, so it read
+        # as part of the tokens rather than as the state of a session that has
+        # been in it for that long. "busy 3m" is one fact.
+        ("    " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        (f"{_age(sess.idle_for):>3}", "dim"),
     ]
 
 
@@ -457,8 +466,8 @@ def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, st
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
         _spent_cell(sess),
-        ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
-        (f"{_age(sess.idle_for):>5}", "dim"),
+        ("    " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        (f"{_age(sess.idle_for):>3}", "dim"),
         (f"   {why}" if why else "", "dim"),
     ]
 
@@ -474,10 +483,17 @@ def _why(reason: str) -> str:
 def _status_tone(status: str) -> str:
     """Working sessions stand out; idle ones stay quiet.
 
+    Green, not plain text. Twelve rows of grey give the eye nothing to land
+    on, and the question this list is opened for is which sessions are working
+    right now, so that is the one field worth a colour. It reads the same as
+    the lit lamp on the account above it, which answers the same question for
+    a whole subscription.
+
     Nothing here returns a warning colour. A session sitting at a shell is a
-    state, not a problem, and orange now means one thing: a window running out.
+    state, not a problem, and orange still means one thing: a window running
+    out.
     """
-    return {"busy": "text"}.get(status, "dim")
+    return {"busy": "ok"}.get(status, "dim")
 
 
 def _age(seconds: float) -> str:
