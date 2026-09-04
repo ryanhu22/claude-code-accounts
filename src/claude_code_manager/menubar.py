@@ -273,6 +273,61 @@ def _set_icon(item: "rumps.MenuItem", name: str) -> None:
         item._menuitem.setImage_(img)
 
 
+# Where a spec line puts its figure and its trailing note. A label set in the
+# menu font has no character width to count, so the column is a tab stop rather
+# than padding: "cache write" is 70pt and "model" is 37pt, and both have to
+# leave the figure ending in the same place.
+SPEC_INDENT = 16.0
+SPEC_FIGURE_X = 172.0          # right edge of the figures
+SPEC_NOTE_X = 180.0            # where anything after them starts
+
+
+def _spec_style():
+    import AppKit
+    para = AppKit.NSMutableParagraphStyle.alloc().init()
+    para.setFirstLineHeadIndent_(SPEC_INDENT)
+    para.setHeadIndent_(SPEC_INDENT)
+    para.setTabStops_([
+        AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
+            AppKit.NSTextAlignmentRight, SPEC_FIGURE_X, {}),
+        AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
+            AppKit.NSTextAlignmentLeft, SPEC_NOTE_X, {}),
+    ])
+    return para
+
+
+def _spec_line(label: str, figure: str, tone: str = "text", after=()):
+    """A label in the menu font, a figure in the monospaced one, one line.
+
+    Only the figures are monospaced. The words around them are words, and
+    setting a word in a fixed pitch face makes it read as output rather than
+    as a caption, which is what the whole menu looked like before.
+    """
+    import AppKit
+    colors = _colors()
+    ui = AppKit.NSFont.menuFontOfSize_(0)
+    mono = AppKit.NSFont.monospacedSystemFontOfSize_weight_(12.0, AppKit.NSFontWeightRegular)
+    para = _spec_style()
+    out = AppKit.NSMutableAttributedString.alloc().init()
+
+    def add(text, font, tone_name):
+        out.appendAttributedString_(
+            AppKit.NSAttributedString.alloc().initWithString_attributes_(text, {
+                AppKit.NSFontAttributeName: font,
+                AppKit.NSForegroundColorAttributeName: colors.get(tone_name, colors["text"]),
+                AppKit.NSParagraphStyleAttributeName: para,
+            }))
+
+    add(label, ui, "dim")
+    add("\t" + figure, mono, tone)
+    if after:
+        add("\t", ui, "dim")
+        for text, run_tone in after:
+            add(text, mono if run_tone == "mono" else ui,
+                "dim" if run_tone == "mono" else run_tone)
+    return out
+
+
 def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
@@ -1595,17 +1650,15 @@ class ManagerApp(rumps.App):
                 self._session_notes(row, sess, reachable, tag)
             item.add(row)
 
-    def _spec(self, row: rumps.MenuItem, key: str, label: str,
-              value: list, lead: str = "") -> None:
-        """One line of a specification: what it is, then what it reads.
-
-        The label is left aligned and the figure is right aligned in a column
-        of its own, so four numbers of wildly different size can be compared
-        by where they end rather than by counting digits.
-        """
+    @staticmethod
+    def _spec(row: rumps.MenuItem, key: str, label: str, figure: str,
+              tone: str = "text", after=()) -> None:
+        """One line of a specification: what it is, then what it reads."""
         note = rumps.MenuItem(key, callback=None)
-        _apply_style(note, [(f"    {label:<{NOTE_LABEL_W}}", "dim"), *value,
-                            (f"  {lead}" if lead else "", "dim")])
+        try:
+            note._menuitem.setAttributedTitle_(_spec_line(label, figure, tone, after))
+        except Exception:
+            pass
         row.add(note)
 
     def _session_notes(self, row: rumps.MenuItem, sess: "sessions.Session",
@@ -1613,37 +1666,29 @@ class ManagerApp(rumps.App):
         """What the condensed row leaves out, laid out as a specification.
 
         This was a stack of sentences, every one of them in the same grey,
-        each starting at a different place and ending at a different place:
-        "Context now: 573,398 of 1,000,000 (57% full)". Read as a paragraph it
-        is fine. Scanned, which is what a panel is for, it gives the eye
-        nothing to line up on and repeats the two figures the row above
-        already showed.
+        each starting in a different place and ending in a different place:
+        "Context now: 573,398 of 1,000,000 (57% full)". Read as a paragraph
+        that is fine. Scanned, which is what a panel is for, it gives the eye
+        nothing to line up on.
 
-        So it is a table now, under two headings, with the labels in one
-        column and the figures right aligned in another. Monospaced, because
-        that is the only way a column of numbers is a column.
+        So it is a table, under two headings, with the labels in one column
+        and the figures right aligned in another. Four numbers of wildly
+        different size compare by where they end rather than by counting
+        digits, which is the only reason cache reads dominating a total is
+        visible at all.
         """
         pid, t = sess.pid, sess.spent
-        n = lambda v: (f"{v:,}".rjust(NOTE_NUM_W), "text")
 
         if sess.context_tokens:
             self._legend(row, f"ctx:{tag}:{pid}", "Context")
-            # The count, what it is a count of, and the same bar the main menu
-            # draws, on one line. The bar had a line of its own and sat under
-            # the number column with nothing to its left, which read as a
-            # second row rather than as the shape of the one above it.
-            note = rumps.MenuItem(f"note:{tag}:{pid}:ctx", callback=None)
-            _apply_style(note, [(f"    {'in use':<{NOTE_LABEL_W}}", "dim"),
-                                n(sess.context_tokens),
-                                (f"  of {sess.window:,}".ljust(16), "dim"),
-                                *_context_bar(sess, named=False)])
-            row.add(note)
-        if sess.model:
-            # Left aligned. It is a name, not a quantity, and right aligning it
-            # against a column of figures pushed a long one out past their left
-            # edge, which made the numbers look ragged instead.
-            self._spec(row, f"note:{tag}:{pid}:model", "model",
-                       [(sess.model, "text")])
+            self._spec(row, f"note:{tag}:{pid}:ctx", "in use",
+                       f"{sess.context_tokens:,}", "text",
+                       after=[(f" / {sess.window:,}", "dim"),
+                              *[(txt, "mono") for txt, _ in
+                                _context_bar(sess, named=False)]])
+            if sess.model:
+                self._spec(row, f"note:{tag}:{pid}:model", "model",
+                           "", "dim", after=[(sess.model, "text")])
 
         if t.total:
             self._legend(row, f"spend:{tag}:{pid}", "Tokens spent")
@@ -1653,10 +1698,10 @@ class ManagerApp(rumps.App):
             # the total and one number hides what was really spent.
             for label, value in (("input", t.input), ("cache write", t.cache_write),
                                  ("cache read", t.cache_read), ("output", t.output)):
-                self._spec(row, f"note:{tag}:{pid}:{label}", label, [n(value)])
-            self._spec(row, f"note:{tag}:{pid}:total", "total",
-                       [(f"{t.total:,}".rjust(NOTE_NUM_W), _spent_tone(t.total))],
-                       f"over {t.turns:,} turns")
+                self._spec(row, f"note:{tag}:{pid}:{label}", label, f"{value:,}")
+            self._spec(row, f"note:{tag}:{pid}:total", "total", f"{t.total:,}",
+                       _spent_tone(t.total),
+                       after=[(f" \u00b7 {t.turns:,} turns", "dim")])
 
         if reachable:
             row.add(rumps.separator)
