@@ -5,13 +5,10 @@ appearance the menu bar has at the moment it paints. Label colours resolve at
 draw time, which is what keeps one image right in both light and dark menu
 bars and on every screen density.
 
-It fills with the share of the window that is SPENT, and the number inside is
-that same percentage, which is what the menu rows, the account pickers and the
-API all say. It used to fill with what was left, on the theory that two
-different shapes could not be confused. The number is what a reader carries
-between the two surfaces, not the shape, so an untouched account showed 100 in
-the menu bar and 0% in the menu, and 100 read as a full tank rather than as an
-empty one.
+A battery reads as how much is left, so it fills with the remaining share of
+the window and the number inside is that same figure. The menu rows show the
+same thing the same way round, so 100 here and 100% there are one number and
+not two, and a full bar means plenty on both.
 """
 from __future__ import annotations
 
@@ -151,26 +148,29 @@ def _draw_battery(x: float, cell: Cell, dim: bool) -> None:
     label = _bar_ink()          # same ink as the captions above it
     frame = label.colorWithAlphaComponent_(0.28 if dim else 0.42)
     y = BATTERY_Y
+    frame.setFill()
+    _rounded(x + BATTERY_W + 1, y + (BATTERY_H - NUB_H) / 2, NUB_W, NUB_H, 0.75).fill()
     frame.setStroke()
     outline = _rounded(x + 0.5, y + 0.5, BATTERY_W - 1, BATTERY_H - 1, 3.0)
     outline.setLineWidth_(1.0)
     outline.stroke()
 
-    used = None if cell.used is None else max(0.0, min(100.0, cell.used))
+    left = None if cell.used is None else max(0.0, min(100.0, 100.0 - cell.used))
     inner_w = BATTERY_W - 4
-    if used:
-        w = max(2.0, inner_w * used / 100.0)
+    if left:
+        w = max(2.0, inner_w * left / 100.0)
         # The number sits on top, so the fill stays translucent: a solid swatch
         # would swallow the digits in whichever mode it contrasts less with.
         _tone_color(cell.tone).colorWithAlphaComponent_(0.28 if dim else 0.55).setFill()
         _rounded(x + 2, y + 2, w, BATTERY_H - 4, 1.5).fill()
 
-    if used is None:
+    if left is None:
         s = "?"
         color = _bar_ink()
     else:
-        s = f"{used:.0f}"
-        color = _tone_color("hot") if used >= 100 else label
+        s = f"{left:.0f}"
+        # Nothing left is the one reading worth colouring the digits for.
+        color = _tone_color("hot") if left <= 0 else label
     if dim:
         color = color.colorWithAlphaComponent_(DIM_ALPHA)
     num = _text(s, 7.5, AppKit.NSFontWeightBold, color, mono_digits=True)
