@@ -1445,11 +1445,22 @@ class ManagerApp(rumps.App):
             item.add(row)
         else:
             join = rumps.MenuItem(f"Add “{os.path.basename(root)}” to profile")
+            _set_icon(join, "folder.badge.plus")
             for p in snap.rules.profiles:
-                join.add(rumps.MenuItem(p.name, callback=self._make_join(p.name, root)))
+                entry = rumps.MenuItem(p.name, callback=self._make_join(p.name, root))
+                # The same folder the PROFILES section marks a profile with. A
+                # profile is a profile wherever it is listed, and this was the
+                # one list that had it as a bare word.
+                _apply_style(entry, [(" ", "dim"), ("folder", "icon"),
+                                     (" ", "dim"), (p.name, "text")], mono=False)
+                join.add(entry)
             join.add(rumps.separator)
-            self._line(join, f"newp:{sess.pid}", "New profile\u2026",
-                       callback=self._make_new_profile(root), indent=" ")
+            fresh = rumps.MenuItem(f"newp:{sess.pid}",
+                                  callback=self._make_new_profile(root))
+            _apply_style(fresh, [(" ", "dim"), ("folder.badge.plus", "icon"),
+                                 (" ", "dim"), ("New profile\u2026", "text")],
+                         mono=False)
+            join.add(fresh)
             item.add(join)
         item.add(rumps.separator)
         # The same block a session gets when it is reached through its
