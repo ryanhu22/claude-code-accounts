@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import core, sessions, shell
+from . import core, oauth, sessions, shell
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -190,6 +190,26 @@ def cmd_unpin(_args) -> int:
     return 0 if ok else 1
 
 
+def cmd_login(args) -> int:
+    """Sign an account in through the browser, in two steps."""
+    attempt = core.sign_in_begin(args.account)
+    err = oauth.open_in(attempt.url, args.browser or "")
+    if err:
+        print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
+              file=sys.stderr)
+    else:
+        print(f"Signing in as “{args.account}”. A browser is opening.")
+    print(f"\n{D}Sign in, then paste the code it shows.{X}")
+    try:
+        pasted = input("code: ")
+    except EOFError:
+        print("\nno code given; nothing changed", file=sys.stderr)
+        return 1
+    ok, msg = core.sign_in_finish(attempt, pasted)
+    print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
 def cmd_add(args) -> int:
     print(core.add_account_command(args.account))
     return 0
@@ -226,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.set_defaults(func=cmd_pin)
     sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
+    p = sub.add_parser("login", help="sign an account in through the browser")
+    p.add_argument("account")
+    p.add_argument("--browser", help='e.g. "Google Chrome", "Safari"')
+    p.set_defaults(func=cmd_login)
     p = sub.add_parser("add", help="print the command that signs an account in")
     p.add_argument("account")
     p.set_defaults(func=cmd_add)

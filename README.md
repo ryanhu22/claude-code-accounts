@@ -20,12 +20,18 @@ which one, or how to move a project off an exhausted account. This does.
 uv tool install "claude-code-manager[menubar]"   # or without [menubar] for the CLI
 ```
 
-Sign each subscription in once. This opens Claude Code in the directory that
-account will own, where you type `/login`:
+Sign each subscription in once, through the browser:
 
 ```sh
-ccm add work-account          # prints the command; run it, then /login
+ccm login work-account                          # or --browser "Google Chrome"
 ```
+
+The menu bar does the same thing: an account that is signed out offers
+**Sign in**, and lets you pick the browser. Which browser matters, because the
+sign-in uses whichever account that browser is already logged into. With
+several subscriptions that is exactly how the wrong one gets attached to a
+name, so a sign-in that lands on a different account than the slot held before
+says so.
 
 Then let the shell pick the account for you. Add to `.zshrc`:
 
@@ -118,6 +124,19 @@ Rules live in `~/.claude-manager/config.json`. Claude Code only understands
 `CLAUDE_CONFIG_DIR` and the shell must resolve a directory before it can launch
 anything, so they are also flattened into a grep-able `routes.conf` on every
 change. If this tool is broken or missing, the last table still works.
+
+### A credential is never invented
+
+Signing in is an OAuth PKCE flow against `platform.claude.com`, asking for the
+same scopes a real Claude Code login carries. Every field of the stored
+credential comes from the token response or from `/api/oauth/profile`, and the
+result is checked against the live API before it is written.
+
+A blob missing `subscriptionType` or `rateLimitTier` still authenticates, but
+Claude Code then opens the session as "API Usage Billing" instead of the plan
+the user pays for. So a sign-in that cannot read back its own identity and plan
+is refused rather than saved: a login that half works is harder to diagnose
+than one that never happened.
 
 ### Credential writes take Claude Code's locks
 
