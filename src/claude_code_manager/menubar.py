@@ -595,6 +595,18 @@ class ManagerApp(rumps.App):
         acct = next((a for a in snap.accounts if a.name == name), None)
         return acct, name or None, sess
 
+    @staticmethod
+    def _cell(caption: str, lim: "Optional[core.Limit]") -> gauge.Cell:
+        """One battery: how much of a window is spent, and when it comes back.
+
+        The countdown is the answer to the question the percentage raises, so
+        it belongs beside it rather than one click away. A window that has not
+        started has nothing to count down, and says so by staying blank.
+        """
+        pct = lim.percent if lim else None
+        reset = _compact_reset(lim.resets_at) if lim and lim.resets_at else ""
+        return gauge.Cell(caption, pct, _tone(pct), reset, _reset_tone(lim))
+
     def _apply_title(self, snap: Snapshot) -> None:
         """Replace the text title with the drawn gauge. Falls back to text if AppKit balks."""
         acct, name, sess = self._shown_account(snap)
@@ -602,10 +614,10 @@ class ManagerApp(rumps.App):
         if acct:
             fable = next((l for l in acct.limits
                           if l.kind not in ("session", "weekly_all")), None)
-            cells = [gauge.Cell("5h", acct.session_pct, _tone(acct.session_pct)),
-                     gauge.Cell("7d", acct.weekly_pct, _tone(acct.weekly_pct))]
+            cells = [self._cell("5h", acct.limit("session")),
+                     self._cell("7d", acct.limit("weekly_all"))]
             if fable:
-                cells.append(gauge.Cell(fable.label, fable.percent, _tone(fable.percent)))
+                cells.append(self._cell(fable.label, fable))
         else:
             cells = [gauge.Cell("5h", None, "dim"), gauge.Cell("7d", None, "dim")]
         # The tab being followed is named in the menu's first row, not here:
@@ -617,7 +629,8 @@ class ManagerApp(rumps.App):
             item.setTitle_("")
             item.button().setImage_(img)
         except Exception:
-            used = " ".join(f"{c.caption} {_pct(c.used)}" for c in cells)
+            used = " ".join(f"{c.caption} {_pct(c.used)}"
+                            + (f" \u21bb{c.reset}" if c.reset else "") for c in cells)
             self.title = f"{ICON} {name} {used}"
 
     def _style_follow_row(self, snap: Snapshot) -> None:
