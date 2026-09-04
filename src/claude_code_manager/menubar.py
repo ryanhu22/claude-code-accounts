@@ -211,8 +211,12 @@ def _face(kind: str, size: float = 12.0):
         return AppKit.NSFont.monospacedSystemFontOfSize_weight_(
             size, AppKit.NSFontWeightRegular)
     if kind == "fig":
+        # The same size as the fixed pitch face, not a point larger. At 13 the
+        # figures carried more weight than the same figures in the
+        # subscriptions section, so the identical colour read as a brighter
+        # one and two lists of the same numbers looked like two scales.
         return AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(
-            13.0, AppKit.NSFontWeightRegular)
+            size, AppKit.NSFontWeightRegular)
     return AppKit.NSFont.menuFontOfSize_(0)
 
 
@@ -335,12 +339,14 @@ SPEC_TABS = (("r", SPEC_FIGURE_X), ("l", SPEC_NOTE_X))
 # The account picker: a chip, then a label and a figure for each of the three
 # windows. Measured, not guessed: the widest chip is 81 points, a label runs to
 # 30 for "fable", and a figure to 37 for "100%".
-# Three groups of label, figure, countdown. Measured: the widest chip is 81
-# points, "fable" is the widest label at 30, "100%" the widest figure at 37,
-# and "(unused)" the widest countdown at 55.
-PICK_TABS = (("l", 108.0), ("r", 152.0), ("l", 158.0),
-             ("l", 220.0), ("r", 264.0), ("l", 270.0),
-             ("l", 332.0), ("r", 390.0), ("l", 396.0))
+# Three groups of label, figure, countdown, laid out from the measured width
+# of the widest thing in each: chip 81 points, "fable" 30, "100%" 37,
+# "(unused)" 55. The figure stops used to sit where the label ended, leaving
+# about a point between "fable" and its number, which is why the pair read as
+# one word. Twelve points now, the same gap the subscriptions row leaves.
+PICK_TABS = (("l", 108.0), ("r", 172.0), ("l", 180.0),
+             ("l", 244.0), ("r", 308.0), ("l", 316.0),
+             ("l", 380.0), ("r", 460.0), ("l", 468.0))
 
 
 def _spec_line(label: str, figure: str, tone: str = "text", after=()):
