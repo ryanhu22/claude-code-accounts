@@ -882,18 +882,23 @@ class ManagerApp(rumps.App):
             item.add(plan_item)
         item.add(rumps.separator)
 
-        # An account row is the place to hand it whole groups at once.
-        use = rumps.MenuItem("Use this account for")
-        default_same = snap.rules.default_account == acct.name
-        use.add(rumps.MenuItem("Everything with no rule" + ("  ✓" if default_same else ""),
-                               callback=None if default_same else
-                               self._make_assign("default", "", acct.name, "")))
-        for prof in snap.rules.profiles:
-            same = prof.account == acct.name
-            use.add(rumps.MenuItem(f"Profile “{prof.name}”" + ("  ✓" if same else ""),
-                                   callback=None if same else
-                                   self._make_assign("profile", prof.name, acct.name, "")))
-        item.add(use)
+        # An account row is the place to hand it whole groups at once. Inline,
+        # for the same reason the scope pickers are: the list is short and a
+        # submenu would put it one hover away for nothing.
+        head = rumps.MenuItem(f"usehead:{acct.name}", callback=None)
+        _apply_style(head, [("  ", "dim"), ("Use this account for", "dim")])
+        item.add(head)
+        groups = [("default", "", "every project with no rule",
+                   snap.rules.default_account == acct.name)]
+        groups += [("profile", p.name, f"profile “{p.name}”", p.account == acct.name)
+                   for p in snap.rules.profiles]
+        for scope, key, label, same in groups:
+            row = rumps.MenuItem(f"use:{acct.name}:{scope}:{key}",
+                                 callback=None if same else
+                                 self._make_assign(scope, key, acct.name, ""))
+            _apply_style(row, [("    ", "dim"), ("\u2713 " if same else "  ", "text"),
+                               (label, "dim" if same else "text")])
+            item.add(row)
         item.add(rumps.separator)
 
         session = acct.limit("session")
@@ -952,10 +957,6 @@ class ManagerApp(rumps.App):
         _apply_style(item, [(f"{FOCUS_MARK} ", "ok") if in_front else ("  ", "dim")] + segments)
         self._session_rows[sess.pid] = (item, segments)
 
-        for note in [sess.cwd.replace(core.HOME, "~") or "?"] + _usage_notes(sess):
-            note_item = rumps.MenuItem(note, callback=None)
-            _apply_style(note_item, [("  ", "dim"), (note, "dim")])
-            item.add(note_item)
         if wanted and wanted != running_on:
             # A running session holds its credentials in memory, so the rule
             # cannot reach it. Say what to do rather than only what will happen.
@@ -969,21 +970,24 @@ class ManagerApp(rumps.App):
             if focus.bundle_for_program(sess.term_program) and sess.tty:
                 item.add(rumps.MenuItem("Take me to that tab",
                                         callback=self._make_reveal(sess)))
-        item.add(rumps.separator)
+            item.add(rumps.separator)   # only when there is something above it
 
         if sess.term_id:
-            item.add(self._scope_menu(
-                "This session only", "session", sess.term_id, snap,
-                current=r.sessions.get(sess.term_id, ""), cwd=sess.cwd,
-                clearable=ruled))
-        item.add(self._scope_menu(
-            f"Project “{os.path.basename(root)}”", "project", root, snap,
-            current=r.projects.get(core.profiles.tilde(root), ""), cwd=sess.cwd,
-            clearable=bool(r.project_rule_for(root))))
+            self._add_scope(item, "Use for this session", "session", sess.term_id,
+                            snap, current=r.sessions.get(sess.term_id, ""),
+                            cwd=sess.cwd, clearable=ruled)
+            item.add(rumps.separator)
+        self._add_scope(item, f"Use for project “{os.path.basename(root)}”",
+                        "project", root, snap,
+                        current=r.projects.get(core.profiles.tilde(root), ""),
+                        cwd=sess.cwd, clearable=bool(r.project_rule_for(root)))
         if prof:
-            item.add(self._scope_menu(
-                f"Profile “{prof.name}” ({len(prof.repos)} repos)", "profile",
-                prof.name, snap, current=prof.account, cwd=sess.cwd))
+            item.add(rumps.separator)
+            n_proj = len(prof.repos)
+            self._add_scope(item, f"Use for profile “{prof.name}” "
+                                  f"({n_proj} project{'s' if n_proj != 1 else ''})",
+                            "profile", prof.name, snap, current=prof.account,
+                            cwd=sess.cwd)
         else:
             join = rumps.MenuItem(f"Add “{os.path.basename(root)}” to profile")
             for p in snap.rules.profiles:
@@ -993,6 +997,13 @@ class ManagerApp(rumps.App):
             item.add(join)
         item.add(rumps.separator)
         item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(sess.cwd)))
+        # Reference last. It is worth having and nobody opens this menu to read
+        # it, so it sat between the pointer and every action it had to cross.
+        item.add(rumps.separator)
+        for note in [sess.cwd.replace(core.HOME, "~") or "?"] + _usage_notes(sess):
+            note_item = rumps.MenuItem(f"note:{sess.pid}:{note}", callback=None)
+            _apply_style(note_item, [("  ", "dim"), (note, "dim")])
+            item.add(note_item)
         return item
 
     def _profile_item(self, prof: "core.profiles.Profile", snap: Snapshot) -> rumps.MenuItem:
@@ -1007,29 +1018,50 @@ class ManagerApp(rumps.App):
             (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"),
             _chip(prof.account, NAME_W) if prof.account else (f"{'unassigned':<{NAME_W}}", "warn"),
-            (f"   {n} repo{'s' if n != 1 else ''}", "dim"),
+            (f"   {n} project{'s' if n != 1 else ''}", "dim"),
             (f"   {live_here} running" if live_here else "", "dim"),
         ])
-        item.add(self._scope_menu("Account for every repo here", "profile", prof.name,
-                                  snap, current=prof.account, cwd=""))
+        self._add_scope(item, f"Use for every project in “{prof.name}”",
+                        "profile", prof.name, snap, current=prof.account, cwd="")
         item.add(rumps.separator)
+
+        # The projects in the profile are shown, not offered: clicking one had
+        # to open a submenu holding a single "remove" item, which is a hover
+        # spent on a menu that was never a choice. Removal is its own list.
+        if prof.repos:
+            head = rumps.MenuItem(f"inhead:{prof.name}", callback=None)
+            _apply_style(head, [("  ", "dim"), ("Projects", "dim")])
+            item.add(head)
         for repo in prof.repos:
-            entry = rumps.MenuItem(repo)
-            _apply_style(entry, [("  ", "dim"), (repo, "dim")])
-            entry.add(rumps.MenuItem("Remove from this profile",
-                                     callback=self._make_leave(prof.name, core.profiles.expand(repo))))
+            entry = rumps.MenuItem(f"in:{prof.name}:{repo}", callback=None)
+            _apply_style(entry, [("    ", "dim"), (repo, "dim")])
             item.add(entry)
         if not prof.repos:
-            empty = rumps.MenuItem("No repositories yet", callback=None)
-            _apply_style(empty, [("  ", "dim"), ("No repositories yet", "dim")])
+            empty = rumps.MenuItem(f"empty:{prof.name}", callback=None)
+            _apply_style(empty, [("    ", "dim"), ("No projects yet", "dim")])
             item.add(empty)
-        add = rumps.MenuItem("Add a repository")
-        for root in _known_roots(snap):
-            if prof.covers(root):
-                continue
-            add.add(rumps.MenuItem(root.replace(core.HOME, "~"),
-                                   callback=self._make_join(prof.name, root)))
-        item.add(add)
+
+        spare = [r for r in _known_roots(snap) if not prof.covers(r)]
+        if spare:
+            add_head = rumps.MenuItem(f"addhead:{prof.name}", callback=None)
+            _apply_style(add_head, [("  ", "dim"), ("Add a project", "dim")])
+            item.add(add_head)
+            for root in spare:
+                row = rumps.MenuItem(f"add:{prof.name}:{root}",
+                                     callback=self._make_join(prof.name, root))
+                _apply_style(row, [("    ", "dim"),
+                                   (root.replace(core.HOME, "~"), "text")])
+                item.add(row)
+        if prof.repos:
+            drop = rumps.MenuItem(f"drophead:{prof.name}")
+            _apply_style(drop, [("  ", "dim"), ("Remove a project", "text")])
+            for repo in prof.repos:
+                drop.add(rumps.MenuItem(
+                    f"out:{prof.name}:{repo}",
+                    callback=self._make_leave(prof.name, core.profiles.expand(repo))))
+                _apply_style(drop[f"out:{prof.name}:{repo}"],
+                             [(" ", "dim"), (repo, "text")])
+            item.add(drop)
         item.add(rumps.separator)
         item.add(rumps.MenuItem("Rename…", callback=self._make_rename_profile(prof.name)))
         item.add(rumps.MenuItem("Remove profile…", callback=self._make_remove_profile(prof.name)))
@@ -1048,31 +1080,50 @@ class ManagerApp(rumps.App):
             _chip(name, NAME_W) if name else (f"{'not set':<{NAME_W}}", "hot"),
             (f"   {loose} running" if loose else "", "dim"),
         ])
-        item.add(self._scope_menu("Account for unruled projects", "default", "",
-                                  snap, current=name, cwd=""))
+        self._add_scope(item, "Use for every project with no rule",
+                        "default", "", snap, current=name, cwd="")
         return item
 
-    def _scope_menu(self, title: str, scope: str, key: str, snap: Snapshot,
-                    current: str, cwd: str, clearable: bool = False) -> rumps.MenuItem:
-        """An account picker for one scope, ticking whatever it uses now."""
-        menu = rumps.MenuItem(title)
+    def _scope_rows(self, title: str, scope: str, key: str, snap: Snapshot,
+                    current: str, cwd: str, clearable: bool = False) -> list:
+        """An account picker for one scope, as rows to drop straight into a menu.
+
+        These used to be a submenu each, which put the account list one hover
+        further away than it needed to be. Every scope offers the same accounts,
+        so the scope was the only real choice and it sat in the middle, while
+        the constant sat at the end. Naming the scope in a heading and listing
+        the accounts under it turns two hovers into one, and lets two scopes be
+        read at the same time instead of one at a time.
+        """
+        head = rumps.MenuItem(title, callback=None)
+        _apply_style(head, [("  ", "dim"), (title, "dim")])
+        rows = [head]
         for acct in snap.accounts:
             if not acct.signed_in:
                 continue
             same = acct.name == current
-            entry = rumps.MenuItem(f"{acct.name} ({_pct(acct.session_pct)} 5h)"
-                                   + ("  \u2713" if same else ""),
+            # The plain title has to be unique inside one menu, and it is what
+            # macOS matches when you type. Scope first, so typing picks a row
+            # rather than the first account with that name under any heading.
+            entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
                                    callback=None if same else
                                    self._make_assign(scope, key, acct.name, cwd))
-            _apply_style(entry, [(" ", "dim"), _chip(acct.name, NAME_W),
-                                 (f"  {_pct(acct.session_pct)} 5h", _tone(acct.session_pct)),
-                                 ("  \u2713" if same else "", "text")])
-            menu.add(entry)
+            _apply_style(entry, [("    ", "dim"),
+                                 ("\u2713 " if same else "  ", "text"),
+                                 _chip(acct.name, NAME_W),
+                                 (f"  {_pct(acct.session_pct)} 5h", _tone(acct.session_pct))])
+            rows.append(entry)
         if clearable:
-            menu.add(rumps.separator)
-            menu.add(rumps.MenuItem("Remove this rule",
-                                    callback=self._make_clear(scope, key, cwd)))
-        return menu
+            drop = rumps.MenuItem(f"clear:{scope}:{key}",
+                                  callback=self._make_clear(scope, key, cwd))
+            _apply_style(drop, [("    ", "dim"), ("  ", "text"),
+                                ("Remove this rule", "text")])
+            rows.append(drop)
+        return rows
+
+    def _add_scope(self, item: rumps.MenuItem, *args, **kw) -> None:
+        for row in self._scope_rows(*args, **kw):
+            item.add(row)
 
     def _make_assign(self, scope: str, key: str, account: str, cwd: str):
         def handler(_sender):
