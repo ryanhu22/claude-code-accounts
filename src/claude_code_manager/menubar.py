@@ -581,28 +581,6 @@ def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
             _spent_tone(total) if total else "ink1")
 
 
-def _usage_notes(sess: "sessions.Session") -> list[str]:
-    """The numbers behind the row, spelled out.
-
-    The four figures are kept apart because they are not interchangeable: a
-    cache read costs a fraction of a fresh input token, and a long conversation
-    re-reads its whole context every turn, so cache reads dominate the total
-    and a single number would hide what was really spent.
-    """
-    out = []
-    if sess.context_tokens:
-        pct = f" ({sess.context_pct:.0f}% full)" if sess.context_pct else ""
-        out.append(f"Context now: {sess.context_tokens:,} of {sess.window:,}{pct}")
-    if sess.model:
-        out.append(f"Model: {sess.model}")
-    t = sess.spent
-    if t.total:
-        out.append(f"Lifetime: {t.total:,} tokens over {t.turns:,} turns")
-        out.append(f"    input {t.input:,} · cache write {t.cache_write:,}")
-        out.append(f"    cache read {t.cache_read:,} · output {t.output:,}")
-    return out
-
-
 def _known_roots(snap) -> list[str]:
     """Repositories worth offering: the ones sessions are actually in."""
     roots = {core.project_root(s.cwd) for s in snap.sessions if s.cwd}
@@ -1427,11 +1405,12 @@ class ManagerApp(rumps.App):
                     ("It reads its account once at launch, so restart this tab:", "dim"),
                     ("press ctrl+C twice, then run  claude -c", "dim")):
                 d = rumps.MenuItem(line, callback=None)
-                _apply_style(d, [("  ", "dim"), (line, tone)])
+                _apply_style(d, [("  ", "dim"), (line, tone)], mono=False)
                 item.add(d)
             if focus.bundle_for_program(sess.term_program) and sess.tty:
-                self._line(item, f"tab:{sess.pid}", "Take me to that tab",
-                           callback=self._make_reveal(sess))
+                _set_icon(self._line(item, f"tab:{sess.pid}", "Take me to that tab",
+                                     callback=self._make_reveal(sess)),
+                          "arrow.up.forward.app")
             item.add(rumps.separator)   # only when there is something above it
         elif running_on:
             # Which account, and which rule chose it. The row shows the account
@@ -1440,7 +1419,7 @@ class ManagerApp(rumps.App):
             # missing exactly when nothing was wrong.
             line = f"Spending {running_on}, by {_why(reason)}"
             d = rumps.MenuItem(f"why:{sess.pid}", callback=None)
-            _apply_style(d, [("  ", "dim"), (line, "dim")])
+            _apply_style(d, [("  ", "dim"), (line, "dim")], mono=False)
             item.add(d)
             item.add(rumps.separator)
 
@@ -1462,7 +1441,7 @@ class ManagerApp(rumps.App):
                     f"{'s' if n_proj != 1 else ''}), which uses "
                     f"{prof.account or 'no account'}")
             row = rumps.MenuItem(f"prof:{sess.pid}", callback=None)
-            _apply_style(row, [("  ", "dim"), (note, "dim")])
+            _apply_style(row, [("  ", "dim"), (note, "dim")], mono=False)
             item.add(row)
         else:
             join = rumps.MenuItem(f"Add “{os.path.basename(root)}” to profile")
@@ -1473,18 +1452,25 @@ class ManagerApp(rumps.App):
                        callback=self._make_new_profile(root), indent=" ")
             item.add(join)
         item.add(rumps.separator)
-        self._line(item, f"finder:{sess.pid}", "Open in Finder",
-                   callback=self._make_open(sess.cwd))
-        # Reference last, and on one line. This was six rows of numbers, which
-        # is a third of the menu's height spent on figures nobody opens a menu
-        # to read. The path names the session; the rest waits in the tooltip
-        # for the reader who wants it.
-        item.add(rumps.separator)
+        # The same block a session gets when it is reached through its
+        # account, so the numbers behind a row read the same way whichever
+        # menu was opened to find them. They were six ragged rows here once,
+        # cut down to a tooltip, which put them somewhere nothing else in this
+        # app keeps anything and made them wait on a hover timer.
+        detail = rumps.MenuItem(f"detail:{sess.pid}")
+        _apply_style(detail, [("  ", "dim"), ("Context and spend", "text")], mono=False)
+        _set_icon(detail, "chart.bar")
+        self._session_notes(detail, sess, reachable=False, tag=f"row{sess.pid}")
+        item.add(detail)
+        _set_icon(self._line(item, f"finder:{sess.pid}", "Open in Finder",
+                             callback=self._make_open(sess.cwd)), "folder")
+        # The path names the session, and it is the one string here that is
+        # not a sentence, so it keeps the monospaced face.
         where = sess.cwd.replace(core.HOME, "~") or "?"
         note_item = rumps.MenuItem(f"note:{sess.pid}", callback=None)
         _apply_style(note_item, [("  ", "dim"), (_fit(where, 52).rstrip(), "dim")])
         try:
-            note_item._menuitem.setToolTip_("\n".join([where] + _usage_notes(sess)))
+            note_item._menuitem.setToolTip_(where)
         except Exception:
             pass
         item.add(note_item)
@@ -1721,7 +1707,7 @@ class ManagerApp(rumps.App):
         read at the same time instead of one at a time.
         """
         head = rumps.MenuItem(f"sc:{scope}:{key}", callback=None)
-        _apply_style(head, [("  ", "dim"), (title, "head")])
+        _apply_style(head, [("  ", "dim"), (title, "head")], mono=False)
         rows = [head]
         for acct in snap.accounts:
             if not acct.signed_in:
@@ -1734,16 +1720,20 @@ class ManagerApp(rumps.App):
                                    callback=None if same else
                                    self._make_assign(scope, key, acct.name, cwd))
             _apply_style(entry, [("    ", "dim"),
-                                 ("\u2713 " if same else "  ", "text"),
                                  *_chip(acct.name, NAME_W),
                                  (f"  {_pct(acct.session_pct):>4}",
-                                  _quiet(_tone(acct.session_pct)))])
+                                  _tone(acct.session_pct))])
+            # A real tick, in the gutter macOS ticks every other menu in. It
+            # used to be a check character in front of the chip, which moved
+            # the chip of the account already in use two columns right of
+            # every other chip in the list.
+            entry._menuitem.setState_(1 if same else 0)
             rows.append(entry)
         if clearable:
             drop = rumps.MenuItem(f"clear:{scope}:{key}",
                                   callback=self._make_clear(scope, key, cwd))
             _apply_style(drop, [("    ", "dim"), ("  ", "text"),
-                                ("Remove this rule", "text")])
+                                ("Remove this rule", "text")], mono=False)
             rows.append(drop)
         return rows
 
