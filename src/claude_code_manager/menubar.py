@@ -37,7 +37,8 @@ FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
 DETAIL_W = 24
-CTX_BAR_W = 6              # the one gauge left in a row, and the only one asked for
+BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
+CTX_BAR_W = 6
 PROFILE_W = 16
 
 
@@ -220,8 +221,18 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     """
     pct = lim.spent if lim else None
     tone = _quiet(_tone(pct))
-    out = [(f"  {label:<5}", "dim"),
-           ("   —" if pct is None else f"{pct:3.0f}%", tone)]
+    if pct is None:
+        out = [(f" {label:<5} ", "dim"), (" " * BAR_W, "dim"), ("   —", tone)]
+    else:
+        # Five cells, not ten. The bar is here to be seen at a glance, and the
+        # number beside it is the precise reading, so more cells only cost
+        # width. Blank for the unfilled part, and a dim fill while the bucket
+        # is healthy, so the row stays quiet until it should not be.
+        filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
+        out = [(f" {label:<5} ", "dim"),
+               (FULL * filled, "dim" if tone == "text" else tone),
+               (" " * (BAR_W - filled), "dim"),
+               (f"{pct:3.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -231,6 +242,8 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
             _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
         out.append((f"{'(' + left + ')':>7}" if left else "       ",
                     _quiet(_reset_tone(lim))))
+    else:
+        out.append(("", "dim"))
     return out
 
 
@@ -910,9 +923,17 @@ class ManagerApp(rumps.App):
             ("● " if in_use else "○ ", "text" if in_use else "dim"),
             *_chip(acct.name, NAME_W),
         ]
+        weekly = acct.limit("weekly_all")
         segments += _bucket("5h", acct.limit("session"))
-        segments += _bucket("7d", acct.limit("weekly_all"))
-        segments += _bucket(fable.label if fable else "model", fable)
+        segments += _bucket("7d", weekly)
+        # A model window sits inside the weekly one and rolls over with it, so
+        # its countdown was the previous column said again. Compared as they
+        # are drawn, because the two timestamps differ by microseconds and
+        # nobody is reading microseconds off a menu.
+        if fable:
+            twice = bool(weekly and _compact_reset(fable.resets_at)
+                         == _compact_reset(weekly.resets_at))
+            segments += _bucket(fable.label, fable, show_reset=not twice)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
         if acct.mismatch:
@@ -1067,12 +1088,16 @@ class ManagerApp(rumps.App):
                         current=r.projects.get(core.profiles.tilde(root), ""),
                         cwd=sess.cwd, clearable=bool(r.project_rule_for(root)))
         if prof:
-            item.add(rumps.separator)
+            # One line, not another five. The profiles section edits profiles
+            # and is one hover away, so repeating its account picker here cost
+            # a third of the menu's height for the least likely action in it.
             n_proj = len(prof.repos)
-            self._add_scope(item, f"Use for profile “{prof.name}” "
-                                  f"({n_proj} project{'s' if n_proj != 1 else ''})",
-                            "profile", prof.name, snap, current=prof.account,
-                            cwd=sess.cwd)
+            note = (f"In profile “{prof.name}” ({n_proj} project"
+                    f"{'s' if n_proj != 1 else ''}), which uses "
+                    f"{prof.account or 'no account'}")
+            row = rumps.MenuItem(f"prof:{sess.pid}", callback=None)
+            _apply_style(row, [("  ", "dim"), (note, "dim")])
+            item.add(row)
         else:
             join = rumps.MenuItem(f"Add “{os.path.basename(root)}” to profile")
             for p in snap.rules.profiles:
@@ -1082,13 +1107,19 @@ class ManagerApp(rumps.App):
             item.add(join)
         item.add(rumps.separator)
         item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(sess.cwd)))
-        # Reference last. It is worth having and nobody opens this menu to read
-        # it, so it sat between the pointer and every action it had to cross.
+        # Reference last, and on one line. This was six rows of numbers, which
+        # is a third of the menu's height spent on figures nobody opens a menu
+        # to read. The path names the session; the rest waits in the tooltip
+        # for the reader who wants it.
         item.add(rumps.separator)
-        for note in [sess.cwd.replace(core.HOME, "~") or "?"] + _usage_notes(sess):
-            note_item = rumps.MenuItem(f"note:{sess.pid}:{note}", callback=None)
-            _apply_style(note_item, [("  ", "dim"), (note, "dim")])
-            item.add(note_item)
+        where = sess.cwd.replace(core.HOME, "~") or "?"
+        note_item = rumps.MenuItem(f"note:{sess.pid}", callback=None)
+        _apply_style(note_item, [("  ", "dim"), (_fit(where, 52).rstrip(), "dim")])
+        try:
+            note_item._menuitem.setToolTip_("\n".join([where] + _usage_notes(sess)))
+        except Exception:
+            pass
+        item.add(note_item)
         return item
 
     def _profile_item(self, prof: "core.profiles.Profile", snap: Snapshot) -> rumps.MenuItem:
@@ -1226,7 +1257,8 @@ class ManagerApp(rumps.App):
             _apply_style(entry, [("    ", "dim"),
                                  ("\u2713 " if same else "  ", "text"),
                                  *_chip(acct.name, NAME_W),
-                                 (f"  {_pct(acct.session_pct)} 5h", _tone(acct.session_pct))])
+                                 (f"  {_pct(acct.session_pct):>4}",
+                                  _quiet(_tone(acct.session_pct)))])
             rows.append(entry)
         if clearable:
             drop = rumps.MenuItem(f"clear:{scope}:{key}",
