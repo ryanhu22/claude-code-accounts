@@ -781,17 +781,21 @@ def _why(reason: str) -> str:
 def _status_tone(status: str) -> str:
     """Working sessions stand out; idle ones stay quiet.
 
-    Green, not plain text. Twelve rows of grey give the eye nothing to land
-    on, and the question this list is opened for is which sessions are working
-    right now, so that is the one field worth a colour. It reads the same as
-    the lit lamp on the account above it, which answers the same question for
-    a whole subscription.
+    Three states, and they were drawn in two. Busy is green, because the
+    question this list is opened for is which sessions are working right now.
+    A shell is plain text: nothing is running, but somebody is sitting at that
+    tab, so it is not the same as idle and it was reading as idle. Idle stays
+    grey and recedes.
 
-    Nothing here returns a warning colour. A session sitting at a shell is a
+    Weight rather than a second colour. Green, white, grey is a scale anybody
+    reads without a legend, and it spends no hue this menu has already given
+    a meaning to.
+
+    Nothing here returns a warning colour. A session at a shell prompt is a
     state, not a problem, and orange still means one thing: a window running
     out.
     """
-    return {"busy": "ok"}.get(status, "dim")
+    return {"busy": "ok", "shell": "text"}.get(status, "dim")
 
 
 def _age(seconds: float) -> str:
@@ -959,7 +963,6 @@ class ManagerApp(rumps.App):
         self._polling = False
         self._fresh_sessions: Optional[tuple] = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
-        self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
         self._account_rows: dict[str, rumps.MenuItem] = {}
         self._refresh_item: Optional[rumps.MenuItem] = None
@@ -1222,11 +1225,15 @@ class ManagerApp(rumps.App):
         self._session_rows = {}
         self._account_rows = {}
 
-        self._follow_item = rumps.MenuItem("Following", callback=None)
-        self._style_follow_row(snap)
-        self.menu.add(self._follow_item)
+        # The row that used to sit here named the session the menu bar was
+        # describing and how sure it was of it. Both marks now say that where
+        # the thing itself is: the front session is marked in the session
+        # list, the account whose numbers are in the menu bar is marked in the
+        # subscriptions list, and each mark is green when the answer is certain
+        # and orange when it is a guess. So the row was repeating two marks in
+        # words, at the top of the menu, which is the most expensive row there
+        # is.
         self._add_flash()
-        self.menu.add(rumps.separator)
 
         self._section("SUBSCRIPTIONS")
         for acct in snap.accounts:
@@ -1238,10 +1245,10 @@ class ManagerApp(rumps.App):
         if not snap.sessions:
             self.menu.add(rumps.MenuItem("  none", callback=None))
         # Everything in this menu that is not a session, counted rather than
-        # guessed: the row being followed, three headings, four separators,
-        # one row per account, one per profile, the catch-all, and five
-        # actions. What is left is what the session list may have.
-        fixed = 1 + 3 + 4 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 5
+        # guessed: a flash row when there is one, three headings, three
+        # separators, one row per account, one per profile, the catch-all,
+        # and five actions. What is left is what the session list may have.
+        fixed = 1 + 3 + 3 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 5
         shown, hidden = _capped(snap.sessions, _rows_that_fit() - fixed)
         for sess in shown:
             self.menu.add(self._session_item(sess, snap))
@@ -1350,24 +1357,6 @@ class ManagerApp(rumps.App):
                             + (f" \u21bb{c.reset}" if c.reset else "") for c in cells)
             self.title = f"{ICON} {name} {used}"
 
-    def _style_follow_row(self, snap: Snapshot) -> None:
-        """First row: which session the menu bar is describing, and how sure it is."""
-        if self._follow_item is None:
-            return
-        f = self._tracker.focus
-        if not self._tracker.enabled:
-            segs = [("\u25cb ", "dim"), ("Showing the default account", "text"),
-                    ("   following is off", "dim")]
-        elif f.session is not None:
-            where = f"{f.session.repo} \u00b7 {f.session.detail or f.session.label}"
-            segs = [(f"{FOCUS_MARK} ", "ok" if f.exact else "warn"),
-                    (_fit(where, 44).rstrip(), "text"),
-                    ("   front tab" if f.exact else f"   {f.note}", "dim")]
-        else:
-            segs = [("\u25cf ", "dim"), ("Showing the default account", "text"),
-                    (f"   {f.note or 'nothing to follow yet'}", "dim")]
-        _apply_style(self._follow_item, segs)
-
     def _on_focus_change(self) -> None:
         """Focus moved to another tab: repaint what depends on it, in place.
 
@@ -1377,11 +1366,17 @@ class ManagerApp(rumps.App):
         """
         snap = self._snapshot
         self._apply_title(snap)
-        self._style_follow_row(snap)
-        focused = self._tracker.focus.session.pid if self._tracker.focus.session else None
+        state = self._tracker.focus
+        focused = state.session.pid if state.session else None
         for pid, (item, segs) in self._session_rows.items():
-            mark = (f"{FOCUS_MARK} ", "ok") if pid == focused else ("  ", "dim")
+            mark = ((f"{FOCUS_MARK} ", "ok" if state.exact else "warn")
+                    if pid == focused else ("  ", "dim"))
             _apply_style(item, [mark] + segs)
+        # The account rows carry the same mark, so they move with it.
+        for acct in snap.accounts:
+            row = self._account_rows.get(acct.name)
+            if row is not None:
+                _apply_style(row, self._account_segments(acct, snap))
 
     def _toggle_follow(self, _sender) -> None:
         self._tracker.enabled = not self._tracker.enabled
@@ -1407,8 +1402,16 @@ class ManagerApp(rumps.App):
         pending = acct.name in self._signing_in
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
-        segments = [("  ", "dim"), *_chip(acct.name, NAME_W), ("  ", "dim"),
-                    *_lamps(here)]
+        # The account the menu bar is showing gets the mark the front session
+        # gets. The numbers in the menu bar belong to exactly one of these
+        # five rows, and until now nothing on the row said which, so the
+        # figures up there and the figures down here were two readings a
+        # reader had to match by name.
+        shown = self._shown_account(snap)[1] == acct.name
+        sure = not self._tracker.enabled or self._tracker.focus.exact
+        segments = [(f"{FOCUS_MARK} ", "ok" if sure else "warn")
+                    if shown else ("  ", "dim"),
+                    *_chip(acct.name, NAME_W), ("  ", "dim"), *_lamps(here)]
         if not acct.reading:
             # Nothing usable came back. Every window draws as unknown rather
             # than as empty, because empty is a claim and this is the absence
@@ -1562,10 +1565,16 @@ class ManagerApp(rumps.App):
         # is, context bar, lifetime tokens, status, idle age. The repo repeats
         # down the list, so the emphasis goes on the column that tells the
         # rows apart.
-        focused = self._tracker.focus.session
+        # Green when this really is the front tab, orange when it is the app's
+        # best guess. The row at the top of the menu used to be the only place
+        # that difference was said, in words. It is the same fact either way,
+        # and the mark is already here.
+        focus_state = self._tracker.focus
+        focused = focus_state.session
         in_front = focused is not None and focused.pid == sess.pid
         segments = _session_segments(sess, running_on)
-        _apply_style(item, [(f"{FOCUS_MARK} ", "ok") if in_front else ("  ", "dim")] + segments)
+        _apply_style(item, [(f"{FOCUS_MARK} ", "ok" if focus_state.exact else "warn")
+                            if in_front else ("  ", "dim")] + segments)
         self._session_rows[sess.pid] = (item, segments)
 
         if wanted and wanted != running_on:
