@@ -272,6 +272,34 @@ def _known_roots(snap) -> list[str]:
     return sorted(r for r in roots if r and r != core.HOME)
 
 
+def _sh_quote(s: str) -> str:
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _osa_quote(s: str) -> str:
+    """A shell command as an AppleScript string literal.
+
+    The command carries quotes of its own, and an unescaped one ends the
+    AppleScript string early: the whole call then fails with a syntax error
+    that nothing surfaces, so the menu item looks dead.
+    """
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _run_in_terminal(command: str) -> str:
+    """Open a Terminal window running a command. Returns "" or why not."""
+    script = (f"tell application \"Terminal\"\n  activate\n"
+              f"  do script {_osa_quote(command)}\nend tell")
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)[:120]
+    if r.returncode != 0:
+        return (r.stderr.strip().splitlines() or ["Terminal refused"])[-1][:160]
+    return ""
+
+
 def _why(reason: str) -> str:
     """Turn a resolution reason into something a person reads."""
     if reason.startswith("profile:"):
@@ -884,11 +912,12 @@ class ManagerApp(rumps.App):
         slot = core.ensure_account_dir(name)
         # `command claude` on purpose: the shell wrapper would pick a directory
         # from the rules and sign this account into somebody else's.
-        script = (f'echo "Type /login, sign in as {name}, then /exit"; '
-                  f'CLAUDE_CONFIG_DIR={slot} command claude')
-        subprocess.run(["osascript", "-e",
-                        f'tell application "Terminal" to do script "{script}"',
-                        "-e", 'tell application "Terminal" to activate'], check=False)
+        err = _run_in_terminal(
+            f"echo 'Type /login, sign in as {name}, then /exit'; "
+            f"CLAUDE_CONFIG_DIR={_sh_quote(slot)} command claude")
+        if err:
+            self._notify(f"Could not open Terminal: {err}\n\n"
+                         f"Run this yourself instead:\n\nccadd {name}")
 
     @staticmethod
     def _make_open(path: str):
