@@ -210,31 +210,19 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     return "hot"
 
 
-def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
-    """A bar in a bracketed track, so the empty part is visible.
+def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
+    """A bar in a bracketed track, filled to `level` per cent.
 
-    Blank space alone left no way to see how much room was left, and ░ at this
-    size draws as static. Brackets give the bar its extent in two characters
-    and keep the inside clean.
-
-    The fill keeps its real colour, green included. Green on a bar reads as a
-    quantity, which is what it is. Green on a number read as an alarm that
-    never fired, which is why the numbers stay plain until they should not.
+    Every step of the scale is printed whether it is lit or not, so the bar can
+    be read as "three of five" without counting against the bracket. Blank
+    space alone gave no way to see how much room was left, and the shade block
+    that came before it drew as static at this size.
     """
-    if pct is None:
+    if level is None:
         return [("[", "dim"), ("\u2014".center(cells), "dim"), ("]", "dim")]
-    filled = max(0, min(cells, round(pct / 100 * cells)))
-    # Every step of the scale is printed, and the last one is printed in the
-    # caution colour. A gauge you have to compute against is a number with
-    # extra steps. A graduated one with its limit marked can be read without
-    # reading: how many steps are lit, and how near the marked one.
-    empty = cells - filled
-    rest = []
-    if empty > 1:
-        rest.append((TICK * (empty - 1), "dim"))
-    if empty:
-        rest.append((TICK, "warn"))
-    return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
+    filled = max(0, min(cells, round(level / 100 * cells)))
+    return [("[", "dim"), (FILL * filled, tone),
+            (TICK * (cells - filled), "dim"), ("]", "dim")]
 
 
 # A session mark is a circle and a quota cell is a square, so the two can never
@@ -278,33 +266,32 @@ def _quiet(tone: str) -> str:
 
 
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
-    """One usage window: its name, how much is gone, and when it comes back.
-
-    There used to be a ten cell bar in front of the number. It said the same
-    thing to one tenth the precision and took three times the width, and three
-    of them made an account row 912 points wide, half the screen. The number
-    is the datum and its colour carries the level.
-    """
-    pct = lim.spent if lim else None
-    tone = _quiet(_tone(pct))
+    """One usage window: its name, how much is left, and when it comes back."""
+    # A quota reads as a fuel gauge: the bar and the number are both what is
+    # LEFT, so a full green bar means plenty and an empty one means nearly out.
+    # The API reports what has been spent and the tone is taken from that, so
+    # the thresholds mean the same thing whichever way round it is shown.
+    spent = lim.spent if lim else None
+    left = None if spent is None else max(0.0, 100.0 - spent)
+    tone = _quiet(_tone(spent))
     # Five cells, not ten. The bar is here to be seen without reading, and the
     # number beside it is the exact figure, so more cells only cost width.
     # The label is right aligned so its padding falls to the left, which puts
     # the whitespace between instruments instead of inside one. Reading a panel
     # depends on each instrument holding together as a unit, and even spacing
     # made the row one long strip of characters.
-    out = [(f"  {label:>5} ", "dim"), *_gauge(pct, BAR_W),
+    out = [(f"  {label:>5} ", "dim"), *_gauge(left, BAR_W, tone),
            # Four wide, so a full window keeps its gap from the track.
-           ("    —" if pct is None else f"{pct:4.0f}%", tone)]
+           ("    —" if left is None else f"{left:4.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
         # curl rather than an arrow. The columns here already say what the
         # number is, so a separator is enough.
-        left = "" if pct is None else (
+        when = "" if spent is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
         # Seven wide, so the longest countdown keeps its gap from the number.
-        out.append((f"{'(' + left + ')':>7}" if left else "       ",
+        out.append((f"{'(' + when + ')':>7}" if when else "       ",
                     _quiet(_reset_tone(lim))))
     else:
         out.append(("", "dim"))
@@ -334,10 +321,14 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
     # A session that has just restarted has not been found in the transcripts
     # yet. A dash inside the track reads as "not known", which is what it is,
     # and it fills in on the next pass.
+    # Context is not a quota being spent down, it is a buffer filling up, so
+    # this one stays the way round it reads: 61% means 61% of the window is in
+    # use. Same bracket and same cells, so it is still one family.
     if pct is None:
-        return [("  ctx ", "dim"), *_gauge(None, CTX_BAR_W), ("    ", "dim")]
-    return [("  ctx ", "dim"), *_gauge(pct, CTX_BAR_W),
-            (f"{pct:3.0f}%", _quiet(_tone(pct)))]
+        return [("  ctx ", "dim"), *_gauge(None, CTX_BAR_W, "dim"), ("    ", "dim")]
+    tone = _quiet(_tone(pct))
+    return [("  ctx ", "dim"), *_gauge(pct, CTX_BAR_W, tone),
+            (f"{pct:3.0f}%", tone)]
 
 
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
