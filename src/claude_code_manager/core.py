@@ -1145,10 +1145,58 @@ def _seed_dir(path: str) -> None:
                 pass
 
 
+# Volatile, and wrong the moment it is copied.
+_CONFIG_SKIP = ("cachedUsageUtilization", "cachedExtraUsageDisabledReason")
+
+
+def _seed_config(path: str, account: str) -> None:
+    """Give a new session dir the Claude Code state its account already has.
+
+    Claude Code keeps its first run state in .claude.json: whether onboarding
+    is done, which account it belongs to, and which projects are trusted. A
+    session dir built from an empty directory has none of it, so Claude Code
+    ran onboarding and asked for a sign in on every new terminal, even with a
+    good credential waiting in the keychain.
+
+    Copied once, when the dir is made. After that the session owns the file and
+    nothing here touches it again.
+    """
+    dst = _config_json(path)
+    if os.path.exists(dst):
+        return
+    src = _config_json(account_dir(account)) if account else ""
+    fallback = False
+    if not src or not os.path.exists(src):
+        src, fallback = _config_json(DEFAULT_CONFIG), True
+    try:
+        with open(src) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    for key in _CONFIG_SKIP:
+        data.pop(key, None)
+    if fallback:
+        # The default dir is signed in as somebody, and it is not necessarily
+        # this account. Better to say nothing than to name the wrong one.
+        data.pop("oauthAccount", None)
+    tmp = dst + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dst)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def prepare_session(term_id: str, account: str) -> str:
     """The dir a terminal should launch in, holding `account`'s credential."""
     path = session_dir(term_id)
     _seed_dir(path)
+    _seed_config(path, account)
     want = live_blob(account_dir(account)) if account else None
     if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
         adopt(path, want)
