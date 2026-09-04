@@ -530,15 +530,20 @@ def _retry_after(err) -> Optional[float]:
 
 
 def _waiting(entry: dict, now: float) -> Optional[str]:
-    """Why this account's usage is not being fetched, counted from now.
+    """Why there is nothing to show for this account, counted from now.
 
-    The stored message is written once, when the 429 lands, so its countdown
-    would be as old as that moment. The deadline it was written from is
-    absolute, so the sentence is rebuilt from that each time it is read.
+    Only for the case where there is also no cached payload. A wait is not an
+    error while there are numbers on screen: it clears itself within five
+    minutes, which is sooner than the age at which a row calls itself stale,
+    so in the ordinary case there is nothing to say and saying it is noise.
+
+    The stored sentence is written once, when the 429 lands, so its countdown
+    would be as old as that moment. The deadline behind it is absolute, so the
+    sentence is rebuilt from that each time it is read.
     """
     left = (entry.get("retry_after") or 0) - now
     if left <= 0:
-        return entry.get("last_error") if not entry.get("data") else None
+        return entry.get("last_error")
     return f"rate limited, retrying in {max(1, round(left / 60))}m"
 
 
@@ -569,12 +574,10 @@ def _usage(name: str, token: str, force: bool = False,
     # A forced check skips the wait, but not entirely: clicking refresh at a
     # rate limit should not add requests that can only prolong it.
     if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
-        return (_parse_limits(cached) if cached else []), at, _waiting(entry, now)
+        return (_parse_limits(cached) if cached else []), at, \
+            (None if cached else _waiting(entry, now))
     if cached and not force and now < entry.get("retry_after", 0):
-        # Say why the row is old. Reporting no error here left the menu with
-        # nothing to show but the age of the numbers, which states a fact and
-        # withholds the reason for it.
-        return _parse_limits(cached), at, _waiting(entry, now)
+        return _parse_limits(cached), at, None
     try:
         data = _get("/api/oauth/usage", token)
     except Exception as e:
