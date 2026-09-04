@@ -807,6 +807,48 @@ def _short(email: Optional[str]) -> str:
     return (email or "?").split("@")[0]
 
 
+# What one row costs, measured off a built menu: 774 points over 34 rows and
+# 907 over 39, both about 23. A separator is shorter, which only makes the
+# estimate cautious, which is the direction to be wrong in.
+ROW_HEIGHT = 23.0
+
+
+def _rows_that_fit() -> int:
+    """How many rows the screen has room for before macOS starts scrolling.
+
+    A menu that overflows does not truncate: macOS puts a scroll arrow at each
+    end and hides the rest behind them. That is worse than saying what is not
+    shown, because an arrow says nothing about how much is behind it and a
+    long list is exactly when the reader most wants to know.
+
+    Read from the screen rather than fixed, because the difference between a
+    laptop and a desk is the difference between fifteen sessions and sixty.
+    """
+    import AppKit
+    try:
+        screen = AppKit.NSScreen.mainScreen()
+        bar = AppKit.NSStatusBar.systemStatusBar().thickness()
+        # Seventy, not forty. A menu has padding of its own at each end and
+        # should not sit flush against the bottom of the screen: at forty a
+        # full list came out 1062 points tall against 1055 of room, one row
+        # over, which is the whole difference between a list and a list with
+        # scroll arrows on it.
+        usable = screen.frame().size.height - bar - 70.0
+        return max(12, int(usable / ROW_HEIGHT))
+    except Exception:
+        return 30          # a safe number on the smallest Mac display
+
+
+def _capped(items: list, room: int) -> tuple[list, int]:
+    """The first `room` of a list, and how many were left out.
+
+    The list is in most-recently-active order, so what falls off the end is
+    what has sat idle longest, which is the right thing to lose first.
+    """
+    room = max(1, room)
+    return (items, 0) if len(items) <= room else (items[:room], len(items) - room)
+
+
 def _shape(snap: "Snapshot") -> tuple:
     """What the menu is made of, as opposed to what it says.
 
@@ -1191,8 +1233,16 @@ class ManagerApp(rumps.App):
         self._section(f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS")
         if not snap.sessions:
             self.menu.add(rumps.MenuItem("  none", callback=None))
-        for sess in snap.sessions[:14]:
+        # Everything in this menu that is not a session, counted rather than
+        # guessed: the row being followed, three headings, four separators,
+        # one row per account, one per profile, the catch-all, and five
+        # actions. What is left is what the session list may have.
+        fixed = 1 + 3 + 4 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 5
+        shown, hidden = _capped(snap.sessions, _rows_that_fit() - fixed)
+        for sess in shown:
             self.menu.add(self._session_item(sess, snap))
+        if hidden:
+            self._more(hidden, "main")
         self.menu.add(rumps.separator)
 
         # Icons from here down, and nowhere above. The two sections above are
@@ -1758,6 +1808,18 @@ class ManagerApp(rumps.App):
         item.add(row)
         return row
 
+    def _more(self, hidden: int, tag: str) -> None:
+        """Say what the list stopped short of, where it stopped.
+
+        The heading above counts every session; this counts the ones that did
+        not fit. Without it the two numbers disagreed in silence, and the list
+        simply ended, which reads as "that is all of them".
+        """
+        row = rumps.MenuItem(f"more:{tag}", callback=None)
+        _apply_style(row, [("  ", "dim"),
+                           (f"{hidden} more, idle the longest", "dim")], mono=False)
+        self.menu.add(row)
+
     def _running_block(self, item: rumps.MenuItem, here: list, empty: str,
                        tag: str) -> None:
         """The sessions running on whatever this menu is about.
@@ -1771,6 +1833,15 @@ class ManagerApp(rumps.App):
             self._legend(item, f"run:{tag}", f"Running now \u00b7 {len(here)}")
         else:
             self._line(item, f"runhead:{tag}", empty, tone="dim")
+        # This list was the only one with no limit at all, and it is the one
+        # most able to grow: every session on a subscription, or every session
+        # under a profile. Measured at 39 rows it stood 907 points tall, which
+        # overflows a laptop screen into the scroll arrows.
+        # Twenty for the submenu's own rows. A subscription menu spends about
+        # twelve on its heading, usage and actions, and a profile menu spends
+        # more on its project list, so the count is the larger of the two: a
+        # list that stops a little early is better than one that scrolls.
+        here, hidden = _capped(here, _rows_that_fit() - 20)
         for sess in here:
             reachable = bool(focus.bundle_for_program(sess.term_program) and sess.tty)
             notes = bool(sess.context_tokens or sess.spent.total or sess.model)
@@ -1784,6 +1855,12 @@ class ManagerApp(rumps.App):
             _apply_style(row, _session_line(sess))
             if detailed:
                 self._session_notes(row, sess, reachable, tag)
+            item.add(row)
+        if hidden:
+            row = rumps.MenuItem(f"more:{tag}", callback=None)
+            _apply_style(row, [("    ", "dim"),
+                               (f"{hidden} more, idle the longest", "dim")],
+                         mono=False)
             item.add(row)
 
     def _usage_block(self, item: rumps.MenuItem, acct: core.Account) -> None:
