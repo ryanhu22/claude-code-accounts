@@ -379,7 +379,7 @@ class ManagerApp(rumps.App):
         self.menu.clear()
         self._session_rows = {}
 
-        self._follow_item = rumps.MenuItem("Following", callback=self._toggle_follow)
+        self._follow_item = rumps.MenuItem("Following", callback=None)
         self._style_follow_row(snap)
         self.menu.add(self._follow_item)
         self.menu.add(rumps.separator)
@@ -406,6 +406,9 @@ class ManagerApp(rumps.App):
         self.menu.add(rumps.separator)
 
         self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
+        self.menu.add(rumps.MenuItem(
+            "Follow the front terminal" + ("  \u2713" if self._tracker.enabled else ""),
+            callback=self._toggle_follow))
 
         age = int(time.time() - snap.taken_at) if snap.taken_at else 0
         self.menu.add(rumps.MenuItem(f"Refresh now (updated {age}s ago)", callback=self.refresh_now))
@@ -450,20 +453,21 @@ class ManagerApp(rumps.App):
             self.title = f"{ICON} {name} {used}"
 
     def _style_follow_row(self, snap: Snapshot) -> None:
-        """First row: what the menu bar is describing and why."""
+        """First row: which session the menu bar is describing, and how sure it is."""
         if self._follow_item is None:
             return
         f = self._tracker.focus
         if not self._tracker.enabled:
-            segs = [("\u25cb ", "dim"), ("Follow the front terminal", "text"),
-                    ("   off: showing the default context", "dim")]
+            segs = [("\u25cb ", "dim"), ("Showing the default context", "text"),
+                    ("   following is off", "dim")]
         elif f.session is not None:
             where = f"{f.session.repo} \u00b7 {f.session.detail or f.session.label}"
-            segs = [(f"{FOCUS_MARK} ", "ok"), (_fit(where, 44).rstrip(), "text")]
-            segs.append(("   front tab" if f.exact else "   newest tab, best guess", "dim"))
+            segs = [(f"{FOCUS_MARK} ", "ok" if f.exact else "warn"),
+                    (_fit(where, 44).rstrip(), "text"),
+                    ("   front tab" if f.exact else f"   {f.note}", "dim")]
         else:
-            segs = [("\u25cf ", "dim"), ("Follow the front terminal", "text"),
-                    (f"   {f.note or 'no session in front'}", "dim")]
+            segs = [("\u25cf ", "dim"), ("Showing the default context", "text"),
+                    (f"   {f.note or 'nothing to follow yet'}", "dim")]
         _apply_style(self._follow_item, segs)
 
     def _on_focus_change(self) -> None:
@@ -483,7 +487,7 @@ class ManagerApp(rumps.App):
 
     def _toggle_follow(self, _sender) -> None:
         self._tracker.enabled = not self._tracker.enabled
-        self._on_focus_change()
+        self._rebuild()
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.signed_in:
