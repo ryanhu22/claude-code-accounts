@@ -21,10 +21,11 @@ from typing import Optional
 
 import rumps
 
-from . import core, sessions
+from . import core, focus, gauge, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 ICON = "⇄"
+FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 
 
 # Menu rows are drawn as attributed strings so the three usage buckets line up
@@ -313,6 +314,9 @@ class ManagerApp(rumps.App):
         self._pending: Optional[Snapshot] = None
         self._lock = threading.Lock()
         self._busy = False
+        self._tracker = focus.Tracker(on_change=self._on_focus_change)
+        self._follow_item: Optional[rumps.MenuItem] = None
+        self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
         self._hide_from_dock()
         self.refresh_now(None)
         rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
@@ -360,7 +364,9 @@ class ManagerApp(rumps.App):
             snap, self._pending = self._pending, None
         if snap is not None:
             self._snapshot = snap
+            self._tracker.update_sessions(snap.sessions)
             self._rebuild()
+        self._tracker.poll()
 
     def refresh_now(self, _sender) -> None:
         self._on_refresh_tick(None, force=_sender is not None)
@@ -369,8 +375,14 @@ class ManagerApp(rumps.App):
 
     def _rebuild(self) -> None:
         snap = self._snapshot
-        self.title = self._title_text(snap)
+        self._apply_title(snap)
         self.menu.clear()
+        self._session_rows = {}
+
+        self._follow_item = rumps.MenuItem("Following", callback=self._toggle_follow)
+        self._style_follow_row(snap)
+        self.menu.add(self._follow_item)
+        self.menu.add(rumps.separator)
 
         self.menu.add(rumps.MenuItem("SUBSCRIPTIONS", callback=None))
         for acct in snap.accounts:
@@ -399,13 +411,79 @@ class ManagerApp(rumps.App):
         self.menu.add(rumps.MenuItem(f"Refresh now (updated {age}s ago)", callback=self.refresh_now))
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
-    def _title_text(self, snap: Snapshot) -> str:
-        """Title tracks the default account: what an unruled project uses."""
-        name = snap.rules.default_account
+    # ------------------------------------------------------------------ title
+
+    def _shown_account(self, snap: Snapshot) -> tuple[Optional[core.Account], Optional[str],
+                                                       Optional[sessions.Session]]:
+        """The account the menu bar describes: the front tab's, else the default account's."""
+        sess = self._tracker.focus.session if self._tracker.enabled else None
+        if sess is not None:
+            name = snap.running_on.get(sess.env_config_dir, "")
+        else:
+            name = snap.rules.default_account
         acct = next((a for a in snap.accounts if a.name == name), None)
-        if not acct:
-            return f"{ICON} {name or '?'}"
-        return f"{ICON} {acct.name} {_pct(acct.session_pct)}·{_pct(acct.weekly_pct)}"
+        return acct, name or None, sess
+
+    def _apply_title(self, snap: Snapshot) -> None:
+        """Replace the text title with the drawn gauge. Falls back to text if AppKit balks."""
+        acct, name, sess = self._shown_account(snap)
+        name = acct.name if acct else (_short(name) if name else "?")
+        if acct:
+            fable = next((l for l in acct.limits
+                          if l.kind not in ("session", "weekly_all")), None)
+            cells = [gauge.Cell("5h", acct.session_pct, _tone(acct.session_pct)),
+                     gauge.Cell("7d", acct.weekly_pct, _tone(acct.weekly_pct))]
+            if fable:
+                cells.append(gauge.Cell(fable.label, fable.percent, _tone(fable.percent)))
+        else:
+            cells = [gauge.Cell("5h", None, "dim"), gauge.Cell("7d", None, "dim")]
+        # The tab being followed is named in the menu's first row, not here:
+        # the bar is shared with every other app and stays as narrow as it can.
+        dim = bool(acct and (acct.error or acct.stale))
+        try:
+            img = gauge.status_image(name, _chip_color(name), cells, dim=dim)
+            item = self._nsapp.nsstatusitem
+            item.setTitle_("")
+            item.button().setImage_(img)
+        except Exception:
+            used = " ".join(f"{c.caption} {_pct(c.used)}" for c in cells)
+            self.title = f"{ICON} {name} {used}"
+
+    def _style_follow_row(self, snap: Snapshot) -> None:
+        """First row: what the menu bar is describing and why."""
+        if self._follow_item is None:
+            return
+        f = self._tracker.focus
+        if not self._tracker.enabled:
+            segs = [("\u25cb ", "dim"), ("Follow the front terminal", "text"),
+                    ("   off: showing the default context", "dim")]
+        elif f.session is not None:
+            where = f"{f.session.repo} \u00b7 {f.session.detail or f.session.label}"
+            segs = [(f"{FOCUS_MARK} ", "ok"), (_fit(where, 44).rstrip(), "text")]
+            segs.append(("   front tab" if f.exact else "   newest tab, best guess", "dim"))
+        else:
+            segs = [("\u25cf ", "dim"), ("Follow the front terminal", "text"),
+                    (f"   {f.note or 'no session in front'}", "dim")]
+        _apply_style(self._follow_item, segs)
+
+    def _on_focus_change(self) -> None:
+        """Focus moved to another tab: repaint what depends on it, in place.
+
+        The menu is not rebuilt here because it may be open, and rows keep
+        their identity so a hover survives. Only the title image, the first
+        row and the session markers change.
+        """
+        snap = self._snapshot
+        self._apply_title(snap)
+        self._style_follow_row(snap)
+        focused = self._tracker.focus.session.pid if self._tracker.focus.session else None
+        for pid, (item, segs) in self._session_rows.items():
+            mark = (f"{FOCUS_MARK} ", "ok") if pid == focused else ("  ", "dim")
+            _apply_style(item, [mark] + segs)
+
+    def _toggle_follow(self, _sender) -> None:
+        self._tracker.enabled = not self._tracker.enabled
+        self._on_focus_change()
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.signed_in:
@@ -500,10 +578,13 @@ class ManagerApp(rumps.App):
         prof = r.profile_for(root)
         head = f"  {sess.label} — {running_on or '?'} · {sess.status or sess.kind}"
         item = rumps.MenuItem(head)
-        # Fixed columns: rule mark, chip, repo, what the session is, context
-        # bar, lifetime tokens, status, idle age. The repo repeats down the
-        # list, so the emphasis goes on the column that tells the rows apart.
-        _apply_style(item, [
+        # Fixed columns: focus mark, rule mark, chip, repo, what the session
+        # is, context bar, lifetime tokens, status, idle age. The repo repeats
+        # down the list, so the emphasis goes on the column that tells the
+        # rows apart.
+        focused = self._tracker.focus.session
+        in_front = focused is not None and focused.pid == sess.pid
+        segments = [
             ("\u25c9 " if ruled else "  ", "text" if ruled else "dim"),
             _chip(running_on, NAME_W),
             ("  ", "dim"),
@@ -514,7 +595,9 @@ class ManagerApp(rumps.App):
             _spent_cell(sess),
             (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
             (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
-        ])
+        ]
+        _apply_style(item, [(f"{FOCUS_MARK} ", "ok") if in_front else ("  ", "dim")] + segments)
+        self._session_rows[sess.pid] = (item, segments)
 
         for note in [sess.cwd.replace(core.HOME, "~") or "?"] + _usage_notes(sess):
             note_item = rumps.MenuItem(note, callback=None)
