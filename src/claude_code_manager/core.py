@@ -493,7 +493,11 @@ USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
 # The endpoint sends Retry-After: 0, which says nothing, so the wait is ours to
 # choose. Start short because a brief limit is the common case and the row is
 # blank until it clears; escalate only if the limiting is sustained.
-_BACKOFF_MIN, _BACKOFF_MAX = 180, 900
+# Measured against the live endpoint: about four requests per five minutes per
+# account, and a 429 carries Retry-After: 300. So the window is fixed and the
+# server states it. Guessing a longer one only keeps a row stale for longer
+# than being asked to.
+_RETRY_FALLBACK = 300        # used only when a 429 arrives with no Retry-After
 _FORCE_FLOOR = 30            # shortest gap between forced checks of one account
 
 
@@ -515,6 +519,14 @@ def _cache_write(store: dict, path: str = "") -> None:
         os.replace(tmp, path)
     except OSError:
         pass
+
+
+def _retry_after(err) -> Optional[float]:
+    """How long the server asked us to wait, when it says so in seconds."""
+    try:
+        return max(0.0, float(err.headers.get("Retry-After")))
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _waiting(entry: dict, now: float) -> Optional[str]:
@@ -568,14 +580,16 @@ def _usage(name: str, token: str, force: bool = False,
     except Exception as e:
         code = getattr(e, "code", None)
         if code == 429:
-            # A forced check is the user asking, so it must not push the wait
-            # out further: they would be punished for looking, and the row
-            # would take longer to recover the harder they tried.
-            wait = (entry.get("backoff") or _BACKOFF_MIN) if force else \
-                min(max(entry.get("backoff", 0) * 2, _BACKOFF_MIN), _BACKOFF_MAX)
-            mins = max(1, round(wait / 60))
-            note = f"rate limited, retrying in {mins}m"
-            store[name] = {**entry, "backoff": wait, "retry_after": now + wait,
+            deadline = now + (_retry_after(e) or _RETRY_FALLBACK)
+            # Never move the deadline later than it already was. The window is
+            # fixed, so asking again inside it must not cost more waiting than
+            # staying quiet would have. That holds whether Retry-After counts
+            # down with the window or restates its full length every time.
+            prior = entry.get("retry_after") or 0
+            if prior > now:
+                deadline = min(deadline, prior)
+            note = f"rate limited, retrying in {max(1, round((deadline - now) / 60))}m"
+            store[name] = {**entry, "retry_after": deadline,
                            "tried_at": now, "last_error": note}
             _cache_write(store)
             if not cached:
@@ -583,7 +597,7 @@ def _usage(name: str, token: str, force: bool = False,
         if cached:
             return _parse_limits(cached), at, None
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
-    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0,
+    store[name] = {"data": data, "at": now, "retry_after": 0,
                    "fp": fp, "tried_at": now}
     _cache_write(store)
     return _parse_limits(data), now, None
