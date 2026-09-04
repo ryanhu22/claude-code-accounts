@@ -37,7 +37,7 @@ SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab
 # title cannot colour the bucket that is nearly spent.
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
-DETAIL_W = 24
+DETAIL_W = 35
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
 PROFILE_W = 16
@@ -64,6 +64,15 @@ def _colors():
         "hot": AppKit.NSColor.systemRedColor(),
         "dim": AppKit.NSColor.secondaryLabelColor(),
         "text": AppKit.NSColor.labelColor(),
+        # A four step grey ladder, for a column whose value is a magnitude
+        # rather than a state. Alpha on labelColor rather than four fixed
+        # greys, so it follows the appearance the menu is drawn in. The
+        # faintest step stays at 0.38 because a number nobody can read is not
+        # a quieter number, it is a missing one.
+        "ink1": AppKit.NSColor.labelColor().colorWithAlphaComponent_(0.38),
+        "ink2": AppKit.NSColor.labelColor().colorWithAlphaComponent_(0.54),
+        "ink3": AppKit.NSColor.labelColor().colorWithAlphaComponent_(0.72),
+        "ink4": AppKit.NSColor.labelColor().colorWithAlphaComponent_(0.92),
     }
 
 
@@ -189,34 +198,34 @@ def _compact_reset(iso: Optional[str]) -> str:
 
 
 def _reset_tone(lim: Optional[core.Limit]) -> str:
-    """How much the countdown matters, not merely how long it is.
+    """How a countdown is drawn: brightness for how soon, colour for whether
+    it blocks you.
 
-    Every countdown is legible, because knowing when a window comes back is
-    half of reading this panel and the reader should not have to hunt for it.
-    This used to leave all of them in the secondary grey until a bucket passed
-    85%, which put the answer to "when does this reset" below the brackets
-    around it in contrast.
+    Two questions get asked of this column and they are independent, so they
+    get a channel each. "How soon" is a magnitude, and it reads as weight: a
+    reset inside the hour is at full strength, one days away is nearly out of
+    the way. Scanning down the column now sorts itself, and a row of equally
+    bright countdowns no longer hides the one that is about to land.
 
-    Colour is kept for the two cases that are worth interrupting a scan. A
-    window inside its last half hour is about to hand the allowance back, so
-    it turns green whatever it has spent. A window that is nearly spent AND
-    far from resetting is the one that will stop work, so it turns red.
-    A window with no clock is green: nothing has been spent in it.
+    "Does it matter" is a state, and it takes the colour. A window with room
+    left resets whenever it resets, and nothing is waiting on it, so it stays
+    grey at whatever weight its distance earns. Once a window is nearly spent
+    the wait is the thing standing between you and work: green when relief is
+    inside the hour, orange within the working day, red beyond it.
     """
     if lim is None:
         return "dim"
     if not lim.resets_at:
-        return "ok"
+        return "ink2"          # no clock to run down, so no distance to show
     try:
         dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
     except ValueError:
-        return "text"
+        return "ink2"
     mins = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
-    if mins < 30:
-        return "ok"
-    if lim.spent < 85:
-        return "text"
-    return "ok" if mins < 60 else "warn" if mins < 360 else "hot"
+    if lim.spent >= 85:
+        return "ok" if mins < 60 else "warn" if mins < 360 else "hot"
+    return ("ink4" if mins < 60 else "ink3" if mins < 360
+            else "ink2" if mins < 1440 else "ink1")
 
 
 def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
@@ -352,13 +361,36 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
             (f"{pct:3.0f}%", tone)]
 
 
+# Where one shade of the token ladder ends and the next begins. Lifetime
+# totals here run from about two million to about two billion, so the steps
+# are decades rather than even splits: on a linear scale every session but the
+# heaviest would land in the same band.
+_SPEND_STEPS = ((10e6, "ink1"), (100e6, "ink2"), (1e9, "ink3"))
+
+
+def _spent_tone(total: int) -> str:
+    """How loud a lifetime total is, by how big it is.
+
+    One grey for every session made this column unreadable as anything but
+    text: twelve numbers of equal weight, none of which told you which tab has
+    been running all week. Weight by magnitude and the heavy ones surface
+    without a hue, which this column has no claim on. It is history, not a
+    warning, so it never takes a colour.
+    """
+    for cutoff, tone in _SPEND_STEPS:
+        if total < cutoff:
+            return tone
+    return "ink4"
+
+
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
-    """Lifetime tokens for the row. Dim: it is history, not a warning."""
+    """Lifetime tokens for the row, shaded by how many."""
     total = sess.spent.total
     # Twelve wide, not ten: two of those are the gap that separates this from
     # the context number on its left, which is a different instrument reading
     # a different thing.
-    return (f"{_compact_tokens(total) + ' tok' if total else '':>12}", "dim")
+    return (f"{_compact_tokens(total) + ' tok' if total else '':>12}",
+            _spent_tone(total) if total else "ink1")
 
 
 def _usage_notes(sess: "sessions.Session") -> list[str]:
