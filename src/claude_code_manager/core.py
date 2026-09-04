@@ -101,14 +101,34 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
     return blob
 
 
+def profile(token: Optional[str]) -> dict:
+    """Live account facts for a token: identity and plan.
+
+    Read from the API rather than from the stored credential blob. The blob's
+    `subscriptionType` and `rateLimitTier` are snapshots taken at login and go
+    stale: an account upgraded after signing in still reports its old tier
+    there (observed: blob said max_5x while the account was really max_20x).
+    """
+    if not token:
+        return {}
+    try:
+        data = _get("/api/oauth/profile", token)
+    except Exception:
+        return {}
+    account = data.get("account") or {}
+    org = data.get("organization") or {}
+    tier = org.get("rate_limit_tier") or ""
+    label = " ".join(w.title() if w.isalpha() else w
+                     for w in tier.replace("default_claude_", "").split("_") if w)
+    if not label:
+        label = "Max" if account.get("has_claude_max") else "Pro" if account.get("has_claude_pro") else ""
+    return {"email": account.get("email"), "plan": label or None,
+            "extra_usage": org.get("has_extra_usage_enabled")}
+
+
 def whoami(token: Optional[str]) -> Optional[str]:
     """The account a token belongs to. Identity is never inferred from a name."""
-    if not token:
-        return None
-    try:
-        return (_get("/api/oauth/profile", token).get("account") or {}).get("email")
-    except Exception:
-        return None
+    return profile(token).get("email")
 
 
 # --------------------------------------------------------------------------- model
@@ -131,7 +151,6 @@ class Account:
     slot: str
     email: Optional[str] = None
     plan: Optional[str] = None
-    tier: Optional[str] = None
     limits: list[Limit] = field(default_factory=list)
     error: Optional[str] = None
     checked_at: float = 0.0
@@ -259,7 +278,8 @@ def load_account(name: str, with_usage: bool = True) -> Account:
     slot = slot_dir(name)
     acct = Account(name=name, slot=slot, checked_at=time.time())
     blob = live_blob(slot)
-    email = whoami(blob.get("accessToken")) if blob else None
+    info = profile(blob.get("accessToken")) if blob else {}
+    email = info.get("email")
     if not email:
         healed = find_live_blob(recorded_email(slot))
         if healed:
@@ -267,15 +287,17 @@ def load_account(name: str, with_usage: bool = True) -> Account:
                 keychain.write_credentials(slot, healed)
             except RuntimeError:
                 pass
-            blob, email = healed, recorded_email(slot)
+            blob = healed
+            info = profile(healed.get("accessToken"))
+            email = info.get("email") or recorded_email(slot)
     if not blob:
         acct.error = "not signed in"
         return acct
     if not email:
         acct.error = "login expired"
         return acct
-    acct.email, acct.plan = email, blob.get("subscriptionType")
-    acct.tier = (blob.get("rateLimitTier") or "").replace("default_claude_", "").replace("_", " ") or None
+    acct.email = email
+    acct.plan = info.get("plan") or blob.get("subscriptionType")
     if with_usage:
         try:
             acct.limits = _parse_limits(_get("/api/oauth/usage", blob["accessToken"]))
