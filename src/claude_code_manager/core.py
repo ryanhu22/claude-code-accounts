@@ -1182,7 +1182,11 @@ def sync_credentials(live: Iterable["sessions.Session"]) -> list[str]:
         if not master or not master.get("refreshToken"):
             continue
         # Promote a session copy only if it is newer and provably this account.
+        # A copy that is ahead of the master is one of three things, and the
+        # difference decides whether it may be written over, so the answer is
+        # worked out once here and kept for the pass below.
         owner = (identity(home, master)[0].get("email") or "").lower()
+        ahead: dict[str, str] = {}          # path -> mine | theirs | unknown
         for path in session_paths:
             b = keychain.read_credentials(path)
             if not b or not b.get("refreshToken"):
@@ -1190,13 +1194,25 @@ def sync_credentials(live: Iterable["sessions.Session"]) -> list[str]:
             if (b.get("expiresAt") or 0) <= (master.get("expiresAt") or 0):
                 continue
             email = (identity(path, b)[0].get("email") or "").lower()
-            if email and owner and email == owner and adopt(home, b, email=owner):
+            ahead[path] = ("unknown" if not email or not owner else
+                           "mine" if email == owner else "theirs")
+            if ahead[path] == "mine" and adopt(home, b, email=owner):
                 master = b
                 healed.append(home)
         want = (identity(home, master)[0].get("email") or "")
         best = fingerprint(master)
         for path in session_paths:
             if fingerprint(keychain.read_credentials(path)) == best:
+                continue
+            # Never write an older token over a newer one that could not be
+            # identified. The promotion above passed on it because the endpoint
+            # could not be reached, and "cannot ask right now" does not mean
+            # "belongs to somebody else". That copy may be the only one left
+            # that can refresh, and a refresh token is single use, so writing
+            # the spent master here would end the lineage. Leave it and ask
+            # again next pass. A copy confirmed to be another account's is a
+            # dir that has not caught up with a rule change, and is replaced.
+            if ahead.get(path) == "unknown":
                 continue
             if adopt(path, master, email=want):
                 healed.append(path)
