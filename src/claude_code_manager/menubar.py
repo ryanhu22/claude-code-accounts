@@ -411,6 +411,7 @@ def _session_segments(sess: "sessions.Session", running_on: str) -> list[tuple[s
         (" ", "dim"),
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
+        _spent_cell(sess),
         ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
         (f"{_age(sess.idle_for):>5}", "dim"),
     ]
@@ -440,6 +441,7 @@ def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, st
         (" ", "dim"),
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
+        _spent_cell(sess),
         ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
         (f"{_age(sess.idle_for):>5}", "dim"),
         (f"   {why}" if why else "", "dim"),
@@ -1529,18 +1531,33 @@ class ManagerApp(rumps.App):
 
     def _make_poke(self, account: str):
         def handler(_sender):
+            # Clicking closes the menu, and the request that follows can take
+            # 45 seconds, so say the click landed before anything is waited on.
+            # Without this the only sign of a running request was a row in a
+            # menu that was no longer on screen.
+            self._report(True, f"{account}: starting the 5h window…")
             # Up to a 45 second request. Never on the drawing thread.
             threading.Thread(target=self._poke, args=(account,), daemon=True).start()
         return handler
 
     def _poke(self, account: str) -> None:
         ok, msg = core.poke(account)
-        self._later(lambda: self._poked(ok, f"{account}: {msg}"))
+        self._later(lambda: self._poked(ok, account, msg))
 
-    def _poked(self, ok: bool, message: str) -> None:
-        self._report(ok, message)
+    def _poked(self, ok: bool, account: str, message: str) -> None:
+        self._report(ok, f"{account}: {message}")
         if ok:
-            self.refresh_now(None)   # a started window is the point; show it
+            # Forced: the point of the click is the window it started, and an
+            # ordinary refresh is skipped entirely while the account is inside
+            # a rate limit, which would leave the row reading "idle" with no
+            # way to tell that from a click that did nothing.
+            self._on_refresh_tick(None, force=True)
+        else:
+            # A failure has to interrupt. The menu closed on the click, and the
+            # flash row above lives 30 seconds in a menu nobody is looking at,
+            # so a poke that failed was indistinguishable from one that was
+            # never wired up.
+            self._notify(f"Could not start the 5h window for {account}.\n\n{message}")
 
     def _make_rename(self, account: str):
         def handler(_sender):
