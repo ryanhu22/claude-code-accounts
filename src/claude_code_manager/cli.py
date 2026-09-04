@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import core, projects
+from . import core, projects, sessions
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -63,11 +63,58 @@ def cmd_poke(args) -> int:
 
 
 def cmd_where(_args) -> int:
-    ctx = core.context_for(os.getcwd())
+    term = os.environ.get("TERM_SESSION_ID", "")
+    ctx = core.context_for(os.getcwd(), term)
     print(os.getcwd())
     print(f"  context : {ctx.path.replace(core.HOME, '~')} ({ctx.name})")
     print(f"  account : {ctx.email or 'unknown'}")
+    if term and term in core.term_pins():
+        print(f"  {G}pinned  : this terminal only{X}")
     return 0
+
+
+def _term_or_die() -> str:
+    term = os.environ.get("TERM_SESSION_ID", "")
+    if not term:
+        print("this terminal sets no TERM_SESSION_ID, so it cannot be pinned",
+              file=sys.stderr)
+        raise SystemExit(1)
+    return term
+
+
+def cmd_sessions(_args) -> int:
+    live = sessions.live(core.credential_dirs())
+    accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
+    owners = core.context_owners({s.env_config_dir for s in live}, accts)
+    pins = core.term_pins()
+    if not live:
+        print("no Claude Code sessions running")
+        return 0
+    for s in live:
+        mark = "\u25cf" if s.term_id in pins else " "
+        where = s.cwd.replace(core.HOME, "~")
+        print(f"{mark} {s.label[:24]:<25} {s.status or s.kind:<7} {where[:46]:<47} "
+              f"{owners.get(s.env_config_dir) or '?'}")
+    print(f"\n{D}\u25cf = pinned to one account. `ccm pin <account>` pins the terminal "
+          f"you run it in.{X}")
+    return 0
+
+
+def cmd_pin(args) -> int:
+    term = _term_or_die()
+    here = core.context_for(os.getcwd())
+    ok, msg = core.pin(term, args.account, seed_from=here.path)
+    print(msg)
+    if ok:
+        print(f"{D}This terminal only. Restart Claude Code here to pick it up: "
+              f"ctrl+C twice, then `claude -c`.{X}")
+    return 0 if ok else 1
+
+
+def cmd_unpin(_args) -> int:
+    ok, msg = core.unpin(_term_or_die())
+    print(msg)
+    return 0 if ok else 1
 
 
 def cmd_projects(args) -> int:
@@ -111,6 +158,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("projects", help="projects with recent Claude Code activity")
     p.add_argument("--minutes", type=int, default=60)
     p.set_defaults(func=cmd_projects)
+    sub.add_parser("sessions", help="every running Claude Code session").set_defaults(func=cmd_sessions)
+    p = sub.add_parser("pin", help="give THIS terminal its own account")
+    p.add_argument("account")
+    p.set_defaults(func=cmd_pin)
+    sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
     sub.add_parser("isolate", help="give this project its own context").set_defaults(func=cmd_isolate)
     sub.add_parser("unroute", help="drop this project's routing override").set_defaults(func=cmd_unroute)
     p = sub.add_parser("add", help="print the command that signs an account in")

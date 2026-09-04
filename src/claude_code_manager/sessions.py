@@ -1,0 +1,218 @@
+"""Live Claude Code sessions, read from Claude Code's own registry.
+
+Claude Code writes ``<config dir>/sessions/<pid>.json`` for every session it
+starts, carrying the pid, session id, cwd, kind, entrypoint, status and the
+name it shows in its own session list. It is first-party and current, so it
+beats inferring activity from transcript timestamps, and it lives inside the
+config dir, which is exactly how a session is attributed to an account.
+
+What it does not record is the terminal the session runs in. That comes from
+the process environment, where ``TERM_SESSION_ID`` is a UUID the terminal
+assigns per tab. It is the only identifier here that survives restarting Claude
+Code in the same tab and is never recycled the way a pid or a tty number is, so
+it is what a per-session account pin is keyed to.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+from typing import Iterable, Optional
+
+# A session file is only rewritten while its session lives, so a stale one is
+# just litter from a process that died without cleaning up.
+STALE_AFTER = 7 * 24 * 3600
+
+
+@dataclass
+class Session:
+    pid: int
+    config_dir: str              # the dir whose registry listed it: its account
+    session_id: str = ""
+    cwd: str = ""
+    name: str = ""
+    kind: str = ""               # interactive | bg | daemon
+    entrypoint: str = ""
+    status: str = ""             # idle | busy | shell
+    started_at: float = 0.0
+    updated_at: float = 0.0
+    term_id: str = ""            # terminal tab, from the process environment
+    env_config_dir: str = ""     # CLAUDE_CONFIG_DIR the process actually launched with
+    branch: str = ""
+
+    @property
+    def is_worktree(self) -> bool:
+        parts = self.cwd.rstrip("/").split("/")
+        return ".claude" in parts and "worktrees" in parts
+
+    @property
+    def repo(self) -> str:
+        """Repository name: a worktree reports its parent repo, not its own dir."""
+        parts = self.cwd.rstrip("/").split("/")
+        if self.is_worktree:
+            return parts[max(0, parts.index("worktrees") - 2)]
+        return parts[-1] or self.cwd
+
+    @property
+    def detail(self) -> str:
+        """What tells this session apart from its siblings.
+
+        Worktrees of one repo differ by branch. Several sessions in the same
+        checkout share a branch, usually main, so there the name Claude Code
+        gave the session is the only thing that separates them; its repo
+        prefix is dropped because the repo column already says that.
+        """
+        if self.is_worktree:
+            return self.branch or self.cwd.rstrip("/").split("/")[-1]
+        name, repo = self.name, self.repo
+        if name.lower().startswith(repo.lower() + "-"):
+            name = name[len(repo) + 1:]
+        return name or self.branch
+
+    @property
+    def interactive(self) -> bool:
+        return self.kind == "interactive"
+
+    @property
+    def age(self) -> float:
+        return time.time() - self.started_at if self.started_at else 0.0
+
+    @property
+    def idle_for(self) -> float:
+        return time.time() - self.updated_at if self.updated_at else 0.0
+
+    @property
+    def label(self) -> str:
+        """What to call this session. Claude Code's own name, else the folder."""
+        return self.name or os.path.basename(self.cwd.rstrip("/")) or f"pid {self.pid}"
+
+
+def alive(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # someone else's process, but it exists
+    return True
+
+
+def _environ(pid: int) -> dict[str, str]:
+    """The environment a running process was started with.
+
+    `ps eww` prints it for our own processes, which is every Claude Code
+    session we care about. Values are space separated, so a value containing a
+    space is truncated; the two keys read here never contain one.
+    """
+    try:
+        out = subprocess.run(["ps", "eww", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    env = {}
+    for word in out.split():
+        key, sep, val = word.partition("=")
+        if sep and key.isupper() and key.replace("_", "").isalnum():
+            env[key] = val
+    return env
+
+
+def _read(path: str, config_dir: str) -> Optional[Session]:
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    pid = d.get("pid")
+    if not isinstance(pid, int) or not alive(pid):
+        return None
+    return Session(
+        pid=pid,
+        config_dir=config_dir,
+        session_id=d.get("sessionId") or "",
+        cwd=d.get("cwd") or "",
+        name=d.get("name") or "",
+        kind=d.get("kind") or "",
+        entrypoint=d.get("entrypoint") or "",
+        status=d.get("status") or "",
+        started_at=(d.get("startedAt") or 0) / 1000,
+        updated_at=(d.get("updatedAt") or d.get("startedAt") or 0) / 1000,
+    )
+
+
+def branch_of(path: str) -> str:
+    """Checked-out branch, or "" when detached or not a repo."""
+    try:
+        r = subprocess.run(["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    name = r.stdout.strip() if r.returncode == 0 else ""
+    return name if name and name != "HEAD" else ""
+
+
+def live(config_dirs: Iterable[str], with_env: bool = True,
+         with_git: bool = False) -> list[Session]:
+    """Every running session across the given config dirs, newest first.
+
+    A pid can appear in two registries when a session moved between config
+    dirs; the environment says which one it really launched with, so that copy
+    wins and the other is dropped.
+    """
+    found: dict[int, Session] = {}
+    for cfg in config_dirs:
+        for path in glob.glob(os.path.join(cfg, "sessions", "*.json")):
+            s = _read(path, cfg)
+            if s and s.pid not in found:
+                found[s.pid] = s
+    out = list(found.values())
+    if with_env:
+        for s in out:
+            env = _environ(s.pid)
+            s.term_id = env.get("TERM_SESSION_ID", "")
+            s.env_config_dir = env.get("CLAUDE_CONFIG_DIR", "") or s.config_dir
+    if with_git:
+        for s in out:
+            s.branch = branch_of(s.cwd) if s.cwd else ""
+    return sorted(out, key=lambda s: s.updated_at, reverse=True)
+
+
+def prune(config_dirs: Iterable[str]) -> int:
+    """Delete registry files left behind by sessions that died long ago."""
+    removed, cutoff = 0, time.time() - STALE_AFTER
+    for cfg in config_dirs:
+        for path in glob.glob(os.path.join(cfg, "sessions", "*.json")):
+            try:
+                d = json.load(open(path))
+                if alive(d.get("pid") or 0) or os.path.getmtime(path) > cutoff:
+                    continue
+                os.remove(path)
+                removed += 1
+            except (OSError, ValueError):
+                continue
+    return removed
+
+
+def discover_config_dirs(home: Optional[str] = None) -> list[str]:
+    """Config dirs with a session running right now.
+
+    Claude Code keys its keychain item on the config-dir path STRING, so two
+    paths naming the same directory are two separate logins: `~/.claude-work`
+    is a symlink to `~/.claude-work` and has a login of its own.
+    A dir reached only through such an alias appears in no routing table while
+    still billing real work, so it is found here by its live session files.
+    """
+    home = home or os.path.expanduser("~")
+    found = []
+    for pattern in (".claude", ".claude-*", ".claude-ctx/*"):
+        for d in sorted(glob.glob(os.path.join(home, pattern))):
+            if not os.path.isdir(d):
+                continue
+            if any(_read(f, d) for f in glob.glob(os.path.join(d, "sessions", "*.json"))):
+                found.append(d)
+    return found

@@ -133,3 +133,33 @@ Usage reads are cached and backed off. `/api/oauth/usage` is rate limited per
 account and running sessions poll it too, so the busiest account is exactly the
 one whose row fails to load. A 429 serves the last payload instead of blanking
 the row; reset times in it are absolute, so a cached row still counts down.
+
+## Per-session accounts
+
+A login belongs to a config dir, so every session sharing one always bills to
+the same account. Moving a single session therefore means giving it a config
+dir of its own, which is what a **pin** does:
+
+```
+ccm sessions            # every running session, and which account pays for it
+ccm pin 200             # this terminal only, not the rest of the project
+ccm unpin               # follow the project again
+```
+
+Pins are keyed on `TERM_SESSION_ID`, the uuid a terminal assigns per tab. A pid
+or a tty number would be recycled onto some other tab later; this one is not,
+and it survives restarting Claude Code in the same tab. The pinned context
+symlinks its settings, commands and `projects/` back to `~/.claude`, so only
+the login differs and `claude -c` still finds the conversation.
+
+**A running session never picks up a change.** It reads its credential once at
+launch and holds it in memory, so a pin (like a swap) applies the next time
+that session starts: ctrl+C twice, then `claude -c`. Nothing outside the
+process can rebind it.
+
+The session list is read from Claude Code's own registry,
+`<config dir>/sessions/<pid>.json`, which carries the pid, cwd, status and the
+name Claude Code shows for the session. That also catches config dirs reached
+through a path alias: Claude Code keys its keychain item on the path *string*,
+so `~/.claude-work` and the `~/.claude-work` it points at are two
+different logins, and only the running sessions reveal the second one.

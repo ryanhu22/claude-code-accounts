@@ -24,7 +24,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from . import keychain, locks
+from . import keychain, locks, sessions
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
@@ -698,9 +698,11 @@ def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, 
     return out
 
 
-def _routes() -> tuple[dict[str, str], list[tuple[str, str]]]:
+def _routes() -> tuple[dict[str, str], list[tuple[str, str]], dict[str, str]]:
+    """The routing table: named contexts, per-path rules, per-terminal pins."""
     named: dict[str, str] = {}
     paths: list[tuple[str, str]] = []
+    terms: dict[str, str] = {}
     try:
         for line in open(ROUTES_FILE):
             line = line.strip()
@@ -709,16 +711,19 @@ def _routes() -> tuple[dict[str, str], list[tuple[str, str]]]:
             if line.startswith("path:"):
                 pth, dst = line[5:].split("=", 1)
                 paths.append((pth.rstrip("/"), dst))
+            elif line.startswith("term:"):
+                tid, dst = line[5:].split("=", 1)
+                terms[tid] = dst
             else:
                 k, v = line.split("=", 1)
                 named[k] = v
     except OSError:
         pass
-    return named, paths
+    return named, paths, terms
 
 
 def contexts() -> list[Context]:
-    named, paths = _routes()
+    named, paths, _ = _routes()
     out = [Context(name=k, path=v) for k, v in sorted(named.items())]
     if not out:
         out = [Context(name="default", path=DEFAULT_CONFIG)]
@@ -727,6 +732,12 @@ def contexts() -> list[Context]:
         if os.path.abspath(dst) not in seen:
             out.append(Context(name=os.path.basename(dst.rstrip("/")), path=dst))
             seen.add(os.path.abspath(dst))
+    # A dir reached through a path alias has its own login and appears in no
+    # rule, so anything with a session running now counts as a context too.
+    for d in sessions.discover_config_dirs(HOME):
+        if os.path.abspath(d) not in seen:
+            out.append(Context(name=_ctx_name(d).lstrip("."), path=d))
+            seen.add(os.path.abspath(d))
     try:
         for n in sorted(os.listdir(CTX_DIR)):
             d = os.path.join(CTX_DIR, n)
@@ -742,9 +753,16 @@ def contexts() -> list[Context]:
     return out
 
 
-def context_for(cwd: str) -> Context:
-    """Which context a directory runs in. Longest matching rule wins."""
-    named, paths = _routes()
+def context_for(cwd: str, term_id: str = "") -> Context:
+    """Which context a session runs in.
+
+    A terminal pin wins outright: it is the one rule the user set for exactly
+    this session. Otherwise the longest matching path rule wins, then the
+    named defaults.
+    """
+    named, paths, terms = _routes()
+    if term_id and term_id in terms:
+        return Context(name=_ctx_name(terms[term_id]), path=terms[term_id])
     cands = {os.path.abspath(cwd), os.path.realpath(cwd)}
     best, best_len = None, -1
     for pth, dst in paths:
@@ -776,20 +794,44 @@ def project_root(cwd: str) -> str:
     return os.path.abspath(cwd)
 
 
-def _write_route(root: str, context_path: Optional[str]) -> None:
+def _ctx_name(path: str) -> str:
+    return os.path.basename(path.rstrip("/")) or path
+
+
+def _write_rule(key: str, context_path: Optional[str]) -> None:
     lines: list[str] = []
     try:
         with open(ROUTES_FILE) as f:
             lines = [l.rstrip("\n") for l in f]
     except OSError:
         pass
-    key = f"path:{root}="
     lines = [l for l in lines if not l.startswith(key)]
     if context_path:
         lines.append(key + context_path)
     os.makedirs(os.path.dirname(ROUTES_FILE), exist_ok=True)
     with open(ROUTES_FILE, "w") as f:
         f.write("\n".join(l for l in lines if l.strip()) + "\n")
+
+
+def _write_route(root: str, context_path: Optional[str]) -> None:
+    _write_rule(f"path:{root}=", context_path)
+
+
+def _seed_context(ctx_path: str, blob: Optional[dict]) -> None:
+    """Create a context dir that shares config and history with ~/.claude.
+
+    Settings, commands and transcripts are symlinked back, so a session that
+    moves here keeps every one of them and `claude -c` still finds the
+    conversation it was in. Only the login differs, which is the whole point.
+    """
+    os.makedirs(ctx_path, exist_ok=True)
+    for item in SHARED_ITEMS:
+        target = os.path.join(DEFAULT_CONFIG, item)
+        link = os.path.join(ctx_path, item)
+        if os.path.exists(target) and not os.path.lexists(link):
+            os.symlink(target, link)
+    if blob:
+        adopt(ctx_path, blob)
 
 
 def isolate(cwd: str) -> tuple[bool, str]:
@@ -805,19 +847,85 @@ def isolate(cwd: str) -> tuple[bool, str]:
     current = context_for(root)
     if os.path.abspath(ctx_path) == os.path.abspath(current.path):
         return True, f"{root} already has its own context"
-    os.makedirs(ctx_path, exist_ok=True)
-    for item in SHARED_ITEMS:
-        target = os.path.join(DEFAULT_CONFIG, item)
-        link = os.path.join(ctx_path, item)
-        if os.path.exists(target) and not os.path.lexists(link):
-            os.symlink(target, link)
     blob = keychain.read_credentials(current.path)
-    if blob:
-        keychain.write_credentials(ctx_path, blob)      # start where it already was
+    _seed_context(ctx_path, blob)                       # start where it already was
     _write_route(root, ctx_path)
     who = whoami(blob.get("accessToken")) if blob else None
     return True, (f"{root}\n  own context: {ctx_path.replace(HOME, '~')}"
                   f"\n  account    : {who or 'unknown'}")
+
+
+# --------------------------------------------------------------------------- session pins
+
+def term_pins() -> dict[str, str]:
+    return _routes()[2]
+
+
+def pin_dir(term_id: str) -> str:
+    """The context dir backing one terminal's pin.
+
+    Keyed by the terminal's own id rather than a pid or a tty number, so
+    restarting Claude Code in that tab lands back on the same account and a
+    recycled pid can never inherit somebody else's pin.
+    """
+    return os.path.join(CTX_DIR, "term-" + term_id.replace("-", "")[:8].lower())
+
+
+def pin(term_id: str, account: str, seed_from: Optional[str] = None) -> tuple[bool, str]:
+    """Give one session its own account, without moving the rest of its project.
+
+    A login belongs to a config dir, so a session can only differ from its
+    neighbours by having a config dir of its own. That dir is created here,
+    sharing settings and transcripts with ~/.claude, and the routing table
+    sends this terminal to it from now on.
+    """
+    if not term_id:
+        return False, "this session has no terminal id, so it cannot be pinned"
+    try:
+        account = resolve_account(account)
+    except UnknownAccount as e:
+        return False, str(e)
+    ctx_path = pin_dir(term_id)
+    fresh = not os.path.isdir(ctx_path)
+    if fresh:
+        seed = keychain.read_credentials(seed_from) if seed_from else None
+        _seed_context(ctx_path, seed)
+    _write_rule(f"term:{term_id}=", ctx_path)
+    ok, msg = swap(account, Context(name=_ctx_name(ctx_path), path=ctx_path))
+    if not ok:
+        if fresh:
+            _write_rule(f"term:{term_id}=", None)       # leave no half-made pin
+        return False, msg
+    return True, msg
+
+
+def unpin(term_id: str) -> tuple[bool, str]:
+    """Send a session back to its project's account on its next start."""
+    if term_id not in term_pins():
+        return False, "this session is not pinned"
+    _write_rule(f"term:{term_id}=", None)
+    return True, "pin removed; this session follows its project again"
+
+
+def prune_pins(live_term_ids: Iterable[str], max_age: float = 14 * 24 * 3600) -> list[str]:
+    """Drop pins for terminals that are gone.
+
+    A terminal id disappears for good when its tab closes, so a pin nothing has
+    used in a fortnight is dead weight. Anything with a session running now is
+    kept whatever its age.
+    """
+    alive, dropped, cutoff = set(live_term_ids), [], time.time() - max_age
+    for tid, path in term_pins().items():
+        if tid in alive:
+            continue
+        try:
+            if os.path.getmtime(path) > cutoff:
+                continue
+        except OSError:
+            pass                       # dir already gone: the rule is pure litter
+        _write_rule(f"term:{tid}=", None)
+        dropped.append(tid)
+    return dropped
 
 
 def unroute(cwd: str) -> tuple[bool, str]:
