@@ -344,6 +344,7 @@ class ManagerApp(rumps.App):
         self._lock = threading.Lock()
         self._busy = False
         self._syncing = False
+        self._notice: Optional[tuple[str, bool]] = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
@@ -394,6 +395,13 @@ class ManagerApp(rumps.App):
         threading.Thread(target=self._worker, args=(force,), daemon=True).start()
 
     def _on_sync_tick(self, _timer) -> None:
+        with self._lock:
+            notice, self._notice = self._notice, None
+        if notice is not None:
+            message, refresh = notice
+            self._notify(message)
+            if refresh:
+                self.refresh_now(None)
         with self._lock:
             snap, self._pending = self._pending, None
         if snap is not None:
@@ -945,7 +953,36 @@ class ManagerApp(rumps.App):
         return handler
 
     def _sign_in(self, name: str, app: str = "") -> None:
-        """Open the sign-in page, then take the code the callback shows back."""
+        """Sign an account in. The browser hands the code back by itself."""
+        try:
+            cb = oauth.Callback()
+        except OSError:
+            self._sign_in_by_paste(name, app)      # cannot listen; ask for the code
+            return
+        attempt = core.sign_in_begin(name, cb.redirect_uri)
+        err = oauth.open_in(attempt.url, app)
+        if err:
+            cb.close()
+            self._notify(f"Could not open a browser: {err}")
+            return
+
+        def wait() -> None:
+            try:
+                if not cb.wait(300):
+                    self._post_notice(f"Signing in as “{name}” timed out. Try again.")
+                    return
+                if cb.error or not cb.code:
+                    self._post_notice(f"Sign-in was refused: {cb.error or 'no code came back'}")
+                    return
+                ok, msg = core.sign_in_finish(attempt, f"{cb.code}#{cb.state}")
+                self._post_notice(msg, refresh=ok)
+            finally:
+                cb.close()
+
+        threading.Thread(target=wait, daemon=True).start()
+
+    def _sign_in_by_paste(self, name: str, app: str) -> None:
+        """Fallback for when nothing local can listen: the user pastes the code."""
         attempt = core.sign_in_begin(name)
         err = oauth.open_in(attempt.url, app)
         if err:
@@ -953,9 +990,7 @@ class ManagerApp(rumps.App):
             return
         win = rumps.Window(
             title=f"Signing in as “{name}”",
-            message=("Sign in in the browser, then copy the code it shows and "
-                     "paste it here.\n\nIf the browser was already signed in as "
-                     "someone else, that is the account you will get."),
+            message="Sign in in the browser, then paste the code it shows here.",
             ok="Sign in", cancel="Cancel", dimensions=(300, 22))
         resp = win.run()
         if resp.clicked != 1 or not resp.text.strip():
@@ -964,6 +999,11 @@ class ManagerApp(rumps.App):
         self._notify(msg)
         if ok:
             self.refresh_now(None)
+
+    def _post_notice(self, message: str, refresh: bool = False) -> None:
+        """Hand a message to the main thread. AppKit is not thread safe."""
+        with self._lock:
+            self._notice = (message, refresh)
 
     def _add_account(self, _sender, preset: str = "") -> None:
         """Open Claude Code in an account's own directory so /login can run.
