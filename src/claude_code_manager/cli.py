@@ -28,7 +28,9 @@ def cmd_list(_args) -> int:
                 head += f"  {G}<- {', '.join(used)}{X}"
             if acct.stale:
                 head += f"  {Y}(usage {int(acct.usage_age // 60)}m old){X}"
-        if acct.error:
+        if acct.mismatch:
+            head += f"  {R}{acct.mismatch}{X}"
+        elif acct.error:
             head += f"  {Y}{acct.error}{X}"
         print(head)
         if not acct.signed_in:

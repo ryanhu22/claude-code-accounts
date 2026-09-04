@@ -407,6 +407,7 @@ class Account:
     plan: Optional[str] = None
     limits: list[Limit] = field(default_factory=list)
     error: Optional[str] = None
+    mismatch: Optional[str] = None   # holds a different account than its name
     checked_at: float = 0.0
     usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
 
@@ -605,6 +606,12 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     return None
 
 
+def _cached_email(config_dir: str) -> str:
+    """The last identity confirmed for a dir, whatever it holds now."""
+    entry = _cache_read(IDENTITY_CACHE).get(os.path.abspath(config_dir)) or {}
+    return entry.get("email") or ""
+
+
 def is_account_dir(config_dir: str) -> bool:
     return os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR
 
@@ -625,7 +632,7 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) ->
     # every session the account owns. Claude Code keeps its own record of who a
     # directory last authenticated as, which makes an independent check.
     if is_account_dir(config_dir) and not rebind:
-        expected = recorded_email(config_dir)
+        expected = recorded_email(config_dir) or _cached_email(config_dir)
         actual = (email or identity(config_dir, blob)[0].get("email") or "").lower()
         if expected and actual and expected.lower() != actual.lower():
             return False
@@ -682,7 +689,10 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
     # accounts reporting identical usage rather than as a fault. Say it.
     was = recorded_email(slot)
     if was and email and was.lower() != email.lower():
-        acct.error = f"holds {email}, not {was}"
+        # Its own field: the usage fetch below sets `error`, and would
+        # otherwise clear this the moment usage came back fine — which it
+        # does, because the credential works. It is just the wrong one.
+        acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
         acct.limits, acct.usage_at, acct.error = _usage(name, blob["accessToken"], force)
     return acct
