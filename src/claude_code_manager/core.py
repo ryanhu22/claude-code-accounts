@@ -35,12 +35,15 @@ TOKEN_URLS = ("https://platform.claude.com/v1/oauth/token",
 API = "https://api.anthropic.com"
 UA = "claude-cli/2.1.236 (external, cli)"
 OAUTH_HEADERS = {"anthropic-beta": "oauth-2025-04-20", "User-Agent": UA}
+ANTHROPIC_VERSION = "2023-06-01"
+POKE_MODEL = "claude-haiku-4-5-20251001"
 
 
 # --------------------------------------------------------------------------- http
 
-def _post(url: str, body: dict, token: Optional[str] = None, timeout: int = 30) -> dict:
-    headers = {"Content-Type": "application/json", **OAUTH_HEADERS}
+def _post(url: str, body: dict, token: Optional[str] = None, timeout: int = 30,
+          extra_headers: Optional[dict] = None) -> dict:
+    headers = {"Content-Type": "application/json", **OAUTH_HEADERS, **(extra_headers or {})}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
@@ -205,6 +208,60 @@ def propagate(spent: Optional[str], resp: dict, skip: str) -> list[str]:
     return moved
 
 
+STASH_DIR = os.path.join(profiles.CCM_HOME, "pending")
+
+
+def _stash_path(config_dir: str) -> str:
+    digest = hashlib.sha256(os.path.abspath(config_dir).encode()).hexdigest()[:12]
+    return os.path.join(STASH_DIR, digest + ".json")
+
+
+def _persist(config_dir: str, rotated: dict, spent: Optional[str]) -> bool:
+    """Store a rotated credential, and never lose it if the keychain refuses.
+
+    A refresh token is single use. Once the exchange succeeds the stored one is
+    already dead, so a failed write does not leave things as they were: it
+    leaves a credential that can never be refreshed again. The successor is
+    written to disk instead, keyed to the generation it replaced, and picked up
+    on the next read. This is how an account silently "expires" while nothing
+    is wrong with it.
+    """
+    try:
+        keychain.write_credentials(config_dir, rotated)
+    except RuntimeError:
+        try:
+            os.makedirs(STASH_DIR, mode=0o700, exist_ok=True)
+            tmp = _stash_path(config_dir) + ".tmp"
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+                json.dump({"replaces": spent, "blob": rotated, "at": time.time()}, f)
+            os.replace(tmp, _stash_path(config_dir))
+        except OSError:
+            pass
+        return False
+    _drop_stash(config_dir)
+    return True
+
+
+def _take_stash(config_dir: str, current: Optional[dict]) -> Optional[dict]:
+    """A successor left behind by a write that failed, if it fits what is stored."""
+    try:
+        with open(_stash_path(config_dir)) as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if saved.get("replaces") != fingerprint(current):
+        _drop_stash(config_dir)      # describes some older generation
+        return None
+    return saved.get("blob") or None
+
+
+def _drop_stash(config_dir: str) -> None:
+    try:
+        os.remove(_stash_path(config_dir))
+    except OSError:
+        pass
+
+
 def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
     """Usable credentials for a config dir, refreshed in place when stale.
 
@@ -222,6 +279,13 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
     try:
         with locks.credentials(config_dir):
             current = keychain.read_credentials(config_dir) or blob
+            # A successor from a write that failed earlier: the stored token is
+            # already spent, so use it before trying to exchange it again.
+            saved = _take_stash(config_dir, current)
+            if saved and _persist(config_dir, saved, fingerprint(current)):
+                if not expiring(saved):
+                    return saved
+                current = saved
             if not expiring(current):
                 return current            # somebody else refreshed while we waited
             spent = fingerprint(current)
@@ -231,9 +295,7 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
                 # account is gone: a peer dir may hold the live successor.
                 return None if err == "invalid_grant" else current
             rotated = _apply(current, resp)
-            try:
-                keychain.write_credentials(config_dir, rotated)
-            except RuntimeError:
+            if not _persist(config_dir, rotated, spent):
                 return rotated
     except locks.LockBusy:
         return blob                       # Claude Code is mid-refresh; try later
@@ -720,12 +782,15 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
         return False, "not signed in"
     try:
         _post(f"{API}/v1/messages", {
-            "model": "claude-haiku-4-5-20251001",
+            "model": POKE_MODEL,
             "max_tokens": 1,
             "system": [{"type": "text",
                         "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
             "messages": [{"role": "user", "content": "hi"}],
-        }, token=blob["accessToken"], timeout=45)
+        }, token=blob["accessToken"], timeout=45,
+            # The Messages API rejects a request without it; the OAuth
+            # endpoints do not use it, which is why it is not in OAUTH_HEADERS.
+            extra_headers={"anthropic-version": ANTHROPIC_VERSION})
         return True, "window started"
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code}"
