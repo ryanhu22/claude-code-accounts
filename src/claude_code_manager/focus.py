@@ -92,10 +92,16 @@ def pick(live: list[sessions.Session], bundle_id: str, tty: str) -> Focus:
         if hits:
             hits.sort(key=lambda s: (not s.interactive, -s.updated_at))
             return Focus(hits[0], exact=True)
-        return Focus(None, exact=True, note="no session in this tab")
+        return Focus(None, exact=True, note="this tab has no session")
     program = TERMINALS.get(bundle_id, ("", None))[0]
     if not program:
-        return Focus(None, exact=False, note="not a terminal")
+        # No terminal has been in front yet. The newest session is the best
+        # stand-in: it is the one the user most likely just left.
+        hits = [s for s in live if s.interactive]
+        if not hits:
+            return Focus(None, exact=False, note="no session is running")
+        hits.sort(key=lambda s: -s.updated_at)
+        return Focus(hits[0], exact=False, note="newest session; click a Terminal tab to follow it")
     hits = [s for s in live if s.term_program == program and s.interactive]
     if not hits:
         return Focus(None, exact=False, note=f"no session in {program}")
