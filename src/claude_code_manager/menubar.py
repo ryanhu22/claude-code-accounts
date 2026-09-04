@@ -1425,7 +1425,7 @@ class ManagerApp(rumps.App):
             # because of this profile's rule, not because of the account it
             # points at, and next to the chip it read as the account's count,
             # which is the number one row up in the section above.
-            ("  ", "dim"), ("folder", "icon"),
+            ("  ", "dim"), ("folder", "icon"), (" ", "dim"),
             (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"), *_lamps(here),
             (f"  {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
@@ -1489,7 +1489,7 @@ class ManagerApp(rumps.App):
             *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
             # Dashed, because this is not a profile anybody made. It is
             # what collects whatever the named ones did not.
-            ("  ", "dim"), ("square.dashed", "icon"),
+            ("  ", "dim"), ("square.dashed", "icon"), (" ", "dim"),
             (_fit("everything else", PROFILE_W), "dim"),
             ("  ", "dim"), *_lamps(loose),
             # No project count. This rule covers whatever is not in a profile,
