@@ -490,7 +490,11 @@ def _parse_limits(data: dict) -> list[Limit]:
 # --------------------------------------------------------------------------- usage cache
 
 USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
-_BACKOFF_MIN, _BACKOFF_MAX = 300, 900
+# The endpoint sends Retry-After: 0, which says nothing, so the wait is ours to
+# choose. Start short because a brief limit is the common case and the row is
+# blank until it clears; escalate only if the limiting is sustained.
+_BACKOFF_MIN, _BACKOFF_MAX = 180, 900
+_FORCE_FLOOR = 30            # shortest gap between forced checks of one account
 
 
 def _cache_read(path: str = "") -> dict:
@@ -537,6 +541,10 @@ def _usage(name: str, token: str, force: bool = False,
         entry = {}
     cached, at = entry.get("data"), entry.get("at", 0.0)
     now = time.time()
+    # A forced check skips the wait, but not entirely: clicking refresh at a
+    # rate limit should not add requests that can only prolong it.
+    if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
+        return (_parse_limits(cached) if cached else []), at, entry.get("last_error")
     if cached and not force and now < entry.get("retry_after", 0):
         return _parse_limits(cached), at, None
     try:
@@ -544,13 +552,23 @@ def _usage(name: str, token: str, force: bool = False,
     except Exception as e:
         code = getattr(e, "code", None)
         if code == 429:
-            wait = min(max(entry.get("backoff", 0) * 2, _BACKOFF_MIN), _BACKOFF_MAX)
-            store[name] = {**entry, "backoff": wait, "retry_after": now + wait}
+            # A forced check is the user asking, so it must not push the wait
+            # out further: they would be punished for looking, and the row
+            # would take longer to recover the harder they tried.
+            wait = (entry.get("backoff") or _BACKOFF_MIN) if force else \
+                min(max(entry.get("backoff", 0) * 2, _BACKOFF_MIN), _BACKOFF_MAX)
+            mins = max(1, round(wait / 60))
+            note = f"rate limited, retrying in {mins}m"
+            store[name] = {**entry, "backoff": wait, "retry_after": now + wait,
+                           "tried_at": now, "last_error": note}
             _cache_write(store)
+            if not cached:
+                return [], 0.0, note
         if cached:
             return _parse_limits(cached), at, None
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
-    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0, "fp": fp}
+    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0,
+                   "fp": fp, "tried_at": now}
     _cache_write(store)
     return _parse_limits(data), now, None
 
