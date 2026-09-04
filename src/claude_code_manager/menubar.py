@@ -232,7 +232,11 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
     """
     pct = sess.context_pct
     if pct is None:
-        return [("  ctx ", "dim"), (" " * (CTX_BAR_W + 4), "dim")]
+        # A session that has just restarted has not been found in the
+        # transcripts yet. Blank space reads as a fault; a dash reads as
+        # "not known", which is what it is, and it fills in on the next pass.
+        return [("  ctx ", "dim"),
+                (("\u2014").center(CTX_BAR_W) + "    ", "dim")]
     filled = max(0, min(CTX_BAR_W, round(pct / 100 * CTX_BAR_W)))
     tone = _tone(pct)
     return [("  ctx ", "dim"), (FULL * filled, tone), (EMPTY * (CTX_BAR_W - filled), "dim"),
