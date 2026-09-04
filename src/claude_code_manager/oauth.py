@@ -34,10 +34,25 @@ SCOPES = ("user:profile", "user:inference", "user:sessions:claude_code",
           "user:mcp_servers", "user:file_upload")
 
 
+_PAGE_STYLE = b"font:15px -apple-system,sans-serif;margin:4rem auto;max-width:28rem"
+
 DONE_PAGE = (b"<!doctype html><meta charset=utf-8>"
              b"<title>Signed in</title>"
-             b"<body style=\"font:15px -apple-system,sans-serif;margin:4rem auto;max-width:28rem\">"
+             b"<body style=\"" + _PAGE_STYLE + b"\">"
              b"<h2>Signed in.</h2><p>You can close this tab and go back to the app.</p>")
+
+WRONG_SIGN_IN_PAGE = (b"<!doctype html><meta charset=utf-8>"
+                      b"<title>Wrong sign-in</title>"
+                      b"<body style=\"" + _PAGE_STYLE + b"\">"
+                      b"<h2>This page does not belong to the sign-in in progress.</h2>"
+                      b"<p>To sign in, go back to the app and start again.</p>")
+
+NOT_FOUND_PAGE = (b"<!doctype html><meta charset=utf-8>"
+                  b"<title>Not found</title>"
+                  b"<body style=\"" + _PAGE_STYLE + b"\">"
+                  b"<h2>Not found.</h2>")
+
+CALLBACK_PATH = "/callback"
 
 
 class Callback:
@@ -47,24 +62,52 @@ class Callback:
     client, so the browser can hand the code straight back and the user never
     copies anything. That also removes the step most likely to go wrong:
     switching accounts part-way through loses the page the code was on.
+
+    The port is reachable by anything on this machine, not only the browser
+    tab we opened: a favicon fetch, a prefetch, a page that scans localhost.
+    So only `/callback` is served, a request has to carry the `state` of a
+    sign-in, and the first real redirect wins. Once `expect()` has been
+    called, a redirect for any other sign-in is refused without touching the
+    one that is pending. Without it, `finish()` still rejects a code whose
+    state does not match, so the worst a stray request can do is waste the
+    attempt, not swap in a code of its own.
     """
 
     def __init__(self) -> None:
         self.code = self.state = self.error = ""
+        self.expected_state = ""
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
-                query = urllib.parse.urlparse(self.path).query
-                got = urllib.parse.parse_qs(query)
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path != CALLBACK_PATH:
+                    self._reply(404, NOT_FOUND_PAGE)
+                    return
+                got = urllib.parse.parse_qs(parsed.query)
+                state = (got.get("state") or [""])[0]
+                # The authorize page always echoes the state, so a request
+                # without one, or with someone else's, is not the redirect.
+                if not state or (outer.expected_state and state != outer.expected_state):
+                    self._reply(400, WRONG_SIGN_IN_PAGE)
+                    return
+                if outer._done.is_set():
+                    # A reload of the tab, or a late arrival. The caller may
+                    # be reading `code` right now, so nothing is overwritten.
+                    self._reply(200, DONE_PAGE)
+                    return
                 outer.code = (got.get("code") or [""])[0]
-                outer.state = (got.get("state") or [""])[0]
+                outer.state = state
                 outer.error = (got.get("error_description") or got.get("error") or [""])[0]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(DONE_PAGE)
+                self._reply(200, DONE_PAGE)
                 outer._done.set()
+
+            def _reply(self, status: int, page: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
 
             def log_message(self, *_a):
                 pass
@@ -76,7 +119,16 @@ class Callback:
 
     @property
     def redirect_uri(self) -> str:
-        return f"http://localhost:{self.port}/callback"
+        return f"http://localhost:{self.port}{CALLBACK_PATH}"
+
+    def expect(self, state: str) -> None:
+        """Name the sign-in this server is waiting for.
+
+        The attempt is created after the server, because the authorize URL
+        needs the port, so the state arrives a moment later than the server
+        does. Call this with `attempt.state` before the browser opens.
+        """
+        self.expected_state = state
 
     def wait(self, timeout: float = 300.0) -> bool:
         return self._done.wait(timeout)
@@ -100,11 +152,24 @@ class Attempt:
     started_at: float = field(default_factory=time.time)
 
     @property
+    def hosted(self) -> bool:
+        """Whether the code comes back through Anthropic's page for pasting.
+
+        The only thing that tells the two flows apart is where the code is
+        sent: the hosted callback page, or a port on this machine. Nothing
+        else about an attempt differs, so this is the one place to ask.
+        """
+        return self.redirect_uri == CALLBACK_URL
+
+    @property
     def url(self) -> str:
         challenge = base64.urlsafe_b64encode(
             hashlib.sha256(self.verifier.encode()).digest()).decode().rstrip("=")
         query = urllib.parse.urlencode({
-            "code": "true",
+            # `code=true` asks the hosted page to show the code for pasting.
+            # A loopback redirect has no page to show it on; the parameter
+            # belongs to the hosted flow alone.
+            **({"code": "true"} if self.hosted else {}),
             "client_id": CLIENT_ID,
             "response_type": "code",
             "redirect_uri": self.redirect_uri,
@@ -152,6 +217,12 @@ def finish(attempt: Attempt, pasted: str, post, profile_result) -> tuple[Optiona
     if not code:
         return None, "no code was pasted"
     if state and state != attempt.state:
+        return None, "that code belongs to a different sign-in; start again"
+    if not state and not attempt.hosted:
+        # A bare code is fine when the user pasted it from the hosted page.
+        # On the loopback redirect the authorize page always echoes the
+        # state, so a code with none did not come from it: anything on this
+        # machine can reach the port and offer a code of its own.
         return None, "that code belongs to a different sign-in; start again"
     body = {
         "grant_type": "authorization_code",
