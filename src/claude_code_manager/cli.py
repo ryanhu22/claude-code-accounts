@@ -217,6 +217,11 @@ def cmd_login(args) -> int:
         except OSError:
             cb = None
     attempt = core.sign_in_begin(args.account, cb.redirect_uri if cb else "")
+    if cb:
+        # The server exists before the attempt, because the authorize URL needs
+        # the port, so tell it now which sign-in it is waiting for. Anything on
+        # this machine can reach that port.
+        cb.expect(attempt.state)
     err = oauth.open_in(attempt.url, args.browser or "")
     if err:
         print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
