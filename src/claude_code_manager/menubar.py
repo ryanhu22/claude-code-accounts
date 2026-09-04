@@ -755,11 +755,16 @@ class ManagerApp(rumps.App):
         the age of the usage are read from the clock at that moment rather
         than from whenever the menu was last built.
         """
-        used_by = core.rules_using(acct.name, snap.rules)
+        # The dot means "some rule points here", so it counts every scope.
+        # The text beside it names only the rules that are not already drawn
+        # in the profiles section further down.
+        in_use = bool(core.rules_using(acct.name, snap.rules))
+        used_by = core.rules_using(acct.name, snap.rules,
+                                   scopes=("default", "project", "session"))
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
         segments = [
-            ("● " if used_by else "○ ", "text" if used_by else "dim"),
+            ("● " if in_use else "○ ", "text" if in_use else "dim"),
             _chip(acct.name, NAME_W),
         ]
         segments += _bucket("5h", acct.limit("session"))
@@ -783,8 +788,7 @@ class ManagerApp(rumps.App):
             again = "Sign in again" if acct.error == "login expired" else "Sign in"
             item.add(self._browser_menu(again, acct.name))
             return item
-        used_by = core.rules_using(acct.name, snap.rules)
-        in_use = bool(used_by)
+        in_use = bool(core.rules_using(acct.name, snap.rules))
         # plain title stays unique: rumps keys its callback registry by it
         head = f"{'●' if in_use else '○'} {acct.name} — {_pct(acct.session_pct)} 5h"
         item = rumps.MenuItem(head)
