@@ -1120,7 +1120,7 @@ class ManagerApp(rumps.App):
         pending = acct.name in self._signing_in
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
-        segments = [("  ", "dim"), *_chip(acct.name, NAME_W), (" ", "dim"),
+        segments = [("  ", "dim"), *_chip(acct.name, NAME_W), ("  ", "dim"),
                     *_lamps(here)]
         if not acct.reading:
             # Nothing usable came back. Every window draws as unknown rather
@@ -1342,16 +1342,19 @@ class ManagerApp(rumps.App):
                         if prof.covers(core.project_root(s.cwd)))
         head = f"  {prof.name} — {prof.account or 'no account'} · {n} repos"
         item = rumps.MenuItem(head)
+        # The account first, as in every other row in this menu. A subscription
+        # row leads with the account it is, a session row with the account it
+        # spends, and a profile row with the account it routes to. One column
+        # one meaning, and all three sections line up down the left because of
+        # it. Reading the profile name first was the truer order for this
+        # section alone, and it cost the menu its grid.
         _apply_style(item, [
-            # Three, to sit under the chips in the two sections above. A
-            # profile's name is what its row is about, the same way an
-            # account's chip is, so the two start in the same column.
-            ("   ", "dim"),
-            (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"),
             *(_chip(prof.account, NAME_W) if prof.account
               else [(f"{'unassigned':<{NAME_W}}", "warn")]),
-            (f"   {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
+            ("  ", "dim"),
+            (_fit(prof.name, PROFILE_W), "text"),
+            (f" {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
             (f"{str(live_here) + ' running' if live_here else '':<{RUN_W}}", "dim"),
         ])
         self._add_scope(item, f"Use for every project in “{prof.name}”",
@@ -1409,15 +1412,15 @@ class ManagerApp(rumps.App):
         loose = sum(1 for s in snap.sessions if _reason(snap, s) == "default")
         item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
         _apply_style(item, [
-            ("   ", "dim"),
-            (_fit("everything else", PROFILE_W), "dim"),
             ("  ", "dim"),
             *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
+            ("  ", "dim"),
+            (_fit("everything else", PROFILE_W), "dim"),
             # The projects column is left empty rather than skipped. This rule
             # covers whatever is not in a profile, so it has no count to put
             # there, and running its number up into that column put the two
             # rows' numbers under each other meaning different things.
-            (" " * (3 + PROJ_W), "dim"),
+            (" " * (1 + PROJ_W), "dim"),
             (f"{str(loose) + ' running' if loose else '':<{RUN_W}}", "dim"),
         ])
         self._running_block(
