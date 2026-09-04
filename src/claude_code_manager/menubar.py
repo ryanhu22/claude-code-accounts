@@ -335,9 +335,12 @@ SPEC_TABS = (("r", SPEC_FIGURE_X), ("l", SPEC_NOTE_X))
 # The account picker: a chip, then a label and a figure for each of the three
 # windows. Measured, not guessed: the widest chip is 81 points, a label runs to
 # 30 for "fable", and a figure to 37 for "100%".
-PICK_TABS = (("l", 112.0), ("r", 160.0),
-             ("l", 176.0), ("r", 224.0),
-             ("l", 240.0), ("r", 302.0))
+# Three groups of label, figure, countdown. Measured: the widest chip is 81
+# points, "fable" is the widest label at 30, "100%" the widest figure at 37,
+# and "(unused)" the widest countdown at 55.
+PICK_TABS = (("l", 108.0), ("r", 152.0), ("l", 158.0),
+             ("l", 220.0), ("r", 264.0), ("l", 270.0),
+             ("l", 332.0), ("r", 390.0), ("l", 396.0))
 
 
 def _spec_line(label: str, figure: str, tone: str = "text", after=()):
@@ -529,9 +532,21 @@ def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
 
 
 def _window_cell(label: str, lim) -> list[tuple[str, str, str]]:
+    """One window on a picker row: what it is, what it has spent, when it
+    comes back.
+
+    The countdown is here for the same reason the percentage is. Choosing an
+    account on a number alone picks the emptiest one, which is the wrong
+    choice when that one resets in ten minutes and the fuller one does not
+    reset for four days.
+    """
     spent = lim.spent if lim else None
+    when = ""
+    if lim is not None and spent is not None:
+        when = _compact_reset(lim.resets_at) if lim.resets_at else "new"
     return [(f"\t{label}", "dim", "ui"),
-            (f"\t{_pct(spent)}", _tone(spent), "fig")]
+            (f"\t{_pct(spent)}", _tone(spent), "fig"),
+            (f"\t{'(' + when + ')' if when else ''}", _reset_tone(lim), "ui")]
 
 
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
@@ -1516,6 +1531,7 @@ class ManagerApp(rumps.App):
                         "project", root, snap,
                         current=r.projects.get(core.profiles.tilde(root), ""),
                         cwd=sess.cwd, clearable=bool(r.project_rule_for(root)))
+        join = None
         if prof:
             # One line, not another five. The profiles section edits profiles
             # and is one hover away, so repeating its account picker here cost
@@ -1545,8 +1561,13 @@ class ManagerApp(rumps.App):
                                  (" ", "dim"), ("New profile\u2026", "text")],
                          mono=False)
             join.add(fresh)
-            item.add(join)
         item.add(rumps.separator)
+        # Below the separator, with the other icons. macOS reserves the
+        # image gutter for a run of items rather than for the one item
+        # that has an image, so above the separator this row pushed the
+        # whole project picker two columns right of the session picker.
+        if join is not None:
+            item.add(join)
         # The same block a session gets when it is reached through its
         # account, so the numbers behind a row read the same way whichever
         # menu was opened to find them. They were six ragged rows here once,
