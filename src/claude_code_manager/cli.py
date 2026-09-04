@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from . import core, projects, sessions
+from . import core, sessions
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -17,16 +17,15 @@ def _bar(pct: float, width: int = 20) -> str:
 
 
 def cmd_list(_args) -> int:
-    ctxs = core.contexts()
+    r = core.bootstrap()
     accts = [core.load_account(n) for n in core.account_names()]
-    emails = core.context_owners([c.path for c in ctxs], accts)
     for acct in accts:
-        used = [c.name for c in ctxs if emails.get(c.path, "").lower() == (acct.email or "").lower()]
+        used = core.rules_using(acct.name, r)
         head = f"\033[1m{acct.name}{X}"
         if acct.signed_in:
             head += f"  {D}{acct.email} · {acct.plan}{X}"
             if used:
-                head += f"  {G}<- in use by {', '.join(used)}{X}"
+                head += f"  {G}<- {', '.join(used)}{X}"
             if acct.stale:
                 head += f"  {Y}(usage {int(acct.usage_age // 60)}m old){X}"
         if acct.error:
@@ -42,35 +41,103 @@ def cmd_list(_args) -> int:
     return 0
 
 
-def cmd_swap(args) -> int:
-    ctx = core.context_for(os.getcwd()) if not args.context else \
-        next((c for c in core.contexts() if c.name == args.context), None)
-    if ctx is None:
-        print(f"unknown context: {args.context}", file=sys.stderr)
-        return 2
-    ok, msg = core.swap(args.account, ctx)
-    print(msg)
-    if ok:
-        print("New sessions use it now. A running session keeps its account until it")
-        print("restarts: ctrl+C twice, then `claude -c`.")
-    return 0 if ok else 1
-
-
 def cmd_poke(args) -> int:
     ok, msg = core.poke(args.account)
     print(f"{args.account}: {msg}")
     return 0 if ok else 1
 
 
+_WHY = {"session": "pinned to this terminal", "project": "a rule for this project",
+        "default": "no rule covers it, so the default applies"}
+
+
 def cmd_where(_args) -> int:
+    core.bootstrap()
     term = os.environ.get("TERM_SESSION_ID", "")
-    ctx = core.context_for(os.getcwd(), term)
-    print(os.getcwd())
-    print(f"  context : {ctx.path.replace(core.HOME, '~')} ({ctx.name})")
-    print(f"  account : {ctx.email or 'unknown'}")
-    if term and term in core.term_pins():
-        print(f"  {G}pinned  : this terminal only{X}")
+    cwd = os.getcwd()
+    account, reason = core.resolve(cwd, term)
+    why = _WHY.get(reason) or f"the “{reason.split(':', 1)[-1]}” profile"
+    acct = core.load_account(account, with_usage=False) if account else None
+    print(cwd)
+    print(f"  account : {G}{account or 'none'}{X}" + (f"  {D}{acct.email}{X}" if acct and acct.email else ""))
+    print(f"  because : {D}{why}{X}")
+    print(f"  dir     : {D}{core.account_dir(account).replace(core.HOME, '~') if account else '-'}{X}")
     return 0
+
+
+def _rule_table(r, accts) -> None:
+    """Print the rules from least to most specific, the way they resolve."""
+    plan = {a.name: a for a in accts}
+    def chip(name: str) -> str:
+        a = plan.get(name)
+        return f"{name}" + (f" {D}({a.email}){X}" if a and a.email else "")
+    print(f"{'everything else':<22} {chip(r.default_account) if r.default_account else Y + 'not set' + X}")
+    for prof in r.profiles:
+        n = len(prof.repos)
+        print(f"\n{prof.name:<22} {chip(prof.account) if prof.account else D + 'no account' + X}"
+              f"  {D}{n} repo{'s' if n != 1 else ''}{X}")
+        for repo in prof.repos:
+            print(f"  {D}{repo}{X}")
+    if r.projects:
+        print()
+        for path, account in r.projects.items():
+            print(f"{D}project{X} {path:<28} {chip(account)}")
+    if r.sessions:
+        print()
+        for tid, account in r.sessions.items():
+            print(f"{D}session{X} {tid[:13]:<28} {chip(account)}")
+
+
+def cmd_profiles(_args) -> int:
+    r = core.bootstrap()
+    accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
+    if not r.profiles and not r.projects:
+        print(f"{D}No profiles yet. A profile is a named group of repos that share")
+        print(f"an account: `ccm profile new work`, then `ccm profile add work` in a repo.{X}\n")
+    _rule_table(r, accts)
+    return 0
+
+
+def cmd_profile(args) -> int:
+    action = args.action
+    if action == "new":
+        ok, msg = core.add_profile(args.name, args.account or "")
+    elif action == "rm":
+        ok, msg = core.remove_profile(args.name)
+    elif action == "rename":
+        if not args.account:
+            print("usage: ccm profile rename <old> <new-name>", file=sys.stderr)
+            return 1
+        ok, msg = core.rename_profile(args.name, args.account)
+    elif action == "add":
+        ok, msg = core.profile_add_repo(args.name, args.path or os.getcwd())
+    elif action == "drop":
+        ok, msg = core.profile_remove_repo(args.name, args.path or os.getcwd())
+    else:
+        print(f"unknown action {action}", file=sys.stderr)
+        return 1
+    print(msg)
+    return 0 if ok else 1
+
+
+def cmd_use(args) -> int:
+    """Point one scope at an account: session, project, profile or default."""
+    core.bootstrap()
+    cwd = os.getcwd()
+    if args.default:
+        scope, key = "default", ""
+    elif args.profile:
+        scope, key = "profile", args.profile
+    elif args.session:
+        scope, key = "session", _term_or_die()
+    else:
+        scope, key = "project", cwd
+    ok, msg = core.assign(scope, key, args.account, cwd=cwd)
+    print(msg)
+    if ok:
+        print(f"{D}Running sessions keep their account until they restart: "
+              f"ctrl+C twice, then `claude -c`.{X}")
+    return 0 if ok else 1
 
 
 def _term_or_die() -> str:
@@ -83,27 +150,27 @@ def _term_or_die() -> str:
 
 
 def cmd_sessions(_args) -> int:
+    r = core.bootstrap()
     live = sessions.live(core.credential_dirs())
     accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
-    owners = core.context_owners({s.env_config_dir for s in live}, accts)
-    pins = core.term_pins()
     if not live:
         print("no Claude Code sessions running")
         return 0
     for s in live:
-        mark = "\u25cf" if s.term_id in pins else " "
-        where = s.cwd.replace(core.HOME, "~")
-        print(f"{mark} {s.label[:24]:<25} {s.status or s.kind:<7} {where[:46]:<47} "
-              f"{owners.get(s.env_config_dir) or '?'}")
-    print(f"\n{D}\u25cf = pinned to one account. `ccm pin <account>` pins the terminal "
-          f"you run it in.{X}")
+        pinned = s.term_id and s.term_id in r.sessions
+        running_on = core.account_of_dir(s.env_config_dir, accts)
+        wanted, reason = core.resolve(s.cwd, s.term_id)
+        drift = f"  {Y}-> {wanted} on restart{X}" if wanted and wanted != running_on else ""
+        print(f"{'\u25cf' if pinned else ' '} {s.label[:24]:<25} {s.status or s.kind:<7} "
+              f"{s.cwd.replace(core.HOME, '~')[:44]:<45} {running_on or '?':<15}"
+              f"{D}{reason}{X}{drift}")
+    print(f"\n{D}\u25cf = has a rule of its own. `ccm use <account> --session` pins the "
+          f"terminal you run it in.{X}")
     return 0
 
 
 def cmd_pin(args) -> int:
-    term = _term_or_die()
-    here = core.context_for(os.getcwd())
-    ok, msg = core.pin(term, args.account, seed_from=here.path)
+    ok, msg = core.assign("session", _term_or_die(), args.account, cwd=os.getcwd())
     print(msg)
     if ok:
         print(f"{D}This terminal only. Restart Claude Code here to pick it up: "
@@ -112,28 +179,7 @@ def cmd_pin(args) -> int:
 
 
 def cmd_unpin(_args) -> int:
-    ok, msg = core.unpin(_term_or_die())
-    print(msg)
-    return 0 if ok else 1
-
-
-def cmd_projects(args) -> int:
-    for p in projects.recent(args.minutes):
-        ctx_email = p.context.email or "?"
-        print(f"{p.name:42} {p.ago:>10}  {p.context.name:8} {ctx_email}")
-    return 0
-
-
-def cmd_isolate(_args) -> int:
-    ok, msg = core.isolate(os.getcwd())
-    print(msg)
-    if ok:
-        print("`ccm swap` here now changes only this project. Undo: ccm unroute")
-    return 0 if ok else 1
-
-
-def cmd_unroute(_args) -> int:
-    ok, msg = core.unroute(os.getcwd())
+    ok, msg = core.clear("session", _term_or_die())
     print(msg)
     return 0 if ok else 1
 
@@ -147,24 +193,30 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ccm", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="usage for every subscription").set_defaults(func=cmd_list)
-    p = sub.add_parser("swap", help="point a context at another account")
-    p.add_argument("account")
-    p.add_argument("--context", help="context name (default: the one for this directory)")
-    p.set_defaults(func=cmd_swap)
+    for verb in ("use", "swap"):
+        p = sub.add_parser(verb, help="point a scope at another account")
+        p.add_argument("account")
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--session", action="store_true", help="this terminal only")
+        g.add_argument("--profile", metavar="NAME", help="every repo in a profile")
+        g.add_argument("--default", action="store_true", help="everything with no rule")
+        p.set_defaults(func=cmd_use)
+    sub.add_parser("profiles", help="show every rule, least specific first").set_defaults(func=cmd_profiles)
+    p = sub.add_parser("profile", help="create and edit profiles")
+    p.add_argument("action", choices=("new", "rm", "rename", "add", "drop"))
+    p.add_argument("name")
+    p.add_argument("account", nargs="?", help="account for new, new name for rename")
+    p.add_argument("--path", help="repository (default: this directory)")
+    p.set_defaults(func=cmd_profile)
     p = sub.add_parser("poke", help="spend one token to start an account's 5h window")
     p.add_argument("account")
     p.set_defaults(func=cmd_poke)
     sub.add_parser("where", help="which context and account this directory uses").set_defaults(func=cmd_where)
-    p = sub.add_parser("projects", help="projects with recent Claude Code activity")
-    p.add_argument("--minutes", type=int, default=60)
-    p.set_defaults(func=cmd_projects)
     sub.add_parser("sessions", help="every running Claude Code session").set_defaults(func=cmd_sessions)
     p = sub.add_parser("pin", help="give THIS terminal its own account")
     p.add_argument("account")
     p.set_defaults(func=cmd_pin)
     sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
-    sub.add_parser("isolate", help="give this project its own context").set_defaults(func=cmd_isolate)
-    sub.add_parser("unroute", help="drop this project's routing override").set_defaults(func=cmd_unroute)
     p = sub.add_parser("add", help="print the command that signs an account in")
     p.add_argument("account")
     p.set_defaults(func=cmd_add)

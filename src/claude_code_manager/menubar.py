@@ -35,6 +35,7 @@ NAME_W = 14
 REPO_W = 18
 DETAIL_W = 30
 CTX_BAR_W = 6
+PROFILE_W = 18
 
 
 def _fit(text: str, width: int) -> str:
@@ -264,6 +265,20 @@ def _usage_notes(sess: "sessions.Session") -> list[str]:
     return out
 
 
+def _known_roots(snap) -> list[str]:
+    """Repositories worth offering: the ones sessions are actually in."""
+    roots = {core.project_root(s.cwd) for s in snap.sessions if s.cwd}
+    return sorted(r for r in roots if r and r != core.HOME)
+
+
+def _why(reason: str) -> str:
+    """Turn a resolution reason into something a person reads."""
+    if reason.startswith("profile:"):
+        return f"profile “{reason.split(':', 1)[1]}”"
+    return {"session": "pinned here", "project": "a project rule",
+            "default": "the default"}.get(reason, reason)
+
+
 def _status_tone(status: str) -> str:
     """Working sessions stand out; idle ones stay quiet."""
     return {"busy": "ok", "shell": "warn"}.get(status, "dim")
@@ -285,10 +300,9 @@ def _short(email: Optional[str]) -> str:
 class Snapshot:
     def __init__(self) -> None:
         self.accounts: list[core.Account] = []
-        self.contexts: list[core.Context] = []
-        self.context_email: dict[str, str] = {}
         self.sessions: list[sessions.Session] = []
-        self.pins: dict[str, str] = {}
+        self.rules: core.profiles.Rules = core.profiles.Rules()
+        self.running_on: dict[str, str] = {}   # config dir -> account name
         self.taken_at: float = 0.0
 
 
@@ -319,11 +333,11 @@ class ManagerApp(rumps.App):
     def _collect(self, force: bool = False) -> Snapshot:
         snap = Snapshot()
         snap.accounts = [core.load_account(n, force=force) for n in core.account_names()]
-        snap.contexts = core.contexts()
-        snap.context_email = core.context_owners([c.path for c in snap.contexts], snap.accounts)
         snap.sessions = sessions.live(core.credential_dirs(), with_git=True,
                                       with_transcript=True)
-        snap.pins = core.term_pins()
+        snap.rules = core.bootstrap()
+        snap.running_on = {d: core.account_of_dir(d, snap.accounts)
+                           for d in {s.env_config_dir for s in snap.sessions}}
         snap.taken_at = time.time()
         return snap
 
@@ -372,6 +386,13 @@ class ManagerApp(rumps.App):
             self.menu.add(self._session_item(sess, snap))
         self.menu.add(rumps.separator)
 
+        self.menu.add(rumps.MenuItem("PROFILES", callback=None))
+        for prof in snap.rules.profiles:
+            self.menu.add(self._profile_item(prof, snap))
+        self.menu.add(self._default_item(snap))
+        self.menu.add(rumps.MenuItem("New profile…", callback=self._make_new_profile()))
+        self.menu.add(rumps.separator)
+
         self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
 
         age = int(time.time() - snap.taken_at) if snap.taken_at else 0
@@ -379,13 +400,12 @@ class ManagerApp(rumps.App):
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
     def _title_text(self, snap: Snapshot) -> str:
-        """Title tracks the default context: the account most sessions use."""
-        default = next((c for c in snap.contexts if c.name == "default"), None)
-        email = snap.context_email.get(default.path) if default else None
-        acct = next((a for a in snap.accounts if (a.email or "").lower() == (email or "").lower()), None)
+        """Title tracks the default account: what an unruled project uses."""
+        name = snap.rules.default_account
+        acct = next((a for a in snap.accounts if a.name == name), None)
         if not acct:
-            return f"{ICON} {_short(email) if email else '?'}"
-        return f"{ICON} {_short(acct.email)} {_pct(acct.session_pct)}·{_pct(acct.weekly_pct)}"
+            return f"{ICON} {name or '?'}"
+        return f"{ICON} {acct.name} {_pct(acct.session_pct)}·{_pct(acct.weekly_pct)}"
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.signed_in:
@@ -394,8 +414,7 @@ class ManagerApp(rumps.App):
                                 (f"  {acct.error}", "hot")])
             item.add(rumps.MenuItem("Sign in…", callback=self._make_add(acct.name)))
             return item
-        used_by = [c.name for c in snap.contexts
-                   if snap.context_email.get(c.path, "").lower() == (acct.email or "").lower()]
+        used_by = core.rules_using(acct.name, snap.rules)
         in_use = bool(used_by)
         # plain title stays unique: rumps keys its callback registry by it
         head = f"{'●' if in_use else '○'} {acct.name} — {_pct(acct.session_pct)} 5h"
@@ -430,10 +449,18 @@ class ManagerApp(rumps.App):
             item.add(plan_item)
         item.add(rumps.separator)
 
-        for ctx in snap.contexts:
-            same = snap.context_email.get(ctx.path, "").lower() == (acct.email or "").lower()
-            item.add(rumps.MenuItem(f"Use for “{ctx.name}”" + ("  ✓" if same else ""),
-                                    callback=None if same else self._make_swap(acct.name, ctx)))
+        # An account row is the place to hand it whole groups at once.
+        use = rumps.MenuItem("Use this account for")
+        default_same = snap.rules.default_account == acct.name
+        use.add(rumps.MenuItem("Everything with no rule" + ("  ✓" if default_same else ""),
+                               callback=None if default_same else
+                               self._make_assign("default", "", acct.name, "")))
+        for prof in snap.rules.profiles:
+            same = prof.account == acct.name
+            use.add(rumps.MenuItem(f"Profile “{prof.name}”" + ("  ✓" if same else ""),
+                                   callback=None if same else
+                                   self._make_assign("profile", prof.name, acct.name, "")))
+        item.add(use)
         item.add(rumps.separator)
 
         session = acct.limit("session")
@@ -459,26 +486,26 @@ class ManagerApp(rumps.App):
         return item
 
     def _session_item(self, sess: sessions.Session, snap: Snapshot) -> rumps.MenuItem:
-        """One running session, with both ways to move it.
+        """One running session, and the three ways to move it.
 
-        A login belongs to a config dir, so sessions sharing one always share
-        an account. Pinning gives this session a config dir of its own, which
-        is the only way to move it without taking its neighbours along.
+        Session, project and profile are the same choice at three widths, so
+        they sit in one menu: move this terminal, move the repository, or move
+        every repository grouped with it.
         """
-        email = snap.context_email.get(sess.env_config_dir, "")
-        acct_name = next((a.name for a in snap.accounts
-                          if (a.email or "").lower() == email.lower()), _short(email))
-        pinned = bool(sess.term_id) and sess.term_id in snap.pins
-        ctx = core.Context(name=core._ctx_name(sess.env_config_dir),
-                           path=sess.env_config_dir)
-        head = f"  {sess.label} — {acct_name} · {sess.status or sess.kind}"
+        r = snap.rules
+        running_on = snap.running_on.get(sess.env_config_dir, "")
+        root = core.project_root(sess.cwd)
+        wanted, reason = core.resolve(sess.cwd, sess.term_id)
+        ruled = bool(sess.term_id) and sess.term_id in r.sessions
+        prof = r.profile_for(root)
+        head = f"  {sess.label} — {running_on or '?'} · {sess.status or sess.kind}"
         item = rumps.MenuItem(head)
-        # Fixed columns: pin mark, chip, repo, what the session is, context
-        # bar, status, idle age. The repo repeats down the list, so the
-        # emphasis goes on the column that tells the rows apart.
+        # Fixed columns: rule mark, chip, repo, what the session is, context
+        # bar, lifetime tokens, status, idle age. The repo repeats down the
+        # list, so the emphasis goes on the column that tells the rows apart.
         _apply_style(item, [
-            ("\u25c9 " if pinned else "  ", "text" if pinned else "dim"),
-            _chip(acct_name, NAME_W),
+            ("\u25c9 " if ruled else "  ", "text" if ruled else "dim"),
+            _chip(running_on, NAME_W),
             ("  ", "dim"),
             (_fit(sess.repo, REPO_W), "dim"),
             (" ", "dim"),
@@ -489,75 +516,195 @@ class ManagerApp(rumps.App):
             (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
         ])
 
-        where = rumps.MenuItem(sess.cwd.replace(core.HOME, "~") or "?", callback=None)
-        _apply_style(where, [("  ", "dim"), (sess.cwd.replace(core.HOME, "~"), "dim")])
-        item.add(where)
-        for note in _usage_notes(sess):
+        for note in [sess.cwd.replace(core.HOME, "~") or "?"] + _usage_notes(sess):
             note_item = rumps.MenuItem(note, callback=None)
             _apply_style(note_item, [("  ", "dim"), (note, "dim")])
             item.add(note_item)
+        if wanted and wanted != running_on:
+            drift = f"On restart it moves to {wanted} ({_why(reason)})"
+            d_item = rumps.MenuItem(drift, callback=None)
+            _apply_style(d_item, [("  ", "dim"), (drift, "warn")])
+            item.add(d_item)
         item.add(rumps.separator)
 
         if sess.term_id:
-            item.add(rumps.MenuItem("This session only:", callback=None))
-            for acct in snap.accounts:
-                if not acct.signed_in:
-                    continue
-                same = pinned and (acct.email or "").lower() == email.lower()
-                item.add(rumps.MenuItem(
-                    f"   Pin to {acct.name} ({_pct(acct.session_pct)} 5h)" + ("  \u2713" if same else ""),
-                    callback=None if same else self._make_pin(sess, acct.name)))
-            if pinned:
-                item.add(rumps.MenuItem("   Remove pin", callback=self._make_unpin(sess)))
-            item.add(rumps.separator)
-
-        item.add(rumps.MenuItem(f"Every session on “{ctx.name}”:", callback=None))
-        for acct in snap.accounts:
-            if not acct.signed_in:
-                continue
-            same = (acct.email or "").lower() == email.lower()
-            item.add(rumps.MenuItem(
-                f"   {acct.name} ({_pct(acct.session_pct)} 5h)" + ("  \u2713" if same else ""),
-                callback=None if same else self._make_swap(acct.name, ctx)))
+            item.add(self._scope_menu(
+                "This session only", "session", sess.term_id, snap,
+                current=r.sessions.get(sess.term_id, ""), cwd=sess.cwd,
+                clearable=ruled))
+        item.add(self._scope_menu(
+            f"Project “{os.path.basename(root)}”", "project", root, snap,
+            current=r.projects.get(core.profiles.tilde(root), ""), cwd=sess.cwd,
+            clearable=bool(r.project_rule_for(root))))
+        if prof:
+            item.add(self._scope_menu(
+                f"Profile “{prof.name}” ({len(prof.repos)} repos)", "profile",
+                prof.name, snap, current=prof.account, cwd=sess.cwd))
+        else:
+            join = rumps.MenuItem(f"Add “{os.path.basename(root)}” to profile")
+            for p in snap.rules.profiles:
+                join.add(rumps.MenuItem(p.name, callback=self._make_join(p.name, root)))
+            join.add(rumps.separator)
+            join.add(rumps.MenuItem("New profile…", callback=self._make_new_profile(root)))
+            item.add(join)
         item.add(rumps.separator)
         item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(sess.cwd)))
         return item
 
-    def _make_pin(self, sess: sessions.Session, account: str):
+    def _profile_item(self, prof: "core.profiles.Profile", snap: Snapshot) -> rumps.MenuItem:
+        """One profile: the account its repositories use, and which they are."""
+        n = len(prof.repos)
+        live_here = sum(1 for s in snap.sessions
+                        if prof.covers(core.project_root(s.cwd)))
+        head = f"  {prof.name} — {prof.account or 'no account'} · {n} repos"
+        item = rumps.MenuItem(head)
+        _apply_style(item, [
+            ("  ", "dim"),
+            (_fit(prof.name, PROFILE_W), "text"),
+            ("  ", "dim"),
+            _chip(prof.account, NAME_W) if prof.account else (f"{'unassigned':<{NAME_W}}", "warn"),
+            (f"   {n} repo{'s' if n != 1 else ''}", "dim"),
+            (f"   {live_here} running" if live_here else "", "dim"),
+        ])
+        item.add(self._scope_menu("Account for every repo here", "profile", prof.name,
+                                  snap, current=prof.account, cwd=""))
+        item.add(rumps.separator)
+        for repo in prof.repos:
+            entry = rumps.MenuItem(repo)
+            _apply_style(entry, [("  ", "dim"), (repo, "dim")])
+            entry.add(rumps.MenuItem("Remove from this profile",
+                                     callback=self._make_leave(prof.name, core.profiles.expand(repo))))
+            item.add(entry)
+        if not prof.repos:
+            empty = rumps.MenuItem("No repositories yet", callback=None)
+            _apply_style(empty, [("  ", "dim"), ("No repositories yet", "dim")])
+            item.add(empty)
+        add = rumps.MenuItem("Add a repository")
+        for root in _known_roots(snap):
+            if prof.covers(root):
+                continue
+            add.add(rumps.MenuItem(root.replace(core.HOME, "~"),
+                                   callback=self._make_join(prof.name, root)))
+        item.add(add)
+        item.add(rumps.separator)
+        item.add(rumps.MenuItem("Rename…", callback=self._make_rename_profile(prof.name)))
+        item.add(rumps.MenuItem("Remove profile…", callback=self._make_remove_profile(prof.name)))
+        return item
+
+    def _default_item(self, snap: Snapshot) -> rumps.MenuItem:
+        """Where anything with no rule goes."""
+        name = snap.rules.default_account
+        loose = sum(1 for s in snap.sessions
+                    if core.resolve(s.cwd, s.term_id)[1] == "default")
+        item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
+        _apply_style(item, [
+            ("  ", "dim"),
+            (_fit("everything else", PROFILE_W), "dim"),
+            ("  ", "dim"),
+            _chip(name, NAME_W) if name else (f"{'not set':<{NAME_W}}", "hot"),
+            (f"   {loose} running" if loose else "", "dim"),
+        ])
+        item.add(self._scope_menu("Account for unruled projects", "default", "",
+                                  snap, current=name, cwd=""))
+        return item
+
+    def _scope_menu(self, title: str, scope: str, key: str, snap: Snapshot,
+                    current: str, cwd: str, clearable: bool = False) -> rumps.MenuItem:
+        """An account picker for one scope, ticking whatever it uses now."""
+        menu = rumps.MenuItem(title)
+        for acct in snap.accounts:
+            if not acct.signed_in:
+                continue
+            same = acct.name == current
+            entry = rumps.MenuItem(f"{acct.name} ({_pct(acct.session_pct)} 5h)"
+                                   + ("  \u2713" if same else ""),
+                                   callback=None if same else
+                                   self._make_assign(scope, key, acct.name, cwd))
+            _apply_style(entry, [(" ", "dim"), _chip(acct.name, NAME_W),
+                                 (f"  {_pct(acct.session_pct)} 5h", _tone(acct.session_pct)),
+                                 ("  \u2713" if same else "", "text")])
+            menu.add(entry)
+        if clearable:
+            menu.add(rumps.separator)
+            menu.add(rumps.MenuItem("Remove this rule",
+                                    callback=self._make_clear(scope, key, cwd)))
+        return menu
+
+    def _make_assign(self, scope: str, key: str, account: str, cwd: str):
         def handler(_sender):
-            ok, msg = core.pin(sess.term_id, account, seed_from=sess.env_config_dir)
-            self._notify(f"{sess.label}: {msg}" if ok else msg,
-                         restart=sess.label if ok else "")
+            ok, msg = core.assign(scope, key, account, cwd=cwd)
+            self._notify(msg, restart=ok)
             self.refresh_now(None)
         return handler
 
-    def _make_unpin(self, sess: sessions.Session):
+    def _make_clear(self, scope: str, key: str, cwd: str):
         def handler(_sender):
-            ok, msg = core.unpin(sess.term_id)
-            self._notify(msg, restart=sess.label if ok else "")
+            ok, msg = core.clear(scope, key, cwd=cwd)
+            self._notify(msg, restart=ok)
             self.refresh_now(None)
         return handler
 
-    def _notify(self, message: str, restart: str = "") -> None:
+    def _make_join(self, profile: str, root: str):
+        def handler(_sender):
+            ok, msg = core.profile_add_repo(profile, root)
+            self._notify(msg, restart=ok)
+            self.refresh_now(None)
+        return handler
+
+    def _make_leave(self, profile: str, root: str):
+        def handler(_sender):
+            ok, msg = core.profile_remove_repo(profile, root)
+            self._notify(msg, restart=ok)
+            self.refresh_now(None)
+        return handler
+
+    def _make_new_profile(self, root: str = ""):
+        def handler(_sender):
+            win = rumps.Window(
+                title="New profile",
+                message="Name a group of repositories that share a subscription.\n"
+                        "Example: work, personal, client-acme.",
+                ok="Create", cancel="Cancel", dimensions=(240, 22))
+            resp = win.run()
+            if resp.clicked != 1 or not resp.text.strip():
+                return
+            ok, msg = core.add_profile(resp.text.strip())
+            if ok and root:
+                core.profile_add_repo(resp.text.strip(), root)
+            self._notify(msg, restart=False)
+            self.refresh_now(None)
+        return handler
+
+    def _make_rename_profile(self, name: str):
+        def handler(_sender):
+            win = rumps.Window(title="Rename profile", message=f"New name for “{name}”.",
+                               default_text=name, ok="Rename", cancel="Cancel",
+                               dimensions=(240, 22))
+            resp = win.run()
+            if resp.clicked == 1 and resp.text.strip():
+                self._notify(core.rename_profile(name, resp.text.strip())[1], restart=False)
+                self.refresh_now(None)
+        return handler
+
+    def _make_remove_profile(self, name: str):
+        def handler(_sender):
+            if rumps.alert(title=f"Remove “{name}”?",
+                           message="Its repositories go back to the default account. "
+                                   "No session is disturbed.",
+                           ok="Remove", cancel="Cancel") != 1:
+                return
+            self._notify(core.remove_profile(name)[1], restart=False)
+            self.refresh_now(None)
+        return handler
+
+    def _notify(self, message: str, restart: bool = False) -> None:
         if restart:
-            message += (f"\n\n{restart} is already running, so it keeps its current "
-                        "account until it restarts. In that terminal: press ctrl+C "
-                        "twice, then run claude -c")
+            message += ("\n\nSessions already running keep their account until they "
+                        "restart. In that terminal: press ctrl+C twice, then run "
+                        "claude -c")
         rumps.alert(title="Claude Code Manager", message=message, ok="OK")
 
     # ------------------------------------------------------------------ actions
-
-    def _make_swap(self, account: str, ctx: core.Context):
-        def handler(_sender):
-            ok, msg = core.swap(account, ctx)
-            rumps.notification("Claude Code Manager", "Swapped" if ok else "Swap failed", msg)
-            if ok:
-                rumps.alert(title="Account swapped", message=(
-                    f"{msg}\n\nNew sessions in “{ctx.name}” use it right away. "
-                    "Sessions already running keep their old account until they "
-                    "restart: ctrl+C twice, then `claude -c`."), ok="Got it")
-            self.refresh_now(None)
-        return handler
 
     def _make_poke(self, account: str):
         def handler(_sender):
