@@ -166,6 +166,38 @@ def _styled(segments, size: float = 12.0):
     return out
 
 
+_SYMBOLS: dict[str, object] = {}
+
+
+def _icon(name: str, size: float = 13.0):
+    """An SF Symbol for a menu row, as a template image.
+
+    Only the rows that are actions or headings get one. The data rows are
+    monospaced columns, and an image at the head of one moves the text off the
+    grid that makes them readable as a table.
+
+    Template images take their colour from the menu, so these follow light and
+    dark mode and the highlight under the pointer without being told.
+    """
+    if name in _SYMBOLS:
+        return _SYMBOLS[name]
+    import AppKit
+    img = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    if img is not None:
+        conf = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+            size, AppKit.NSFontWeightRegular)
+        img = img.imageWithSymbolConfiguration_(conf) or img
+        img.setTemplate_(True)
+    _SYMBOLS[name] = img
+    return img
+
+
+def _set_icon(item: "rumps.MenuItem", name: str) -> None:
+    img = _icon(name)
+    if img is not None:
+        item._menuitem.setImage_(img)
+
+
 def _apply_style(item: "rumps.MenuItem", segments) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
@@ -934,22 +966,46 @@ class ManagerApp(rumps.App):
             self.menu.add(self._session_item(sess, snap))
         self.menu.add(rumps.separator)
 
+        # Icons from here down, and nowhere above. The two sections above are
+        # monospaced columns, and an image at the head of a row pushes its text
+        # off the grid that lets them be read as a table. These rows are a list
+        # of named things and a list of actions, so a symbol tells them apart
+        # faster than reading the first word of each does.
         self._section("PROFILES")
         for prof in snap.rules.profiles:
-            self.menu.add(self._profile_item(prof, snap))
-        self.menu.add(self._default_item(snap))
-        self.menu.add(rumps.MenuItem("New profile…", callback=self._make_new_profile()))
+            item = self._profile_item(prof, snap)
+            _set_icon(item, "folder")
+            self.menu.add(item)
+        fallback = self._default_item(snap)
+        # Dashed, because this one is not a profile anybody made. It is the
+        # rule that catches whatever the named ones did not.
+        _set_icon(fallback, "square.dashed")
+        self.menu.add(fallback)
+        new_profile = rumps.MenuItem("New profile…", callback=self._make_new_profile())
+        _set_icon(new_profile, "folder.badge.plus")
+        self.menu.add(new_profile)
         self.menu.add(rumps.separator)
 
-        self.menu.add(rumps.MenuItem("Add an account…", callback=self._add_account))
-        self.menu.add(rumps.MenuItem(
-            "Show the front tab's account" + ("  \u2713" if self._tracker.enabled else ""),
-            callback=self._toggle_follow))
+        add = rumps.MenuItem("Add an account…", callback=self._add_account)
+        _set_icon(add, "person.badge.plus")
+        self.menu.add(add)
+        follow = rumps.MenuItem("Show the front tab's account",
+                                callback=self._toggle_follow)
+        _set_icon(follow, "eye")
+        # The tick used to be two spaces and a check character on the end of
+        # the title, which put it wherever the title happened to stop. A menu
+        # item has a state for exactly this, and it draws where macOS draws
+        # every other tick in every other menu.
+        follow._menuitem.setState_(1 if self._tracker.enabled else 0)
+        self.menu.add(follow)
 
         self._refresh_item = rumps.MenuItem("Refresh now", callback=self.refresh_now)
+        _set_icon(self._refresh_item, "arrow.clockwise")
         self._style_refresh_row(snap)
         self.menu.add(self._refresh_item)
-        self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
+        quit_item = rumps.MenuItem("Quit", callback=rumps.quit_application)
+        _set_icon(quit_item, "power")
+        self.menu.add(quit_item)
         _forget(stale)          # the tree this one replaced
 
     # ------------------------------------------------------------------ title
