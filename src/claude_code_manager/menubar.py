@@ -25,6 +25,7 @@ from . import core, focus, gauge, oauth, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
+SESSION_POLL_SECONDS = 5       # local only: how soon a new session appears
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 
@@ -305,6 +306,28 @@ def _run_in_terminal(command: str) -> str:
     return ""
 
 
+def _session_segments(sess: "sessions.Session", running_on: str,
+                      ruled: bool) -> list[tuple[str, str]]:
+    """A session row, everything after the focus mark.
+
+    Split out so a row can be repainted with fresh status, context and age
+    without rebuilding the menu, which would drop an open menu from under the
+    pointer.
+    """
+    return [
+        ("\u25c9 " if ruled else "  ", "text" if ruled else "dim"),
+        _chip(running_on, NAME_W),
+        ("  ", "dim"),
+        (_fit(sess.repo, REPO_W), "dim"),
+        (" ", "dim"),
+        (_fit(sess.detail or sess.label, DETAIL_W), "text"),
+        *_context_bar(sess),
+        _spent_cell(sess),
+        (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
+        (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
+    ]
+
+
 def _why(reason: str) -> str:
     """Turn a resolution reason into something a person reads."""
     if reason.startswith("profile:"):
@@ -350,6 +373,8 @@ class ManagerApp(rumps.App):
         self._syncing = False
         self._notice: Optional[tuple[str, bool]] = None
         self._again = False
+        self._polling = False
+        self._fresh_sessions: Optional[tuple] = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
@@ -357,6 +382,7 @@ class ManagerApp(rumps.App):
         self.refresh_now(None)
         rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
         rumps.Timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS).start()
+        rumps.Timer(self._on_sessions_tick, SESSION_POLL_SECONDS).start()
         rumps.Timer(self._on_sync_tick, 1).start()
 
     # ------------------------------------------------------------------ plumbing
@@ -417,6 +443,7 @@ class ManagerApp(rumps.App):
             self._snapshot = snap
             self._tracker.update_sessions(snap.sessions)
             self._rebuild()
+        self._take_sessions()
         self._tracker.poll()
 
     def _on_credential_tick(self, _timer) -> None:
@@ -445,6 +472,66 @@ class ManagerApp(rumps.App):
                 self._syncing = False
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_sessions_tick(self, _timer) -> None:
+        """Notice sessions starting and ending without waiting on the API.
+
+        Reading Claude Code's session files and the transcripts is local and
+        costs about a tenth of a second, so it can run every few seconds. Usage
+        is the slow part and keeps its own, much longer, interval.
+        """
+        if self._polling:
+            return
+        self._polling = True
+
+        def work() -> None:
+            try:
+                live = sessions.live(core.credential_dirs(), with_git=True,
+                                     with_transcript=True)
+                # Which account a directory holds only changes when something
+                # writes one, so keep the answers already known and look up
+                # only directories new since the last pass.
+                known = self._snapshot.running_on
+                unseen = {s.env_config_dir for s in live} - set(known)
+                owners = {**known}
+                if unseen:
+                    owners.update(core.dirs_to_accounts(unseen, self._snapshot.accounts))
+                with self._lock:
+                    self._fresh_sessions = (live, owners)
+            except Exception:
+                pass
+            finally:
+                self._polling = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _take_sessions(self) -> None:
+        """Apply a polled session list, rebuilding only if the set changed."""
+        with self._lock:
+            fresh, self._fresh_sessions = self._fresh_sessions, None
+        if fresh is None:
+            return
+        live, owners = fresh
+        snap = self._snapshot
+        structural = ([s.pid for s in live] != [s.pid for s in snap.sessions]
+                      or owners != snap.running_on)
+        snap.sessions, snap.running_on = live, owners
+        self._tracker.update_sessions(live)
+        if structural:
+            self._rebuild()          # a session came or went: the list must change
+            return
+        focused = self._tracker.focus.session
+        front = focused.pid if focused else None
+        for sess in live:            # same rows, fresher numbers: repaint in place
+            row = self._session_rows.get(sess.pid)
+            if not row:
+                continue
+            item, _old = row
+            ruled = bool(sess.term_id) and sess.term_id in snap.rules.sessions
+            segs = _session_segments(sess, owners.get(sess.env_config_dir, ""), ruled)
+            self._session_rows[sess.pid] = (item, segs)
+            mark = (f"{FOCUS_MARK} ", "ok") if sess.pid == front else ("  ", "dim")
+            _apply_style(item, [mark] + segs)
 
     def refresh_now(self, _sender) -> None:
         self._on_refresh_tick(None, force=_sender is not None)
@@ -678,18 +765,7 @@ class ManagerApp(rumps.App):
         # rows apart.
         focused = self._tracker.focus.session
         in_front = focused is not None and focused.pid == sess.pid
-        segments = [
-            ("\u25c9 " if ruled else "  ", "text" if ruled else "dim"),
-            _chip(running_on, NAME_W),
-            ("  ", "dim"),
-            (_fit(sess.repo, REPO_W), "dim"),
-            (" ", "dim"),
-            (_fit(sess.detail or sess.label, DETAIL_W), "text"),
-            *_context_bar(sess),
-            _spent_cell(sess),
-            (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
-            (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
-        ]
+        segments = _session_segments(sess, running_on, ruled)
         _apply_style(item, [(f"{FOCUS_MARK} ", "ok") if in_front else ("  ", "dim")] + segments)
         self._session_rows[sess.pid] = (item, segments)
 
