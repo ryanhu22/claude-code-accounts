@@ -101,21 +101,36 @@ class Rules:
                 best, best_len = key, len(root)
         return best
 
-    def account_for(self, path: str, term_id: str = "") -> tuple[str, str]:
+    def account_for(self, paths, term_id: str = "") -> tuple[str, str]:
         """The account a session should use, and which rule decided it.
+
+        `paths` is one directory, or several most specific first: a worktree
+        and the checkout it belongs to, say.
+
+        Every level of the rules is tried against all of the paths before the
+        next level is tried against any of them, because specificity belongs
+        to the RULE and not to the path it matched. A profile covering
+        ~/Desktop must not beat a project rule on a repository inside it just
+        because the terminal happens to sit in the repository. Doing this the
+        other way round billed a worktree and its own checkout to two
+        different accounts.
 
         Returns (account, reason) where reason is "session", "project",
         "profile:<name>" or "default", so the UI can say why without
         re-deriving it.
         """
+        if isinstance(paths, str):
+            paths = (paths,)
         if term_id and term_id in self.sessions:
             return self.sessions[term_id], "session"
-        key = self.project_rule_for(path)
-        if key:
-            return self.projects[key], "project"
-        prof = self.profile_for(path)
-        if prof and prof.account:
-            return prof.account, f"profile:{prof.name}"
+        for path in paths:
+            key = self.project_rule_for(path)
+            if key:
+                return self.projects[key], "project"
+        for path in paths:
+            prof = self.profile_for(path)
+            if prof and prof.account:
+                return prof.account, f"profile:{prof.name}"
         return self.default_account, "default"
 
     # ---------------------------------------------------------------- edits

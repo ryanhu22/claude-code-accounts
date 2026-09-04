@@ -398,6 +398,29 @@ class Limit:
     def resets_in(self) -> str:
         return human_delta(self.resets_at)
 
+    @property
+    def over(self) -> bool:
+        """True once this window's reset time has passed."""
+        if not self.resets_at:
+            return False
+        try:
+            when = _dt.datetime.fromisoformat(str(self.resets_at).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return when <= _dt.datetime.now(_dt.timezone.utc)
+
+    @property
+    def spent(self) -> float:
+        """How much of this window is used, as of now.
+
+        `percent` is what the server said when the payload was fetched. The
+        menu repaints between fetches and the payload can be minutes old, so a
+        window that has rolled over since then has to be read from the clock
+        instead. Without this a spent window kept drawing its old bar, in its
+        old colour, next to a countdown reading "now".
+        """
+        return 0.0 if self.over else self.percent
+
 
 @dataclass
 class Account:
@@ -426,12 +449,12 @@ class Account:
     @property
     def session_pct(self) -> Optional[float]:
         l = self.limit("session")
-        return l.percent if l else None
+        return l.spent if l else None
 
     @property
     def weekly_pct(self) -> Optional[float]:
         l = self.limit("weekly_all")
-        return l.percent if l else None
+        return l.spent if l else None
 
     @property
     def ok(self) -> bool:
@@ -548,7 +571,7 @@ def _waiting(entry: dict, now: float) -> Optional[str]:
 
 
 def _usage(name: str, token: str, force: bool = False,
-           fp: Optional[str] = None) -> tuple[list[Limit], float, Optional[str]]:
+           who: str = "") -> tuple[list[Limit], float, Optional[str]]:
     """Usage for one account: cached, and backed off after a 429.
 
     /api/oauth/usage is rate limited per account, and every running Claude Code
@@ -563,11 +586,17 @@ def _usage(name: str, token: str, force: bool = False,
     """
     store = _cache_read()
     entry = store.get(name) or {}
-    # Cached against the credential, not just the account name. Signing an
-    # account in again gives it a different login, and serving the old payload
-    # then shows one subscription's usage under another's name — which reads as
-    # two accounts with identical bars rather than as stale data.
-    if fp and entry.get("fp") and entry["fp"] != fp:
+    # Cached against whose usage it is, not just the account name. Signing a
+    # slot in as somebody else and serving the old payload would show one
+    # subscription's usage under another's name, which reads as two accounts
+    # with identical bars rather than as stale data.
+    #
+    # The identity has to be the email and not the credential. This used to
+    # compare the refresh token's fingerprint, but an ordinary refresh rotates
+    # that token, so the check fired about hourly on an account that had not
+    # changed hands: it blanked the row, dropped the wait a 429 had set, and
+    # sent the retry back inside the server's window.
+    if who and entry.get("who") and entry["who"] != who:
         entry = {}
     cached, at = entry.get("data"), entry.get("at", 0.0)
     now = time.time()
@@ -601,7 +630,7 @@ def _usage(name: str, token: str, force: bool = False,
             return _parse_limits(cached), at, None
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
     store[name] = {"data": data, "at": now, "retry_after": 0,
-                   "fp": fp, "tried_at": now}
+                   "who": who, "tried_at": now}
     _cache_write(store)
     return _parse_limits(data), now, None
 
@@ -753,7 +782,7 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
         acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
         acct.limits, acct.usage_at, acct.error = _usage(
-            name, blob["accessToken"], force, fingerprint(blob))
+            name, blob["accessToken"], force, (email or "").lower())
     return acct
 
 
@@ -1261,12 +1290,7 @@ def resolve(cwd: str, term_id: str = "") -> tuple[str, str]:
     A worktree resolves to its parent checkout first, so it inherits whatever
     rule covers the repository even when it lives outside the repo directory.
     """
-    r = rules()
-    for path in (os.path.abspath(cwd), project_root(cwd)):
-        account, reason = r.account_for(path, term_id)
-        if reason != "default":
-            return account, reason
-    return r.default_account, "default"
+    return rules().account_for((os.path.abspath(cwd), project_root(cwd)), term_id)
 
 
 def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
@@ -1449,7 +1473,10 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     if scope == "session":
         if not key:
             return False, "this session has no terminal id, so it cannot be pinned"
-        before = account_dir(r.account_for(project_root(cwd or HOME))[0] or account)
+        # Where this session's project state lives now, which is its own pin
+        # if it has one. Reading it without the terminal id moved the state
+        # out of whichever dir the project rule named instead.
+        before = account_dir(r.account_for(project_root(cwd or HOME), key)[0] or account)
         r.set_session(key, account)
         moved = [project_root(cwd)] if cwd else []
         where = "this session"
