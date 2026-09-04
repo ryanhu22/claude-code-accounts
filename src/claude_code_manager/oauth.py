@@ -212,8 +212,20 @@ BROWSERS = (
 )
 
 
+_INSTALLED: Optional[list[tuple[str, str]]] = None
+
+
 def installed_browsers() -> list[tuple[str, str]]:
-    """The offerable browsers that are actually on this Mac."""
+    """The offerable browsers that are actually on this Mac.
+
+    Asked once per process. Each answer costs an `open -Ra` subprocess, and
+    the menu asks for one list per account row every time it is rebuilt, which
+    spent about a quarter of a second per rebuild learning the same thing.
+    Someone who installs a browser can restart the app.
+    """
+    global _INSTALLED
+    if _INSTALLED is not None:
+        return _INSTALLED
     import subprocess
     out = [BROWSERS[0]]
     for label, app in BROWSERS[1:]:
@@ -223,6 +235,7 @@ def installed_browsers() -> list[tuple[str, str]]:
             continue
         if r.returncode == 0:
             out.append((label, app))
+    _INSTALLED = out
     return out
 
 
