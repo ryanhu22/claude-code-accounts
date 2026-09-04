@@ -749,9 +749,14 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
 
 
 def add_account_command(name: str) -> str:
-    """Shell command that signs an account into its slot (needs a browser)."""
+    """Shell command that signs an account into its own directory.
+
+    `command claude` on purpose: the shell wrapper picks a directory from the
+    rules, and going through it would sign this account into whichever one the
+    current directory routes to, overwriting that account's login.
+    """
     slot = slot_dir(name)
-    return (f'mkdir -p {slot!r} && CLAUDE_CONFIG_DIR={slot!r} claude '
+    return (f'mkdir -p {slot!r} && CLAUDE_CONFIG_DIR={slot!r} command claude '
             f'# then type /login, sign in as {name}, and /exit')
 
 
