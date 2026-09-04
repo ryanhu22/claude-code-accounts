@@ -21,7 +21,7 @@ from typing import Optional
 
 import rumps
 
-from . import core, focus, gauge, oauth, sessions
+from . import core, focus, gauge, keychain, oauth, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
@@ -910,6 +910,9 @@ class ManagerApp(rumps.App):
         # Accounts with a browser tab open for a sign-in, keyed to the attempt
         # that opened it. Main thread only, like every other menu state.
         self._signing_in: dict[str, oauth.Attempt] = {}
+        # Per config dir, the fingerprint of the credential it held last time
+        # it was looked at. What tells a cached owner from a stale one.
+        self._owner_prints: dict[str, Optional[str]] = {}
         self._again = False
         self._polling = False
         self._fresh_sessions: Optional[tuple] = None
@@ -1087,14 +1090,30 @@ class ManagerApp(rumps.App):
             try:
                 live = sessions.live(core.credential_dirs(), with_git=True,
                                      with_transcript=True)
-                # Which account a directory holds only changes when something
-                # writes one, so keep the answers already known and look up
-                # only directories new since the last pass.
+                # Which account a directory holds changes whenever something
+                # writes one, and this app is not the only thing that does.
+                # Caching the answer until a directory was new meant a session
+                # moved to another subscription kept its old chip until the
+                # next full refresh, three minutes later, even though the
+                # switch itself had already landed.
+                #
+                # A credential's fingerprint says whether it is still the same
+                # credential, and reading ten of them costs 0.19 seconds on a
+                # background thread. So the cache is kept, and dropped for any
+                # directory whose fingerprint moved. Naming the account behind
+                # a changed directory is a fingerprint match against the
+                # accounts already loaded, and only falls back to the network
+                # for a credential belonging to no account at all.
                 known = self._snapshot.running_on
-                unseen = {s.env_config_dir for s in live} - set(known)
-                owners = {**known}
-                if unseen:
-                    owners.update(core.dirs_to_accounts(unseen, self._snapshot.accounts))
+                dirs = {s.env_config_dir for s in live if s.env_config_dir}
+                prints = {d: core.fingerprint(keychain.read_credentials(d))
+                          for d in dirs}
+                stale = {d for d in dirs
+                         if d not in known or self._owner_prints.get(d) != prints[d]}
+                owners = {d: known[d] for d in dirs if d in known}
+                if stale:
+                    owners.update(core.dirs_to_accounts(stale, self._snapshot.accounts))
+                self._owner_prints = prints
                 with self._lock:
                     self._fresh_sessions = (live, owners)
             except Exception:
