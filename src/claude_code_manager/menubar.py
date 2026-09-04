@@ -168,7 +168,10 @@ def _compact_reset(iso: Optional[str]) -> str:
     right between refreshes instead of ageing with the fetch.
     """
     if not iso:
-        return "idle"
+        # Not a fault and not a stall: this window has no clock because
+        # nothing has been spent in it yet. "idle" read as something wrong,
+        # and it agrees with the 0% beside it far less than "unused" does.
+        return "unused"
     try:
         dt = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
     except ValueError:
@@ -190,7 +193,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     A far-off reset on a barely-used bucket is noise, so it stays dim. Once a
     bucket is nearly spent the countdown becomes the number you care about:
     green if relief is close, red if you are locked out for a long while.
-    An idle window is green because that account can be poked.
+    A window with no clock is green: nothing has been spent in it.
     """
     if lim is None:
         return "dim"
@@ -293,9 +296,9 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # curl rather than an arrow. The columns here already say what the
         # number is, so a separator is enough.
         when = "" if spent is None else (
-            _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
+            _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
         # Seven wide, so the longest countdown keeps its gap from the number.
-        out.append((f"{'(' + when + ')':>7}" if when else "       ",
+        out.append((f"{'(' + when + ')':>9}" if when else "         ",
                     _quiet(_reset_tone(lim))))
     else:
         out.append(("", "dim"))
