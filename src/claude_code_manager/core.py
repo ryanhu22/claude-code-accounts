@@ -498,13 +498,18 @@ def human_delta(iso: Optional[str]) -> str:
 def has_reading(limits: list) -> bool:
     """Whether a usage payload actually says anything.
 
-    Every window reading zero with no reset time is not an account that has
-    used nothing: a window that has been touched carries the time it rolls
-    over. It is the shape of an answer that failed to say anything, and taking
-    it as fact told the user an account with three sessions running had spent
-    nothing and had its whole allowance left.
+    The server either enumerates the windows or it does not. An enumerated
+    window reading zero with no reset time is an answer: the window has not
+    been opened, or it rolled over and nothing has been spent since. An
+    account that has genuinely used nothing reads exactly that way, and
+    calling it "no reading" hid a full allowance behind a dash.
+
+    This once tested for a non-zero number instead, to catch an account that
+    showed three running sessions and a whole allowance left. That was the
+    wrong test: the zeros there were real, from windows that had rolled over.
+    An absent answer is an empty list, which is what this returns False for.
     """
-    return any(lim.percent or lim.resets_at for lim in limits)
+    return bool(limits)
 
 
 def _parse_limits(data: dict) -> list[Limit]:

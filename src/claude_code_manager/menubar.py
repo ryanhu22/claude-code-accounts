@@ -266,23 +266,27 @@ def _quiet(tone: str) -> str:
 
 
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
-    """One usage window: its name, how much is left, and when it comes back."""
-    # A quota reads as a fuel gauge: the bar and the number are both what is
-    # LEFT, so a full green bar means plenty and an empty one means nearly out.
-    # The API reports what has been spent and the tone is taken from that, so
-    # the thresholds mean the same thing whichever way round it is shown.
+    """One usage window: its name, how much is used, and when it comes back."""
+    # The list fills as the window is spent, so the squares are the usage and
+    # the number beside them is the same figure. The menu bar battery is the
+    # other way round on purpose: a battery is a level, and a level is what is
+    # left, so it drains. Here the question is how much of a window has gone,
+    # and five accounts stack up as five bars that grow together.
     spent = lim.spent if lim else None
-    left = None if spent is None else max(0.0, 100.0 - spent)
-    tone = _quiet(_tone(spent))
+    tone = _tone(spent)
+    # The squares carry the colour and the number stays plain text while the
+    # window is healthy. Green on both put the same signal twice and left the
+    # menu mostly green, so the one figure that mattered had to compete with
+    # it. Warn and hot colour the number too, because then it matters.
     # Five cells, not ten. The bar is here to be seen without reading, and the
     # number beside it is the exact figure, so more cells only cost width.
     # The label is right aligned so its padding falls to the left, which puts
     # the whitespace between instruments instead of inside one. Reading a panel
     # depends on each instrument holding together as a unit, and even spacing
     # made the row one long strip of characters.
-    out = [(f"  {label:>5} ", "dim"), *_gauge(left, BAR_W, tone),
+    out = [(f"  {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
            # Four wide, so a full window keeps its gap from the track.
-           ("    —" if left is None else f"{left:4.0f}%", tone)]
+           ("    —" if spent is None else f"{spent:4.0f}%", _quiet(tone))]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
