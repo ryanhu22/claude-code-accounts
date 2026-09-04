@@ -237,45 +237,33 @@ def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
 
 
-# One mark per running session, its height standing for how alive the session
-# is. Every glyph is the same width in SF Mono, unlike the braille a spinner
-# would want, so a row of them cannot knock the columns askew.
-LEVELS = ("\u2588", "\u2586", "\u2584", "\u2582", "\u2581")   # █ ▆ ▄ ▂ ▁
-STEPS = (300, 3600, 86400)          # 5 minutes, an hour, a day
+# A session mark is a circle and a quota cell is a square, so the two can never
+# be read as each other. Both are the same width in SF Mono.
+LIVE, QUIET = "\u25cf", "\u25cb"          # ● ○
 
 
-def _lamps(here: list, width: int = 5) -> list[tuple[str, str]]:
-    """One mark per session on this account, tall while the session is alive.
+def _lamps(here: list, width: int = 4) -> list[tuple[str, str]]:
+    """An annunciator for the sessions on this account: lit, and how many.
 
-    Idle is not one state. A session that stopped two minutes ago and one that
-    stopped last week were both drawn as the same hollow dot, which threw away
-    the only thing that told them apart. Height is how recently the session did
-    anything: full for one working now, then falling by the step as it goes
-    quiet, down to a flat line for one that has sat for a day or more.
+    Two questions get asked of this column and they want different answers.
+    "Is anything working right now" is a state, and a state is read fastest as
+    a shape, so it is a filled lamp against a hollow one. "How many are on this
+    account" is a quantity, and a quantity is read fastest as a number, which
+    also stays exact past the point where marks stop being countable.
 
-    So the row reads as a skyline. A busy account is tall and green, an account
-    somebody left open a week ago is a flat grey rule, and the shape says which
-    before any of it is read.
+    Drawing one mark per session answered the second question badly: four of
+    them have to be counted, and ten do not fit. Encoding how long each has
+    been idle in the height of its mark answered a third question nobody asked,
+    in a shape that needed a legend, and drew the common case as a pair of grey
+    hairlines that read as nothing at all.
     """
-    def rank(sess):
-        if (sess.status or "") == "busy":
-            return 0
-        age = sess.idle_for
-        return 1 + sum(1 for step in STEPS if age > step)
-
-    ordered = sorted(here, key=rank)
-    if len(here) <= width:
-        shown, over = ordered, ""
-    else:
-        # Room for the count of the ones not drawn, so the column keeps its
-        # width however many sessions an account is carrying.
-        room = max(1, width - len(f"+{len(here)}"))
-        shown, over = ordered[:room], f"+{len(here) - room}"
-    out = [(LEVELS[rank(sess)], "ok" if rank(sess) == 0 else "dim")
-           for sess in shown]
-    out.append((over, "dim"))
-    out.append((" " * max(0, width - len(shown) - len(over)), "dim"))
-    return out
+    if not here:
+        return [(" " * width, "dim")]
+    working = any((sess.status or "") == "busy" for sess in here)
+    tone = "text" if working else "dim"
+    return [(LIVE if working else QUIET, tone),
+            (f" {len(here)}", tone),
+            (" " * max(0, width - 2 - len(str(len(here)))), "dim")]
 
 
 def _quiet(tone: str) -> str:
