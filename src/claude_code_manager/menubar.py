@@ -237,6 +237,27 @@ def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
 
 
+def _lamps(here: list, width: int = 4) -> list[tuple[str, str]]:
+    """One lamp per session running on this account, lit if it is working.
+
+    A count is read; lamps are seen. Three of them beside a name says "three
+    terminals are on this subscription" without the eye stopping to parse a
+    word, which is the whole point of an instrument.
+
+    Working sessions come first so the lit ones cluster together, and a menu
+    cannot animate: AppKit does not run timers while a menu is open, so this
+    is the state at the moment it was drawn and nothing pulses.
+    """
+    lit = sorted(here, key=lambda s: (s.status or "") != "busy")
+    shown = lit[:width]
+    out = [("\u25cf" if (s.status or "") == "busy" else "\u25cb",
+            "text" if (s.status or "") == "busy" else "dim") for s in shown]
+    over = f"+{len(here) - len(shown)}" if len(here) > width else ""
+    out.append((over, "dim"))
+    out.append((" " * max(0, width + 1 - len(shown) - len(over)), "dim"))
+    return out
+
+
 def _quiet(tone: str) -> str:
     """Let a healthy value be plain text.
 
@@ -265,7 +286,8 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     # depends on each instrument holding together as a unit, and even spacing
     # made the row one long strip of characters.
     out = [(f"  {label:>5} ", "dim"), *_gauge(pct, BAR_W),
-           ("   —" if pct is None else f"{pct:3.0f}%", tone)]
+           # Four wide, so a full window keeps its gap from the track.
+           ("    —" if pct is None else f"{pct:4.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -934,18 +956,17 @@ class ManagerApp(rumps.App):
         the age of the usage are read from the clock at that moment rather
         than from whenever the menu was last built.
         """
-        # The dot means "some rule points here", so it counts every scope. The
-        # text beside it names only the rules drawn nowhere else: the profiles
-        # section below covers both profiles and the default.
-        in_use = bool(core.rules_using(acct.name, snap.rules))
-        used_by = core.rules_using(acct.name, snap.rules,
-                                   scopes=("project", "session"))
+        # Lamps carry the live state, so the tail is left with the one kind of
+        # rule that is drawn nowhere else. A pinned session shows its account
+        # on its own row; a profile and the default are in the profiles
+        # section; a project rule has no home but this.
+        here = [s for s in snap.sessions
+                if snap.running_on.get(s.env_config_dir) == acct.name]
+        used_by = core.rules_using(acct.name, snap.rules, scopes=("project",))
         fable = next((l for l in acct.limits
                       if l.kind not in ("session", "weekly_all")), None)
-        segments = [
-            ("● " if in_use else "○ ", "text" if in_use else "dim"),
-            *_chip(acct.name, NAME_W),
-        ]
+        segments = [("  ", "dim"), *_chip(acct.name, NAME_W), (" ", "dim"),
+                    *_lamps(here)]
         weekly = acct.limit("weekly_all")
         segments += _bucket("5h", acct.limit("session"))
         segments += _bucket("7d", weekly)
@@ -975,9 +996,8 @@ class ManagerApp(rumps.App):
             again = "Sign in again" if acct.error == "login expired" else "Sign in"
             item.add(self._browser_menu(again, acct.name))
             return item
-        in_use = bool(core.rules_using(acct.name, snap.rules))
         # plain title stays unique: rumps keys its callback registry by it
-        head = f"{'●' if in_use else '○'} {acct.name} — {_pct(acct.session_pct)} 5h"
+        head = f"{acct.name} — {_pct(acct.session_pct)} 5h"
         item = rumps.MenuItem(head)
         _apply_style(item, self._account_segments(acct, snap))
         self._account_rows[acct.name] = item
