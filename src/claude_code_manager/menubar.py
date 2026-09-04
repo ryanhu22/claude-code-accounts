@@ -520,6 +520,14 @@ def _quiet(tone: str) -> str:
     return "text" if tone == "ok" else tone
 
 
+def _nothing(_sender) -> None:
+    """Does nothing, on purpose.
+
+    Attached to rows that are already true, so macOS leaves them enabled and
+    draws them at full strength. Clicking one asks for what it already says.
+    """
+
+
 def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
     """Every window an account has, as label and figure pairs on tab stops.
 
@@ -1864,8 +1872,14 @@ class ManagerApp(rumps.App):
             # The plain title has to be unique inside one menu, and it is what
             # macOS matches when you type. Scope first, so typing picks a row
             # rather than the first account with that name under any heading.
+            # The row already in use gets a callback that does nothing rather
+            # than no callback at all. A menu item with no action is disabled,
+            # and macOS draws a disabled row's whole attributed title at
+            # reduced alpha, so the account you are actually on was the one
+            # row in the list whose figures were hard to read, and its green
+            # came out a pale green that looked like a third state.
             entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
-                                   callback=None if same else
+                                   callback=_nothing if same else
                                    self._make_assign(scope, key, acct.name, cwd))
             # All three windows, not only the five hour one. Picking a
             # subscription for a session is the decision this list exists to
