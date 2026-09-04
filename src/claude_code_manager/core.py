@@ -583,6 +583,14 @@ USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
 # than being asked to.
 _RETRY_FALLBACK = 300        # used only when a 429 arrives with no Retry-After
 _FORCE_FLOOR = 30            # shortest gap between forced checks of one account
+# The shortest gap between ordinary checks of one account. The poll runs every
+# 180 seconds, so this never delays it; what it stops is everything else that
+# asks for a collection. Starting the app is one, and restarting it eight times
+# in a few minutes cost forty requests against a budget of about four per five
+# minutes per account, which rate limited two accounts and left their rows
+# reading "usage from 13m ago". A payload two minutes old is not worth a
+# request that can park a row for five.
+_MIN_AGE = 150
 
 
 def _cache_read(path: str = "") -> dict:
@@ -671,6 +679,8 @@ def _usage(name: str, token: str, force: bool = False,
     if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
         return told, at, speak
     if cached and not force and now < entry.get("retry_after", 0):
+        return told, at, speak
+    if told and not force and now - at < _MIN_AGE:
         return told, at, speak
     try:
         data = _get("/api/oauth/usage", token)
