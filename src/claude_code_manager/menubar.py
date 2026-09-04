@@ -1047,14 +1047,21 @@ class ManagerApp(rumps.App):
         # profiles section read backwards. One place to set a rule is enough,
         # and the profiles section is the one that shows what every rule is.
 
-        # Only offered when it can do something. A five hour window starts on
-        # the first request and this sends one, so an account nobody has used
-        # yet has its clock stopped. Once the clock is running there is nothing
-        # to start, and the row said so, which is a state the account row above
-        # already shows and not a thing to click.
-        session = acct.limit("session")
-        if session and not session.resets_at:
-            self._line(item, f"poke:{acct.name}", "Start the 5h window now",
+        # Only offered when it can do something. A window starts on the first
+        # request and this sends one, so an account nobody has used yet has its
+        # clocks stopped. Once they run there is nothing to start, and the row
+        # said so, which the account row above already shows and is not a thing
+        # to click.
+        #
+        # It used to test the five hour window alone and name it in the label,
+        # so an account whose only stopped clock was the Fable one showed no
+        # button at all, and the row it would have fixed kept reading "unused".
+        stopped = [lim for lim in acct.limits if not lim.resets_at]
+        if acct.reading and stopped:
+            names = ", ".join(lim.label for lim in stopped)
+            self._line(item, f"poke:{acct.name}",
+                       f"Start the {names} window now" if len(stopped) == 1
+                       else f"Start the {names} windows now",
                        callback=self._make_poke(acct.name))
             item.add(rumps.separator)
 
