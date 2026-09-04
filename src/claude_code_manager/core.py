@@ -605,14 +605,29 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     return None
 
 
-def adopt(config_dir: str, blob: dict) -> bool:
-    """Write a credential into a config dir under Claude Code's locks."""
+def adopt(config_dir: str, blob: dict, email: str = "") -> bool:
+    """Write a credential into a config dir under Claude Code's locks.
+
+    Putting a credential in a dir can change whose dir it is, so the cached
+    identity for it is dropped unless the caller can name the account. Trusting
+    a stale entry here is how one account's dir comes to be described as
+    another's, which then spreads: the answer is used to decide what to copy
+    where.
+    """
     try:
         with locks.credentials(config_dir):
             keychain.write_credentials(config_dir, blob)
-        return True
     except (locks.LockBusy, RuntimeError):
         return False
+    store = _cache_read(IDENTITY_CACHE)
+    key = os.path.abspath(config_dir)
+    if email:
+        store[key] = {"fp": fingerprint(blob), "email": email,
+                      "plan": (store.get(key) or {}).get("plan"), "at": time.time()}
+    else:
+        store.pop(key, None)
+    _cache_write(store, IDENTITY_CACHE)
+    return True
 
 
 # Verdicts that mean the login itself is gone, rather than unreachable. Claude
@@ -951,6 +966,149 @@ def ensure_account_dir(name: str) -> str:
     return path
 
 
+SESSION_DIRS = os.environ.get("CCM_SESSION_DIRS", os.path.join(HOME, ".claude-ctx"))
+
+
+def session_dir(term_id: str) -> str:
+    """The config dir belonging to one terminal.
+
+    A session reads its credential from the dir it launched with, and re-reads
+    it every half minute, so a dir per session is what makes one session
+    switchable on its own and without a restart. Keyed on the terminal's uuid,
+    which survives restarting Claude Code in that tab and is never recycled.
+    """
+    return os.path.join(SESSION_DIRS, "s-" + term_id.replace("-", "")[:10].lower())
+
+
+def _seed_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    for item in SHARED_ITEMS:
+        target = os.path.join(DEFAULT_CONFIG, item)
+        link = os.path.join(path, item)
+        if os.path.exists(target) and not os.path.lexists(link):
+            try:
+                os.symlink(target, link)
+            except OSError:
+                pass
+
+
+def prepare_session(term_id: str, account: str) -> str:
+    """The dir a terminal should launch in, holding `account`'s credential."""
+    path = session_dir(term_id)
+    _seed_dir(path)
+    want = live_blob(account_dir(account)) if account else None
+    if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
+        adopt(path, want)
+    return path
+
+
+def resolve_dir(cwd: str, term_id: str = "") -> str:
+    """The config dir to launch Claude Code with, prepared and ready.
+
+    Sessions that have no terminal of their own (background runs, editors) fall
+    back to the account's own dir: they cannot be switched individually anyway,
+    and giving them a dir would leave one behind on every run.
+    """
+    account, _ = resolve(cwd, term_id)
+    if not account:
+        return DEFAULT_CONFIG
+    if not term_id:
+        return ensure_account_dir(account)
+    return prepare_session(term_id, account)
+
+
+def account_dirs_for(account: str, live_terms: Iterable[str]) -> list[str]:
+    """Every dir that should be holding one account's login right now."""
+    out = [account_dir(account)]
+    r = rules()
+    for term in live_terms:
+        path = session_dir(term)
+        if os.path.isdir(path) and r.account_for("", term)[0] == account:
+            out.append(path)
+    return out
+
+
+def sync_credentials(live: Iterable["sessions.Session"]) -> list[str]:
+    """Give every copy of an account's login the freshest one of ITS lineage.
+
+    Copies of a single refresh token cannot all refresh: the token is single
+    use, so whichever session gets there first spends it for the rest. Rather
+    than race Claude Code for it, this hands the newest credential to whoever
+    is behind. A session left holding a spent one recovers by itself, since it
+    re-reads its keychain item about every thirty seconds.
+
+    The account's own dir is authoritative. A session dir is only promoted over
+    it when it is genuinely newer AND the API confirms it belongs to that same
+    account, because a dir that has not caught up with a rule change is holding
+    somebody else's login, and copying that around would mix two accounts up.
+
+    Keychain work only, apart from that one confirmation, which is cached.
+    """
+    groups: dict[str, list[str]] = {n: [] for n in account_names()}
+    for sess in live:
+        if not sess.term_id:
+            continue
+        path = session_dir(sess.term_id)
+        if not os.path.isdir(path):
+            continue
+        account, _ = resolve(sess.cwd, sess.term_id)
+        if account in groups and path not in groups[account]:
+            groups[account].append(path)
+
+    healed: list[str] = []
+    for account, session_paths in groups.items():
+        if not session_paths:
+            continue
+        home = account_dir(account)
+        master = keychain.read_credentials(home)
+        if not master or not master.get("refreshToken"):
+            continue
+        # Promote a session copy only if it is newer and provably this account.
+        owner = (identity(home, master)[0].get("email") or "").lower()
+        for path in session_paths:
+            b = keychain.read_credentials(path)
+            if not b or not b.get("refreshToken"):
+                continue
+            if (b.get("expiresAt") or 0) <= (master.get("expiresAt") or 0):
+                continue
+            email = (identity(path, b)[0].get("email") or "").lower()
+            if email and owner and email == owner and adopt(home, b, email=owner):
+                master = b
+                healed.append(home)
+        want = (identity(home, master)[0].get("email") or "")
+        best = fingerprint(master)
+        for path in session_paths:
+            if fingerprint(keychain.read_credentials(path)) == best:
+                continue
+            if adopt(path, master, email=want):
+                healed.append(path)
+    return healed
+
+
+def gc_session_dirs(live_terms: Iterable[str], max_age: float = 7 * 24 * 3600) -> list[str]:
+    """Remove dirs for terminals that are gone and were not used recently."""
+    keep = {session_dir(t) for t in live_terms if t}
+    gone, cutoff = [], time.time() - max_age
+    try:
+        entries = os.listdir(SESSION_DIRS)
+    except OSError:
+        return gone
+    for name in entries:
+        path = os.path.join(SESSION_DIRS, name)
+        if not name.startswith("s-") or path in keep or not os.path.isdir(path):
+            continue
+        try:
+            if os.path.getmtime(path) > cutoff:
+                continue
+        except OSError:
+            continue
+        keychain.delete(keychain.service_for(path))
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+        gone.append(path)
+    return gone
+
+
 def rules() -> profiles.Rules:
     return profiles.load()
 
@@ -1133,7 +1291,37 @@ def assign(scope: str, key: str, account: str, cwd: str = "") -> tuple[bool, str
     save_rules(r)
     for root in moved:
         carry_project_state(root, before, account_dir(account))
+    live = apply_now()
+    if live:
+        n = len(live)
+        return True, (f"{where} now uses {account}. {n} running session"
+                      f"{'s' if n != 1 else ''} switch within about 30 seconds.")
     return True, f"{where} now uses {account}"
+
+
+def apply_now() -> list[str]:
+    """Hand the current rules to every live session that has a dir of its own.
+
+    This is what makes a rule change land without a restart: the session re-reads
+    its keychain item about every thirty seconds, so writing the new credential
+    into the dir it is already running in moves it, and nothing else.
+
+    A session started before it had a dir of its own is skipped; there is
+    nowhere to write that only it would see.
+    """
+    moved: list[str] = []
+    for sess in sessions.live(credential_dirs()):
+        if not sess.term_id:
+            continue
+        path = session_dir(sess.term_id)
+        if os.path.abspath(path) != os.path.abspath(sess.env_config_dir):
+            continue                 # it is not reading this dir
+        account, _ = resolve(sess.cwd, sess.term_id)
+        want = live_blob(account_dir(account)) if account else None
+        if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
+            if adopt(path, want):
+                moved.append(sess.label)
+    return moved
 
 
 def clear(scope: str, key: str, cwd: str = "") -> tuple[bool, str]:

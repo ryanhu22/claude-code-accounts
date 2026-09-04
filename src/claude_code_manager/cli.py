@@ -190,6 +190,17 @@ def cmd_unpin(_args) -> int:
     return 0 if ok else 1
 
 
+def cmd_resolve(_args) -> int:
+    """Print the config dir this shell should launch Claude Code with.
+
+    Called by the generated resolver on every launch, so it stays quiet and
+    fast and never fails loudly: the shell has a pure-text fallback for when
+    this cannot answer.
+    """
+    print(core.resolve_dir(os.getcwd(), os.environ.get("TERM_SESSION_ID", "")))
+    return 0
+
+
 def cmd_login(args) -> int:
     """Sign an account in through the browser, in two steps."""
     attempt = core.sign_in_begin(args.account)
@@ -246,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.set_defaults(func=cmd_pin)
     sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
+    sub.add_parser("resolve", help="print the config dir for this shell").set_defaults(func=cmd_resolve)
     p = sub.add_parser("login", help="sign an account in through the browser")
     p.add_argument("account")
     p.add_argument("--browser", help='e.g. "Google Chrome", "Safari"')

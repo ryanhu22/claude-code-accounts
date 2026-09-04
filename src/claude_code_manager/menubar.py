@@ -24,6 +24,7 @@ import rumps
 from . import core, focus, gauge, oauth, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
+CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 
@@ -342,12 +343,14 @@ class ManagerApp(rumps.App):
         self._pending: Optional[Snapshot] = None
         self._lock = threading.Lock()
         self._busy = False
+        self._syncing = False
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
         self._hide_from_dock()
         self.refresh_now(None)
         rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
+        rumps.Timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS).start()
         rumps.Timer(self._on_sync_tick, 1).start()
 
     # ------------------------------------------------------------------ plumbing
@@ -368,6 +371,9 @@ class ManagerApp(rumps.App):
         snap.sessions = sessions.live(core.credential_dirs(), with_git=True,
                                       with_transcript=True)
         snap.rules = core.bootstrap()
+        terms = [s.term_id for s in snap.sessions if s.term_id]
+        core.sync_credentials(snap.sessions)
+        core.gc_session_dirs(terms)
         snap.running_on = {d: core.account_of_dir(d, snap.accounts)
                            for d in {s.env_config_dir for s in snap.sessions}}
         snap.taken_at = time.time()
@@ -395,6 +401,33 @@ class ManagerApp(rumps.App):
             self._tracker.update_sessions(snap.sessions)
             self._rebuild()
         self._tracker.poll()
+
+    def _on_credential_tick(self, _timer) -> None:
+        """Keep every copy of each login on the newest credential of its lineage.
+
+        A session has a config dir of its own so it can be switched alone, which
+        means several dirs hold copies of one refresh token, and that token is
+        single use. Rather than race Claude Code to spend it, this hands the
+        newest credential of each lineage to whoever is behind. A session left
+        holding a spent one recovers by itself, since it re-reads its keychain
+        item about every thirty seconds.
+
+        Keychain work only, no network, so it can run often and off the main
+        thread without touching the API budget.
+        """
+        if self._syncing:
+            return
+        self._syncing = True
+
+        def work() -> None:
+            try:
+                core.sync_credentials(self._snapshot.sessions)
+            except Exception:
+                pass          # a failed pass is retried in under a minute
+            finally:
+                self._syncing = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     def refresh_now(self, _sender) -> None:
         self._on_refresh_tick(None, force=_sender is not None)
