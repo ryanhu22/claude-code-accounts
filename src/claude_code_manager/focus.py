@@ -191,3 +191,66 @@ class Tracker:
         after = focus.session.pid if focus.session else None
         if before != after:
             self._on_change()
+
+
+REVEAL = {
+    "com.apple.Terminal": '''
+tell application "Terminal"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        set selected of t to true
+        set frontmost of w to true
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "no tab"''',
+    "com.googlecode.iterm2": '''
+tell application "iTerm2"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          select t
+          select w
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no tab"''',
+}
+
+
+def bundle_for_program(term_program: str) -> str:
+    """The bundle id behind a TERM_PROGRAM value, so a session names its app."""
+    for bundle, (program, _script) in TERMINALS.items():
+        if program and program == term_program:
+            return bundle
+    return ""
+
+
+def reveal_tab(bundle_id: str, tty: str) -> str:
+    """Bring the terminal tab running on `tty` to the front.
+
+    A running session can only change account by restarting, and the slow part
+    of that is finding the right tab among a dozen. This puts the user in it.
+    Returns "" on success, else why not.
+    """
+    script = REVEAL.get(bundle_id)
+    if not script or not tty:
+        return "that terminal cannot be scripted"
+    path = tty if tty.startswith("/dev/") else "/dev/" + tty
+    try:
+        r = subprocess.run(["osascript", "-e", script.format(tty=path)],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "could not reach the terminal"
+    if r.returncode != 0:
+        return (r.stderr.strip().splitlines() or ["AppleScript refused"])[-1][:120]
+    return "" if r.stdout.strip() == "ok" else "that tab is gone"

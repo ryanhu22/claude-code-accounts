@@ -608,10 +608,18 @@ class ManagerApp(rumps.App):
             _apply_style(note_item, [("  ", "dim"), (note, "dim")])
             item.add(note_item)
         if wanted and wanted != running_on:
-            drift = f"On restart it moves to {wanted} ({_why(reason)})"
-            d_item = rumps.MenuItem(drift, callback=None)
-            _apply_style(d_item, [("  ", "dim"), (drift, "warn")])
-            item.add(d_item)
+            # A running session holds its credentials in memory, so the rule
+            # cannot reach it. Say what to do rather than only what will happen.
+            for line, tone in (
+                    (f"Spending {running_on}; {_why(reason)} says {wanted}", "warn"),
+                    ("It reads its account once at launch, so restart this tab:", "dim"),
+                    ("press ctrl+C twice, then run  claude -c", "dim")):
+                d = rumps.MenuItem(line, callback=None)
+                _apply_style(d, [("  ", "dim"), (line, tone)])
+                item.add(d)
+            if focus.bundle_for_program(sess.term_program) and sess.tty:
+                item.add(rumps.MenuItem("Take me to that tab",
+                                        callback=self._make_reveal(sess)))
         item.add(rumps.separator)
 
         if sess.term_id:
@@ -722,6 +730,13 @@ class ManagerApp(rumps.App):
             ok, msg = core.assign(scope, key, account, cwd=cwd)
             self._notify(msg, restart=ok)
             self.refresh_now(None)
+        return handler
+
+    def _make_reveal(self, sess: sessions.Session):
+        def handler(_sender):
+            err = focus.reveal_tab(focus.bundle_for_program(sess.term_program), sess.tty)
+            if err:
+                self._notify(f"Could not open that tab: {err}")
         return handler
 
     def _make_clear(self, scope: str, key: str, cwd: str):
