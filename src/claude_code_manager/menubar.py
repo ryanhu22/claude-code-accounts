@@ -47,7 +47,11 @@ def _fit(text: str, width: int) -> str:
     if len(text) <= width:
         return text.ljust(width)
     return text[: max(1, width - 1)] + "\u2026"
-FULL, EMPTY = "\u2588", "\u2591"          # █ ░
+# The fill for a bar. A full block (█) is taller than the brackets around it,
+# measured: the bracket's ink spans 10 points and the block spans 11.83, so it
+# hung below the track it was supposed to sit in. A black square (■) spans 7
+# points and its centre lands exactly on the bracket's centre.
+FILL = "\u25a0"                            # ■
 
 
 def _colors():
@@ -214,7 +218,7 @@ def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     if pct is None:
         return [("[", "dim"), ("\u2014".center(cells), "dim"), ("]", "dim")]
     filled = max(0, min(cells, round(pct / 100 * cells)))
-    return [("[", "dim"), (FULL * filled, _tone(pct)),
+    return [("[", "dim"), (FILL * filled, _tone(pct)),
             (" " * (cells - filled), "dim"), ("]", "dim")]
 
 
