@@ -355,6 +355,56 @@ def _short(email: Optional[str]) -> str:
     return (email or "?").split("@")[0]
 
 
+def _shape(snap: "Snapshot") -> tuple:
+    """What the menu is made of, as opposed to what it says.
+
+    Percentages, countdowns and ages change on every refresh and are repainted
+    in place, so they are deliberately absent here. Only a change in this
+    needs rows added or removed, which is the only reason to rebuild.
+    """
+    r = snap.rules
+    return (
+        tuple((a.name, a.signed_in, a.error, a.mismatch) for a in snap.accounts),
+        tuple(s.pid for s in snap.sessions),
+        tuple(sorted(snap.running_on.items())),
+        tuple((p.name, p.account, tuple(p.repos)) for p in r.profiles),
+        r.default_account,
+        tuple(sorted(r.projects.items())),
+        tuple(sorted(r.sessions.items())),
+    )
+
+
+def _registry() -> Optional[dict]:
+    """rumps' map from NSMenuItem back to the Python object that owns it.
+
+    rumps writes into this on every MenuItem it makes so it can find the
+    callback again when AppKit fires, and it never removes anything.
+    Menu.clear() empties the NSMenu and rumps' own dict, but this keeps a
+    strong reference to every item, its attributed title and its whole
+    submenu, so each rebuild leaks the tree it replaced. Measured here at
+    about 380 items and several hundred kilobytes per rebuild, with a rebuild
+    at least every three minutes.
+    """
+    try:
+        return rumps.rumps.NSApp._ns_to_py_and_callback
+    except Exception:
+        return None
+
+
+def _forget(stale: list) -> None:
+    """Drop menu items the last build left behind.
+
+    Safe because an item that is in no menu cannot be clicked, so nothing can
+    ask for its callback again. Anything still on screen was made after the
+    keys were taken and is not in the list.
+    """
+    reg = _registry()
+    if reg is None:
+        return
+    for key in stale:
+        reg.pop(key, None)
+
+
 _WATCHER: Optional[type] = None
 
 
@@ -446,6 +496,16 @@ class ManagerApp(rumps.App):
         _apply_style(self._refresh_item,
                      [("Refresh now", "text"), (f"   updated {when}", "dim")])
 
+    def _repaint(self) -> None:
+        """Redraw the text that changes without the menu changing shape."""
+        snap = self._snapshot
+        for acct in snap.accounts:
+            row = self._account_rows.get(acct.name)
+            if row is not None:
+                _apply_style(row, self._account_segments(acct, snap))
+        self._style_refresh_row(snap)
+        self._apply_title(snap)
+
     def _on_menu_open(self) -> None:
         """Make the durations in the menu true at the moment they are read.
 
@@ -455,13 +515,7 @@ class ManagerApp(rumps.App):
         stall between the click and the menu. Session rows are left alone
         because the five-second poll already repaints them in place.
         """
-        snap = self._snapshot
-        for acct in snap.accounts:
-            row = self._account_rows.get(acct.name)
-            if row is not None:
-                _apply_style(row, self._account_segments(acct, snap))
-        self._style_refresh_row(snap)
-        self._apply_title(snap)
+        self._repaint()
 
     @staticmethod
     def _hide_from_dock() -> None:
@@ -516,9 +570,13 @@ class ManagerApp(rumps.App):
         with self._lock:
             snap, self._pending = self._pending, None
         if snap is not None:
+            changed = _shape(snap) != _shape(self._snapshot)
             self._snapshot = snap
             self._tracker.update_sessions(snap.sessions)
-            self._rebuild()
+            # Usage numbers move on every refresh and are repainted in place,
+            # so a tick that only brings new numbers does not need the menu
+            # torn down and built again.
+            self._rebuild() if changed else self._repaint()
         self._take_sessions()
         self._tracker.poll()
 
@@ -617,6 +675,8 @@ class ManagerApp(rumps.App):
     def _rebuild(self) -> None:
         self._drawn_at = time.time()
         snap = self._snapshot
+        reg = _registry()
+        stale = list(reg) if reg is not None else []
         self._apply_title(snap)
         self.menu.clear()
         self._session_rows = {}
@@ -658,6 +718,7 @@ class ManagerApp(rumps.App):
         self._style_refresh_row(snap)
         self.menu.add(self._refresh_item)
         self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
+        _forget(stale)          # the tree this one replaced
 
     # ------------------------------------------------------------------ title
 
