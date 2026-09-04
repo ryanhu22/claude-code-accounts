@@ -34,12 +34,11 @@ FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 # Menu rows are drawn as attributed strings so the three usage buckets line up
 # in real columns. A proportional font cannot align with spaces, and a plain
 # title cannot colour the bucket that is nearly spent.
-BAR_W = 10
-NAME_W = 14
-REPO_W = 18
-DETAIL_W = 30
-CTX_BAR_W = 6
-PROFILE_W = 18
+NAME_W = 13                # the longest account name, so chips form a column
+REPO_W = 12
+DETAIL_W = 24
+CTX_BAR_W = 6              # the one gauge left in a row, and the only one asked for
+PROFILE_W = 16
 
 
 def _fit(text: str, width: int) -> str:
@@ -94,12 +93,18 @@ def _chip_color(name: str):
     return AppKit.NSColor.colorWithHue_saturation_brightness_alpha_(hue, sat, bri, 1.0)
 
 
-def _chip(name: str, width: int = 0) -> tuple[str, str, str]:
-    """A filled rectangle behind the account name, like a terminal badge."""
-    label = f" {name} "
-    if width:
-        label = f" {name.ljust(width)} "
-    return (label, "chip_fg", name)
+def _chip(name: str, width: int = 0) -> list[tuple[str, str, str]]:
+    """A filled rectangle behind the account name, like a terminal badge.
+
+    The padding that squares the column sits OUTSIDE the fill. Putting it
+    inside made every chip the width of the longest account name, so a short
+    name floated in a block of colour and the eye read the block instead of
+    the word.
+    """
+    out = [(f" {name} ", "chip_fg", name)]
+    if width and len(name) < width:
+        out.append((" " * (width - len(name)), "dim"))
+    return out
 
 
 def _tone(pct: Optional[float]) -> str:
@@ -194,22 +199,38 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     return "hot"
 
 
+def _quiet(tone: str) -> str:
+    """Let a healthy value be plain text.
+
+    Green marked "nothing is wrong", which is nearly every number, so the menu
+    was mostly green and the one figure that mattered had to compete with it.
+    Only warn and hot keep a colour, and they now mean one thing. The menu bar
+    image keeps its green, because a battery there has no text beside it.
+    """
+    return "text" if tone == "ok" else tone
+
+
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
+    """One usage window: its name, how much is gone, and when it comes back.
+
+    There used to be a ten cell bar in front of the number. It said the same
+    thing to one tenth the precision and took three times the width, and three
+    of them made an account row 912 points wide, half the screen. The number
+    is the datum and its colour carries the level.
+    """
     pct = lim.spent if lim else None
-    tone = _tone(pct)
-    if pct is None:
-        return [(f"  {label:>5} ", "dim"), (" " * BAR_W, "dim"), ("    —", "dim"),
-                *([("      ", "dim")] if show_reset else [])]
-    filled = max(0, min(BAR_W, round(pct / 100 * BAR_W)))
-    out = [
-        (f"  {label:>5} ", "dim"),
-        (FULL * filled, tone),
-        (EMPTY * (BAR_W - filled), "dim"),
-        (f" {pct:3.0f}%", tone),
-    ]
+    tone = _quiet(_tone(pct))
+    out = [(f"  {label:<5}", "dim"),
+           ("   —" if pct is None else f"{pct:3.0f}%", tone)]
     if show_reset:
-        left = _compact_reset(lim.resets_at) if lim and not lim.over else "idle"
-        out.append((f" \u21bb{left:>4}", _reset_tone(lim)))
+        # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
+        # ↻, so it came from a fallback font at a different width and drew as a
+        # curl rather than an arrow. The columns here already say what the
+        # number is, so a separator is enough.
+        left = "" if pct is None else (
+            _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
+        out.append((f"{'(' + left + ')':>7}" if left else "       ",
+                    _quiet(_reset_tone(lim))))
     return out
 
 
@@ -240,9 +261,16 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
         return [("  ctx ", "dim"),
                 (("\u2014").center(CTX_BAR_W) + "    ", "dim")]
     filled = max(0, min(CTX_BAR_W, round(pct / 100 * CTX_BAR_W)))
-    tone = _tone(pct)
-    return [("  ctx ", "dim"), (FULL * filled, tone), (EMPTY * (CTX_BAR_W - filled), "dim"),
-            (f"{pct:3.0f}%", tone)]
+    tone = _quiet(_tone(pct))
+    # The unfilled cells were drawn with ░, which at this size reads as static
+    # and fights the filled half for attention. The column is a fixed width, so
+    # blank space says "the rest" without drawing anything.
+    #
+    # A healthy bar fills dim rather than in the text colour. Solid black is
+    # the heaviest mark on the row, and a bar that says "there is room" should
+    # not outweigh one that says "there is not".
+    return [("  ctx ", "dim"), (FULL * filled, "dim" if tone == "text" else tone),
+            (" " * (CTX_BAR_W - filled), "dim"), (f"{pct:3.0f}%", tone)]
 
 
 def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
@@ -307,8 +335,7 @@ def _run_in_terminal(command: str) -> str:
     return ""
 
 
-def _session_segments(sess: "sessions.Session", running_on: str,
-                      ruled: bool) -> list[tuple[str, str]]:
+def _session_segments(sess: "sessions.Session", running_on: str) -> list[tuple[str, str]]:
     """A session row, everything after the focus mark.
 
     Split out so a row can be repainted with fresh status, context and age
@@ -316,16 +343,14 @@ def _session_segments(sess: "sessions.Session", running_on: str,
     pointer.
     """
     return [
-        ("\u25c9 " if ruled else "  ", "text" if ruled else "dim"),
-        _chip(running_on, NAME_W),
+        *_chip(running_on, NAME_W),
         ("  ", "dim"),
         (_fit(sess.repo, REPO_W), "dim"),
         (" ", "dim"),
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
-        _spent_cell(sess),
-        (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
-        (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
+        ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
+        (f"{_age(sess.idle_for):>5}", "dim"),
     ]
 
 
@@ -353,8 +378,8 @@ def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, st
         (" ", "dim"),
         (_fit(sess.detail or sess.label, DETAIL_W), "text"),
         *_context_bar(sess),
-        (f"  {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
-        (f"{_age(sess.idle_for) + ' ago':>9}", "dim"),
+        ("  " + _fit(sess.status or sess.kind, 5), _quiet(_status_tone(sess.status))),
+        (f"{_age(sess.idle_for):>5}", "dim"),
         (f"   {why}" if why else "", "dim"),
     ]
 
@@ -368,8 +393,12 @@ def _why(reason: str) -> str:
 
 
 def _status_tone(status: str) -> str:
-    """Working sessions stand out; idle ones stay quiet."""
-    return {"busy": "ok", "shell": "warn"}.get(status, "dim")
+    """Working sessions stand out; idle ones stay quiet.
+
+    Nothing here returns a warning colour. A session sitting at a shell is a
+    state, not a problem, and orange now means one thing: a window running out.
+    """
+    return {"busy": "text"}.get(status, "dim")
 
 
 def _age(seconds: float) -> str:
@@ -704,8 +733,7 @@ class ManagerApp(rumps.App):
             if not row:
                 continue
             item, _old = row
-            ruled = bool(sess.term_id) and sess.term_id in snap.rules.sessions
-            segs = _session_segments(sess, owners.get(sess.env_config_dir, ""), ruled)
+            segs = _session_segments(sess, owners.get(sess.env_config_dir, ""))
             self._session_rows[sess.pid] = (item, segs)
             mark = (f"{FOCUS_MARK} ", "ok") if sess.pid == front else ("  ", "dim")
             _apply_style(item, [mark] + segs)
@@ -714,6 +742,17 @@ class ManagerApp(rumps.App):
         self._on_refresh_tick(None, force=_sender is not None)
 
     # ------------------------------------------------------------------ menu
+
+    def _section(self, title: str) -> None:
+        """A heading, in the same face as the rows under it.
+
+        These were plain titles, so macOS drew them in the 13pt system font
+        while every row below used 12pt monospaced. Two families and two sizes
+        in one menu reads as an accident.
+        """
+        head = rumps.MenuItem(title, callback=None)
+        _apply_style(head, [(title, "dim")])
+        self.menu.add(head)
 
     def _rebuild(self) -> None:
         self._drawn_at = time.time()
@@ -731,21 +770,20 @@ class ManagerApp(rumps.App):
         self._add_flash()
         self.menu.add(rumps.separator)
 
-        self.menu.add(rumps.MenuItem("SUBSCRIPTIONS", callback=None))
+        self._section("SUBSCRIPTIONS")
         for acct in snap.accounts:
             self.menu.add(self._account_item(acct, snap))
         self.menu.add(rumps.separator)
 
         n = len(snap.sessions)
-        self.menu.add(rumps.MenuItem(
-            f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS", callback=None))
+        self._section(f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS")
         if not snap.sessions:
             self.menu.add(rumps.MenuItem("  none", callback=None))
         for sess in snap.sessions[:14]:
             self.menu.add(self._session_item(sess, snap))
         self.menu.add(rumps.separator)
 
-        self.menu.add(rumps.MenuItem("PROFILES", callback=None))
+        self._section("PROFILES")
         for prof in snap.rules.profiles:
             self.menu.add(self._profile_item(prof, snap))
         self.menu.add(self._default_item(snap))
@@ -870,7 +908,7 @@ class ManagerApp(rumps.App):
                       if l.kind not in ("session", "weekly_all")), None)
         segments = [
             ("● " if in_use else "○ ", "text" if in_use else "dim"),
-            _chip(acct.name, NAME_W),
+            *_chip(acct.name, NAME_W),
         ]
         segments += _bucket("5h", acct.limit("session"))
         segments += _bucket("7d", acct.limit("weekly_all"))
@@ -990,7 +1028,7 @@ class ManagerApp(rumps.App):
         # rows apart.
         focused = self._tracker.focus.session
         in_front = focused is not None and focused.pid == sess.pid
-        segments = _session_segments(sess, running_on, ruled)
+        segments = _session_segments(sess, running_on)
         _apply_style(item, [(f"{FOCUS_MARK} ", "ok") if in_front else ("  ", "dim")] + segments)
         self._session_rows[sess.pid] = (item, segments)
 
@@ -1064,7 +1102,8 @@ class ManagerApp(rumps.App):
             ("  ", "dim"),
             (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"),
-            _chip(prof.account, NAME_W) if prof.account else (f"{'unassigned':<{NAME_W}}", "warn"),
+            *(_chip(prof.account, NAME_W) if prof.account
+              else [(f"{'unassigned':<{NAME_W}}", "warn")]),
             (f"   {n} project{'s' if n != 1 else ''}", "dim"),
             (f"   {live_here} running" if live_here else "", "dim"),
         ])
@@ -1128,7 +1167,7 @@ class ManagerApp(rumps.App):
             ("  ", "dim"),
             (_fit("everything else", PROFILE_W), "dim"),
             ("  ", "dim"),
-            _chip(name, NAME_W) if name else (f"{'not set':<{NAME_W}}", "hot"),
+            *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
             (f"   {loose} running" if loose else "", "dim"),
         ])
         self._running_block(
@@ -1186,7 +1225,7 @@ class ManagerApp(rumps.App):
                                    self._make_assign(scope, key, acct.name, cwd))
             _apply_style(entry, [("    ", "dim"),
                                  ("\u2713 " if same else "  ", "text"),
-                                 _chip(acct.name, NAME_W),
+                                 *_chip(acct.name, NAME_W),
                                  (f"  {_pct(acct.session_pct)} 5h", _tone(acct.session_pct))])
             rows.append(entry)
         if clearable:
