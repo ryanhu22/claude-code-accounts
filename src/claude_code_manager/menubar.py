@@ -772,7 +772,7 @@ class ManagerApp(rumps.App):
         elif acct.error:
             segments.append((f"   {acct.error}", "dim"))
         elif acct.stale:
-            segments.append((f"   usage {_age(acct.usage_age)} old", "dim"))
+            segments.append((f"   usage from {_age(acct.usage_age)} ago", "dim"))
         return segments
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
