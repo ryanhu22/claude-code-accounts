@@ -210,7 +210,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     return "hot"
 
 
-def _gauge(pct: Optional[float], cells: int, lit: bool = True) -> list[tuple[str, str]]:
+def _gauge(pct: Optional[float], cells: int) -> list[tuple[str, str]]:
     """A bar in a bracketed track, so the empty part is visible.
 
     Blank space alone left no way to see how much room was left, and ░ at this
@@ -234,8 +234,7 @@ def _gauge(pct: Optional[float], cells: int, lit: bool = True) -> list[tuple[str
         rest.append((TICK * (empty - 1), "dim"))
     if empty:
         rest.append((TICK, "warn"))
-    return [("[", "dim"), (FILL * filled, _tone(pct) if lit else "dim"),
-            *rest, ("]", "dim")]
+    return [("[", "dim"), (FILL * filled, _tone(pct)), *rest, ("]", "dim")]
 
 
 # A session mark is a circle and a quota cell is a square, so the two can never
@@ -287,15 +286,14 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     is the datum and its colour carries the level.
     """
     pct = lim.spent if lim else None
-    off = bool(lim and not lim.active)
-    tone = "dim" if off else _quiet(_tone(pct))
+    tone = _quiet(_tone(pct))
     # Five cells, not ten. The bar is here to be seen without reading, and the
     # number beside it is the exact figure, so more cells only cost width.
     # The label is right aligned so its padding falls to the left, which puts
     # the whitespace between instruments instead of inside one. Reading a panel
     # depends on each instrument holding together as a unit, and even spacing
     # made the row one long strip of characters.
-    out = [(f"  {label:>5} ", "dim"), *_gauge(pct, BAR_W, lit=not off),
+    out = [(f"  {label:>5} ", "dim"), *_gauge(pct, BAR_W),
            # Four wide, so a full window keeps its gap from the track.
            ("    —" if pct is None else f"{pct:4.0f}%", tone)]
     if show_reset:
@@ -303,11 +301,6 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # ↻, so it came from a fallback font at a different width and drew as a
         # curl rather than an arrow. The columns here already say what the
         # number is, so a separator is enough.
-        # A window that is not being enforced says so where its countdown
-        # would go: when it rolls over is no use while nothing is counting.
-        if off:
-            out.append(("    off", "dim"))
-            return out
         left = "" if pct is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "idle")
         # Seven wide, so the longest countdown keeps its gap from the number.
@@ -913,15 +906,10 @@ class ManagerApp(rumps.App):
         if acct and acct.reading:
             fable = next((l for l in acct.limits
                           if l.kind not in ("session", "weekly_all")), None)
-            wanted = [("5h", acct.limit("session")), ("7d", acct.limit("weekly_all"))]
+            cells = [self._cell("5h", acct.limit("session")),
+                     self._cell("7d", acct.limit("weekly_all"))]
             if fable:
-                wanted.append((fable.label, fable))
-            # Only the windows being enforced. A battery shows what is left, so
-            # one drawn for a window that cannot be spent read as a full tank.
-            cells = [self._cell(label, lim) for label, lim in wanted
-                     if lim is not None and lim.active]
-            if not cells:
-                cells = [gauge.Cell("5h", None, "dim")]
+                cells.append(self._cell(fable.label, fable))
         else:
             # A battery reads as what is left, so an empty answer drew as a
             # full one: three hundreds and a confident bar, off no data at all.
@@ -1013,10 +1001,7 @@ class ManagerApp(rumps.App):
         # are drawn, because the two timestamps differ by microseconds and
         # nobody is reading microseconds off a menu.
         if fable:
-            # Only a repeated countdown is worth dropping. "off" is a status
-            # and has to be said for every window it applies to.
-            twice = bool(weekly and fable.active and weekly.active
-                         and _compact_reset(fable.resets_at)
+            twice = bool(weekly and _compact_reset(fable.resets_at)
                          == _compact_reset(weekly.resets_at))
             segments += _bucket(fable.label, fable, show_reset=not twice)
         if used_by:
