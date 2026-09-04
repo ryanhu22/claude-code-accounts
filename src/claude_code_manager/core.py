@@ -1366,17 +1366,31 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable["Account"]) -> dict[st
     return out
 
 
-def rules_using(account: str, r: Optional[profiles.Rules] = None) -> list[str]:
-    """Every rule pointing at an account, described for a human."""
+ALL_SCOPES = ("default", "profile", "project", "session")
+
+
+def rules_using(account: str, r: Optional[profiles.Rules] = None,
+                scopes: Iterable[str] = ALL_SCOPES) -> list[str]:
+    """Every rule pointing at an account, described for a human.
+
+    `scopes` narrows the answer. The menu bar draws profiles in a section of
+    their own, so its account rows ask for the rest rather than say the same
+    thing twice. A flat listing with no such section asks for all of it.
+    """
     r = r or rules()
+    want = set(scopes)
     out = []
-    if r.default_account == account:
+    if "default" in want and r.default_account == account:
         out.append("default")
-    out += [f"profile {p.name}" for p in r.profiles if p.account == account]
-    out += [f"project {os.path.basename(k.rstrip('/'))}" for k, v in r.projects.items() if v == account]
-    n = sum(1 for v in r.sessions.values() if v == account)
-    if n:
-        out.append(f"{n} session{'s' if n != 1 else ''}")
+    if "profile" in want:
+        out += [f"profile {p.name}" for p in r.profiles if p.account == account]
+    if "project" in want:
+        out += [f"project {os.path.basename(k.rstrip('/'))}"
+                for k, v in r.projects.items() if v == account]
+    if "session" in want:
+        n = sum(1 for v in r.sessions.values() if v == account)
+        if n:
+            out.append(f"{n} session{'s' if n != 1 else ''}")
     return out
 
 
