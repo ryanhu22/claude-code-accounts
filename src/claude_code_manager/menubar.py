@@ -349,6 +349,7 @@ class ManagerApp(rumps.App):
         self._busy = False
         self._syncing = False
         self._notice: Optional[tuple[str, bool]] = None
+        self._again = False
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._follow_item: Optional[rumps.MenuItem] = None
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
@@ -379,8 +380,8 @@ class ManagerApp(rumps.App):
         terms = [s.term_id for s in snap.sessions if s.term_id]
         core.sync_credentials(snap.sessions)
         core.gc_session_dirs(terms)
-        snap.running_on = {d: core.account_of_dir(d, snap.accounts)
-                           for d in {s.env_config_dir for s in snap.sessions}}
+        snap.running_on = core.dirs_to_accounts(
+            {s.env_config_dir for s in snap.sessions}, snap.accounts)
         snap.taken_at = time.time()
         return snap
 
@@ -391,9 +392,13 @@ class ManagerApp(rumps.App):
                 self._pending = snap
         finally:
             self._busy = False
+        if self._again:
+            self._again = False
+            self._on_refresh_tick(None)
 
     def _on_refresh_tick(self, _timer, force: bool = False) -> None:
         if self._busy:
+            self._again = True     # asked for mid-flight: run again after, not never
             return
         self._busy = True
         threading.Thread(target=self._worker, args=(force,), daemon=True).start()
@@ -812,10 +817,31 @@ class ManagerApp(rumps.App):
 
     def _make_assign(self, scope: str, key: str, account: str, cwd: str):
         def handler(_sender):
-            ok, msg = core.assign(scope, key, account, cwd=cwd)
+            # A rule change is a local edit and takes about a millisecond. What
+            # used to make it feel slow was everything after it: the menu only
+            # redrew once a full usage refresh had come back from the API. Draw
+            # from what is already known first, then go and check usage.
+            applied: dict[str, str] = {}
+            ok, msg = core.assign(scope, key, account, cwd=cwd,
+                                  live=self._snapshot.sessions, applied_out=applied)
+            if ok:
+                self._reflect_rules(applied)
             self._notify(msg, restart=ok)
-            self.refresh_now(None)
+            if ok:
+                self.refresh_now(None)
         return handler
+
+    def _reflect_rules(self, applied: Optional[dict] = None) -> None:
+        """Redraw immediately from the rules, without waiting on the network.
+
+        Only the directories the change actually wrote to can have moved, and
+        the writer already knows what it put in each, so nothing has to be read
+        back to draw this.
+        """
+        snap = self._snapshot
+        snap.rules = core.rules()
+        snap.running_on = {**snap.running_on, **(applied or {})}
+        self._rebuild()
 
     def _make_reveal(self, sess: sessions.Session):
         def handler(_sender):
@@ -827,22 +853,31 @@ class ManagerApp(rumps.App):
     def _make_clear(self, scope: str, key: str, cwd: str):
         def handler(_sender):
             ok, msg = core.clear(scope, key, cwd=cwd)
+            if ok:
+                self._reflect_rules()
             self._notify(msg, restart=ok)
-            self.refresh_now(None)
+            if ok:
+                self.refresh_now(None)
         return handler
 
     def _make_join(self, profile: str, root: str):
         def handler(_sender):
             ok, msg = core.profile_add_repo(profile, root)
+            if ok:
+                self._reflect_rules()
             self._notify(msg, restart=ok)
-            self.refresh_now(None)
+            if ok:
+                self.refresh_now(None)
         return handler
 
     def _make_leave(self, profile: str, root: str):
         def handler(_sender):
             ok, msg = core.profile_remove_repo(profile, root)
+            if ok:
+                self._reflect_rules()
             self._notify(msg, restart=ok)
-            self.refresh_now(None)
+            if ok:
+                self.refresh_now(None)
         return handler
 
     def _make_new_profile(self, root: str = ""):
