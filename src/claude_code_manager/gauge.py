@@ -23,6 +23,7 @@ HEIGHT = 18.0                 # status bar content height; the bar itself is 22
 BATTERY_W, BATTERY_H = 22.0, 10.0
 BATTERY_Y = 0.0
 CAPTION_SIZE, CAPTION_Y = 6.5, 10.0
+RESET_GAP = 2.0               # between a window's name and its countdown
 NUB_W, NUB_H = 1.5, 3.5
 CHIP_H, CHIP_PAD = 14.0, 3.5
 GAP = 4.0                     # between cells
@@ -33,6 +34,8 @@ class Cell:
     caption: str                # 5h, 7d, fable
     used: Optional[float]       # percent used, None when unknown
     tone: str                   # ok | warn | hot | dim
+    reset: str = ""             # 45m, 3h, 5d; empty when the window has not started
+    reset_tone: str = "dim"     # how much the countdown matters, not how long it is
 
 
 def _tone_color(tone: str):
@@ -42,6 +45,20 @@ def _tone_color(tone: str):
         "warn": AppKit.NSColor.systemOrangeColor(),
         "hot": AppKit.NSColor.systemRedColor(),
     }.get(tone, AppKit.NSColor.secondaryLabelColor())
+
+
+def _reset_color(tone: str):
+    """The countdown sits below its window name, until it starts to matter.
+
+    A reset eight hours out on a bucket nobody is near is furniture, so it
+    draws in the faintest label colour AppKit has. _reset_tone upstream turns
+    it a real colour only once the bucket is nearly spent, which is the point
+    at which "when do I get it back" becomes the number being read.
+    """
+    import AppKit
+    if tone == "dim":
+        return AppKit.NSColor.tertiaryLabelColor()
+    return _tone_color(tone)
 
 
 def _text(s: str, size: float, weight, color, mono_digits: bool = False):
@@ -136,8 +153,27 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
     # text in that hue, so the bar and the list agree on who is paying. The
     # text colour depends on the appearance, so it is chosen inside draw().
     wash = chip_color.colorWithAlphaComponent_(0.12 if dim else 0.22)
-    captions = [_text(c.caption, CAPTION_SIZE, AppKit.NSFontWeightMedium, secondary)
-                for c in cells]
+
+    def head(c: Cell):
+        """A window's name and its countdown, and how wide the pair is.
+
+        The countdown can be wider than the battery under it (a five-letter
+        model name next to 45m), so the cell takes the wider of the two and
+        centres the narrower one in it. Nothing is clipped and the columns
+        stay square.
+        """
+        color = _reset_color(c.reset_tone)
+        if dim:
+            color = color.colorWithAlphaComponent_(0.6)
+        cap = _text(c.caption, CAPTION_SIZE, AppKit.NSFontWeightMedium,
+                    secondary.colorWithAlphaComponent_(0.6) if dim else secondary)
+        res = (_text(f"\u21bb{c.reset}", CAPTION_SIZE, AppKit.NSFontWeightRegular,
+                     color, mono_digits=True) if c.reset else None)
+        w = cap.size().width + (RESET_GAP + res.size().width if res else 0)
+        return cap, res, w
+
+    battery_w = BATTERY_W + 1 + NUB_W
+    heads = [head(c) for c in cells]
 
     def name_text():
         ink = _ink(chip_color)
@@ -145,8 +181,8 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
                      ink.colorWithAlphaComponent_(0.6) if dim else ink)
 
     chip_w = name_text().size().width + 2 * CHIP_PAD
-    cell_w = BATTERY_W + 1 + NUB_W
-    width = 1 + chip_w + len(cells) * (GAP + cell_w) + 1
+    widths = [max(battery_w, w) for _, _, w in heads]
+    width = 1 + chip_w + sum(GAP + w for w in widths) + 1
 
     def draw(_rect) -> bool:
         x = 1.0
@@ -156,11 +192,14 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
         sz = name_str.size()
         name_str.drawAtPoint_(AppKit.NSMakePoint(x + CHIP_PAD, (HEIGHT - sz.height) / 2))
         x += chip_w
-        for cap, cell in zip(captions, cells):
+        for (cap, res, head_w), cell_w, cell in zip(heads, widths, cells):
             x += GAP
-            cs = cap.size()
-            cap.drawAtPoint_(AppKit.NSMakePoint(x + (BATTERY_W - cs.width) / 2, CAPTION_Y))
-            _draw_battery(x, cell, dim)
+            hx = x + (cell_w - head_w) / 2
+            cap.drawAtPoint_(AppKit.NSMakePoint(hx, CAPTION_Y))
+            if res is not None:
+                res.drawAtPoint_(AppKit.NSMakePoint(
+                    hx + cap.size().width + RESET_GAP, CAPTION_Y))
+            _draw_battery(x + (cell_w - battery_w) / 2, cell, dim)
             x += cell_w
         return True
 
