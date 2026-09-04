@@ -141,6 +141,22 @@ def token_account(resp: dict) -> Optional[str]:
     return acct.get("email_address") or acct.get("email")
 
 
+def carry_identity(config_dir: str, old_fp: Optional[str], new_fp: Optional[str]) -> None:
+    """Move a cached identity onto a rotated credential.
+
+    Refreshing a token never changes whose token it is, so re-asking the server
+    after every rotation would be pure waste. Only move an entry that really
+    described the generation we just spent.
+    """
+    if not old_fp or not new_fp or old_fp == new_fp:
+        return
+    store = _cache_read(IDENTITY_CACHE)
+    key = os.path.abspath(config_dir)
+    if (store.get(key) or {}).get("fp") == old_fp:
+        store[key]["fp"] = new_fp
+        _cache_write(store, IDENTITY_CACHE)
+
+
 def credential_dirs() -> list[str]:
     """Every config dir that may hold a copy of a login: slots and contexts."""
     seen, out = set(), []
@@ -177,7 +193,9 @@ def propagate(spent: Optional[str], resp: dict, skip: str) -> list[str]:
                 cur = keychain.read_credentials(d)
                 if fingerprint(cur) != spent:
                     continue  # it moved on while we waited
-                keychain.write_credentials(d, _apply(cur, resp))
+                rotated = _apply(cur, resp)
+                keychain.write_credentials(d, rotated)
+                carry_identity(d, spent, fingerprint(rotated))
                 moved.append(d)
         except (locks.LockBusy, RuntimeError):
             continue          # the next pass finds it still spent and retries
@@ -216,9 +234,38 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
                 return rotated
     except locks.LockBusy:
         return blob                       # Claude Code is mid-refresh; try later
-    if fingerprint(rotated) != spent:
+    new_fp = fingerprint(rotated)
+    if new_fp != spent:
+        carry_identity(config_dir, spent, new_fp)
         propagate(spent, resp, skip=config_dir)
     return rotated
+
+
+def profile_result(token: Optional[str]) -> tuple[dict, Optional[str]]:
+    """Account facts for a token, and why the lookup failed when it did.
+
+    The error matters more than the facts. "rejected" means the server refused
+    the token, which is the only evidence that a login is actually gone.
+    "transient" is a rate limit or a network problem and says nothing about the
+    login, so it must never be allowed to look like one.
+    """
+    if not token:
+        return {}, "no_token"
+    try:
+        data = _get("/api/oauth/profile", token)
+    except urllib.error.HTTPError as e:
+        return {}, "rejected" if e.code in (401, 403) else "transient"
+    except Exception:
+        return {}, "transient"
+    account = data.get("account") or {}
+    org = data.get("organization") or {}
+    tier = org.get("rate_limit_tier") or ""
+    label = " ".join(w.title() if w.isalpha() else w
+                     for w in tier.replace("default_claude_", "").split("_") if w)
+    if not label:
+        label = "Max" if account.get("has_claude_max") else "Pro" if account.get("has_claude_pro") else ""
+    return {"email": account.get("email"), "plan": label or None,
+            "extra_usage": org.get("has_extra_usage_enabled")}, None
 
 
 def profile(token: Optional[str]) -> dict:
@@ -229,21 +276,42 @@ def profile(token: Optional[str]) -> dict:
     stale: an account upgraded after signing in still reports its old tier
     there (observed: blob said max_5x while the account was really max_20x).
     """
-    if not token:
-        return {}
-    try:
-        data = _get("/api/oauth/profile", token)
-    except Exception:
-        return {}
-    account = data.get("account") or {}
-    org = data.get("organization") or {}
-    tier = org.get("rate_limit_tier") or ""
-    label = " ".join(w.title() if w.isalpha() else w
-                     for w in tier.replace("default_claude_", "").split("_") if w)
-    if not label:
-        label = "Max" if account.get("has_claude_max") else "Pro" if account.get("has_claude_pro") else ""
-    return {"email": account.get("email"), "plan": label or None,
-            "extra_usage": org.get("has_extra_usage_enabled")}
+    return profile_result(token)[0]
+
+
+IDENTITY_CACHE = os.path.join(ACCOUNTS_DIR, ".identity.json")
+
+
+def identity(config_dir: str, blob: Optional[dict]) -> tuple[dict, Optional[str]]:
+    """Who a config dir is signed in as, asked at most once per credential.
+
+    An account's email and plan cannot change while its credential does not, so
+    the answer is cached against the credential's fingerprint and the endpoint
+    is only asked when that fingerprint moves. In the steady state this costs
+    no requests at all, which is the point: identity used to be re-fetched for
+    every account on every refresh, and one rate-limited burst made all five
+    accounts report a dead login at once.
+
+    A failed lookup falls back to the last known answer. Only a token the
+    server actually rejected returns an error.
+    """
+    if not blob:
+        return {}, "no_credential"
+    fp = fingerprint(blob)
+    store = _cache_read(IDENTITY_CACHE)
+    hit = store.get(os.path.abspath(config_dir)) or {}
+    if fp and hit.get("fp") == fp and hit.get("email"):
+        return {"email": hit["email"], "plan": hit.get("plan")}, None
+    info, err = profile_result(blob.get("accessToken"))
+    if info.get("email"):
+        store[os.path.abspath(config_dir)] = {"fp": fp, "email": info["email"],
+                                              "plan": info.get("plan"), "at": time.time()}
+        _cache_write(store, IDENTITY_CACHE)
+        return info, None
+    if err == "transient" and hit.get("email"):
+        # Say nothing about the login: we simply could not ask right now.
+        return {"email": hit["email"], "plan": hit.get("plan")}, None
+    return {}, err
 
 
 def whoami(token: Optional[str]) -> Optional[str]:
@@ -358,21 +426,22 @@ USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
 _BACKOFF_MIN, _BACKOFF_MAX = 300, 900
 
 
-def _cache_read() -> dict:
+def _cache_read(path: str = "") -> dict:
     try:
-        with open(USAGE_CACHE) as f:
+        with open(path or USAGE_CACHE) as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
 
 
-def _cache_write(store: dict) -> None:
+def _cache_write(store: dict, path: str = "") -> None:
+    path = path or USAGE_CACHE
     try:
         os.makedirs(ACCOUNTS_DIR, exist_ok=True)
-        tmp = USAGE_CACHE + ".tmp"
+        tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(store, f)
-        os.replace(tmp, USAGE_CACHE)
+        os.replace(tmp, path)
     except OSError:
         pass
 
@@ -466,7 +535,7 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     for cand in dict.fromkeys(c for c in candidates if c):
         # never refresh a context: a session may be running there
         blob = live_blob(cand) if os.path.abspath(cand) in slots else keychain.read_credentials(cand)
-        if blob and (whoami(blob.get("accessToken")) or "").lower() == email.lower():
+        if blob and (identity(cand, blob)[0].get("email") or "").lower() == email.lower():
             return blob
     return None
 
@@ -485,22 +554,24 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
     slot = slot_dir(name)
     acct = Account(name=name, slot=slot, checked_at=time.time())
     blob = live_blob(slot)
-    info = profile(blob.get("accessToken")) if blob else {}
+    info, err = identity(slot, blob)
     email = info.get("email")
-    if not email:
-        # A slot whose token was rotated elsewhere is stranded, not signed out:
-        # the live successor is sitting in whichever context did the rotating.
+    if not email and err in ("no_credential", "rejected"):
+        # Positively refused, so this slot is stranded rather than signed out:
+        # the live successor is sitting in whichever dir did the rotating.
         healed = find_live_blob(recorded_email(slot))
         if healed:
             adopt(slot, healed)
             blob = healed
-            info = profile(healed.get("accessToken"))
+            info, err = identity(slot, healed)
             email = info.get("email") or recorded_email(slot)
-    if not blob:
-        acct.error = "login expired" if keychain.read_credentials(slot) else "not signed in"
-        return acct
     if not email:
-        acct.error = "login expired"
+        raw = keychain.read_credentials(slot)
+        # "expired" is a claim about the login and needs the server to have
+        # said so. A rate limit or a dead network proves nothing about it.
+        acct.error = ("not signed in" if not raw
+                      else "login expired" if err in ("rejected", "no_credential")
+                      else "can't reach Anthropic")
         return acct
     acct.email = email
     acct.plan = info.get("plan") or blob.get("subscriptionType")
@@ -670,7 +741,7 @@ class Context:
     @property
     def email(self) -> str:
         blob = keychain.read_credentials(self.path)
-        return (whoami(blob.get("accessToken")) if blob else None) or recorded_email(self.path)
+        return (identity(self.path, blob)[0].get("email") if blob else "") or recorded_email(self.path)
 
 
 def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
@@ -693,7 +764,7 @@ def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, 
             out[path] = ""
             continue
         out[path] = (by_fp.get(fingerprint(blob))
-                     or whoami(blob.get("accessToken"))
+                     or identity(path, blob)[0].get("email")
                      or recorded_email(path))
     return out
 
@@ -850,7 +921,7 @@ def isolate(cwd: str) -> tuple[bool, str]:
     blob = keychain.read_credentials(current.path)
     _seed_context(ctx_path, blob)                       # start where it already was
     _write_route(root, ctx_path)
-    who = whoami(blob.get("accessToken")) if blob else None
+    who = identity(current.path, blob)[0].get("email") if blob else None
     return True, (f"{root}\n  own context: {ctx_path.replace(HOME, '~')}"
                   f"\n  account    : {who or 'unknown'}")
 
@@ -941,12 +1012,13 @@ def swap(account: str, context: Context) -> tuple[bool, str]:
         account = resolve_account(account)
     except UnknownAccount as e:
         return False, str(e)
-    blob = live_blob(slot_dir(account))
-    email = whoami(blob.get("accessToken")) if blob else None
+    slot = slot_dir(account)
+    blob = live_blob(slot)
+    email = identity(slot, blob)[0].get("email")
     if not email:
-        healed = find_live_blob(recorded_email(slot_dir(account)))
+        healed = find_live_blob(recorded_email(slot))
         if healed:
-            blob, email = healed, whoami(healed.get("accessToken"))
+            blob, email = healed, identity(slot, healed)[0].get("email")
     if not blob or not email:
         return False, f"{account} has no usable login (add it again)"
     before = context.email or "unknown"
