@@ -393,11 +393,6 @@ class Limit:
     label: str
     percent: float
     resets_at: Optional[str]
-    # Whether this window is being enforced at all. The server says so per
-    # window, and right now it says no for every weekly one on every account.
-    # A window that is not in force cannot be spent, so a full bar drawn for it
-    # is a claim about a constraint that does not currently exist.
-    active: bool = True
 
     @property
     def resets_in(self) -> str:
@@ -534,8 +529,7 @@ def _parse_limits(data: dict) -> list[Limit]:
                     pct, resets = 0.0, None
             except ValueError:
                 pass
-        out.append(Limit(kind=kind, label=label, percent=pct, resets_at=resets,
-                         active=bool(lim.get("is_active", True))))
+        out.append(Limit(kind=kind, label=label, percent=pct, resets_at=resets))
     return out
 
 
