@@ -129,6 +129,15 @@ rotated token to every other copy of the same generation before returning. The
 lock protocol was documented by [claude-swap](https://github.com/realiti4/claude-swap),
 which verified it against the Claude Code 2.1.218 bundle.
 
+Identity is cached against the credential's fingerprint, so an account's email
+and plan are looked up once per credential rather than once per refresh. In the
+steady state that costs no requests at all. It matters because the old code
+re-fetched every account's identity on every refresh and treated any failure as
+a dead login: one rate-limited burst made all five accounts read "login
+expired" at once. Now only a token the server actually rejects (401/403) says
+anything about the login; a rate limit or a network failure falls back to the
+last known answer.
+
 Usage reads are cached and backed off. `/api/oauth/usage` is rate limited per
 account and running sessions poll it too, so the busiest account is exactly the
 one whose row fails to load. A 429 serves the last payload instead of blanking
