@@ -212,6 +212,11 @@ def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
 
+def _age(seconds: float) -> str:
+    mins = int(seconds // 60)
+    return f"{mins}m" if mins < 60 else f"{mins // 60}h"
+
+
 def _short(email: Optional[str]) -> str:
     return (email or "?").split("@")[0]
 
@@ -249,28 +254,28 @@ class ManagerApp(rumps.App):
         except Exception:
             pass
 
-    def _collect(self) -> Snapshot:
+    def _collect(self, force: bool = False) -> Snapshot:
         snap = Snapshot()
-        snap.accounts = [core.load_account(n) for n in core.account_names()]
+        snap.accounts = [core.load_account(n, force=force) for n in core.account_names()]
         snap.contexts = core.contexts()
-        snap.context_email = {c.path: (c.email or "") for c in snap.contexts}
+        snap.context_email = core.context_owners([c.path for c in snap.contexts], snap.accounts)
         snap.projects = projects.recent(PROJECT_WINDOW_MIN)
         snap.taken_at = time.time()
         return snap
 
-    def _worker(self) -> None:
+    def _worker(self, force: bool = False) -> None:
         try:
-            snap = self._collect()
+            snap = self._collect(force)
             with self._lock:
                 self._pending = snap
         finally:
             self._busy = False
 
-    def _on_refresh_tick(self, _timer) -> None:
+    def _on_refresh_tick(self, _timer, force: bool = False) -> None:
         if self._busy:
             return
         self._busy = True
-        threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._worker, args=(force,), daemon=True).start()
 
     def _on_sync_tick(self, _timer) -> None:
         with self._lock:
@@ -280,7 +285,7 @@ class ManagerApp(rumps.App):
             self._rebuild()
 
     def refresh_now(self, _sender) -> None:
-        self._on_refresh_tick(None)
+        self._on_refresh_tick(None, force=_sender is not None)
 
     # ------------------------------------------------------------------ menu
 
@@ -318,7 +323,7 @@ class ManagerApp(rumps.App):
         return f"{ICON} {_short(acct.email)} {_pct(acct.session_pct)}·{_pct(acct.weekly_pct)}"
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
-        if not acct.ok:
+        if not acct.signed_in:
             item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
             _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
                                 (f"  {acct.error}", "hot")])
@@ -342,6 +347,10 @@ class ManagerApp(rumps.App):
         segments += _bucket(fable.label if fable else "model", fable)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
+        if acct.error:
+            segments.append((f"   {acct.error}", "dim"))
+        elif acct.stale:
+            segments.append((f"   {_age(acct.usage_age)} old", "dim"))
         _apply_style(item, segments)
 
         # The row already carries every bucket, so the submenu is for identity

@@ -15,6 +15,7 @@ rate-limit tier and behaves exactly like a real login.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import time
@@ -23,7 +24,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from . import keychain
+from . import keychain, locks
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
@@ -60,45 +61,164 @@ def _get(path: str, token: str, timeout: int = 20) -> dict:
 
 # --------------------------------------------------------------------------- tokens
 
-def refresh(blob: dict) -> Optional[dict]:
-    """Exchange the refresh token, preserving every other field of the blob."""
+def fingerprint(blob: Optional[dict]) -> Optional[str]:
+    """Identity of a credential GENERATION, from its refresh token.
+
+    Two config dirs showing the same fingerprint hold the same copy of one
+    login, so a rotation in either one strands the other.
+    """
+    token = (blob or {}).get("refreshToken")
+    return hashlib.sha256(token.encode()).hexdigest()[:16] if token else None
+
+
+def expiring(blob: Optional[dict], margin: float = 120) -> bool:
+    exp = (blob or {}).get("expiresAt")
+    return bool(exp) and exp / 1000 < time.time() + margin
+
+
+def _apply(blob: dict, resp: dict) -> dict:
+    """A blob carrying the tokens from a grant response, other fields intact."""
+    out = dict(blob)
+    out["accessToken"] = resp.get("access_token") or blob.get("accessToken")
+    if resp.get("refresh_token"):
+        out["refreshToken"] = resp["refresh_token"]
+    out["expiresAt"] = int((time.time() + resp.get("expires_in", 3600)) * 1000)
+    if resp.get("scope"):
+        out["scopes"] = resp["scope"].split()
+    return out
+
+
+def refresh(blob: dict) -> tuple[Optional[dict], Optional[str]]:
+    """Exchange a refresh token. Returns (grant response, error).
+
+    The error is classified because the two failures need opposite handling. A
+    network blip must never be read as a dead login: the token is still good
+    and the next pass will use it. Only the server explicitly rejecting the
+    grant (RFC 6749 invalid_grant) proves the refresh lineage is spent, which
+    is what happens when something else already rotated this token.
+
+    The verdict comes from the top-level `error` member of the JSON body, not
+    from scanning the text: the marker can appear inside another envelope, and
+    calling a live token dead costs the user a login.
+    """
     if not blob.get("refreshToken"):
-        return None
+        return None, "no_refresh_token"
+    last = "transient"
     for url in TOKEN_URLS:
         try:
-            resp = _post(url, {"grant_type": "refresh_token",
+            return _post(url, {"grant_type": "refresh_token",
                                "refresh_token": blob["refreshToken"],
-                               "client_id": CLIENT_ID})
+                               "client_id": CLIENT_ID}, timeout=15), None
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode(errors="replace")
+            except Exception:
+                pass
+            if e.code in (400, 401, 403):
+                try:
+                    err = json.loads(body).get("error")
+                except (ValueError, AttributeError):
+                    err = None
+                if err == "invalid_grant":
+                    return None, "invalid_grant"
+                if err == "invalid_client":
+                    return None, "invalid_client"   # our client, not this login
         except Exception:
+            pass
+    return None, last
+
+
+def token_account(resp: dict) -> Optional[str]:
+    """The email a grant response names, when it names one.
+
+    Identity for free, and from the same exchange that produced the token, so
+    it cannot describe a different account than the one we just wrote.
+    """
+    acct = resp.get("account")
+    if not isinstance(acct, dict):
+        return None
+    return acct.get("email_address") or acct.get("email")
+
+
+def credential_dirs() -> list[str]:
+    """Every config dir that may hold a copy of a login: slots and contexts."""
+    seen, out = set(), []
+    for d in [slot_dir(n) for n in account_names()] + [c.path for c in contexts()]:
+        key = os.path.abspath(d)
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+def propagate(spent: Optional[str], resp: dict, skip: str) -> list[str]:
+    """Hand a rotated token to every other copy of the same credential.
+
+    A refresh token is single use: rotating it in one config dir spends it
+    everywhere. Any other dir still holding the spent generation is one refresh
+    away from an invalid_grant, which is what a running Claude Code session
+    reports as being signed out. So a rotation is not finished until every copy
+    has the successor.
+
+    Only dirs whose stored fingerprint still matches the spent generation are
+    touched, so a dir holding some other login is never overwritten.
+    """
+    if not spent:
+        return []
+    moved, skip_abs = [], os.path.abspath(skip)
+    for d in credential_dirs():
+        if os.path.abspath(d) == skip_abs:
             continue
-        out = dict(blob)
-        out["accessToken"] = resp.get("access_token") or blob["accessToken"]
-        if resp.get("refresh_token"):
-            out["refreshToken"] = resp["refresh_token"]
-        out["expiresAt"] = int((time.time() + resp.get("expires_in", 3600)) * 1000)
-        return out
-    return None
+        if fingerprint(keychain.read_credentials(d)) != spent:
+            continue          # cheap check first: most dirs are a different login
+        try:
+            with locks.credentials(d, timeout=3.0):
+                cur = keychain.read_credentials(d)
+                if fingerprint(cur) != spent:
+                    continue  # it moved on while we waited
+                keychain.write_credentials(d, _apply(cur, resp))
+                moved.append(d)
+        except (locks.LockBusy, RuntimeError):
+            continue          # the next pass finds it still spent and retries
+    return moved
 
 
 def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
     """Usable credentials for a config dir, refreshed in place when stale.
 
-    Only ever refresh a slot. Refreshing a context could rotate the token out
-    from under a session running there.
+    The refresh runs under Claude Code's own locks and re-reads the credential
+    once held, the same double check Claude Code does, so our refresh and a
+    session's refresh can never both spend the same token.
+
+    Returns None only when there is nothing usable: no credential at all, or a
+    refresh the server rejected. A network failure returns the stored blob,
+    because it is probably still valid.
     """
     blob = keychain.read_credentials(config_dir)
-    if not blob:
-        return None
-    expires = blob.get("expiresAt")
-    if allow_refresh and expires and expires / 1000 < time.time() + 120:
-        newer = refresh(blob)
-        if newer:
+    if not blob or not allow_refresh or not expiring(blob):
+        return blob
+    try:
+        with locks.credentials(config_dir):
+            current = keychain.read_credentials(config_dir) or blob
+            if not expiring(current):
+                return current            # somebody else refreshed while we waited
+            spent = fingerprint(current)
+            resp, err = refresh(current)
+            if not resp:
+                # invalid_grant means this copy is stranded, not that the
+                # account is gone: a peer dir may hold the live successor.
+                return None if err == "invalid_grant" else current
+            rotated = _apply(current, resp)
             try:
-                keychain.write_credentials(config_dir, newer)
+                keychain.write_credentials(config_dir, rotated)
             except RuntimeError:
-                pass
-            return newer
-    return blob
+                return rotated
+    except locks.LockBusy:
+        return blob                       # Claude Code is mid-refresh; try later
+    if fingerprint(rotated) != spent:
+        propagate(spent, resp, skip=config_dir)
+    return rotated
 
 
 def profile(token: Optional[str]) -> dict:
@@ -154,6 +274,16 @@ class Account:
     limits: list[Limit] = field(default_factory=list)
     error: Optional[str] = None
     checked_at: float = 0.0
+    usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
+
+    @property
+    def usage_age(self) -> float:
+        return time.time() - self.usage_at if self.usage_at else 0.0
+
+    @property
+    def stale(self) -> bool:
+        """True once the usage numbers are old enough to warn about."""
+        return self.usage_age > 420
 
     def limit(self, kind: str) -> Optional[Limit]:
         return next((l for l in self.limits if l.kind == kind), None)
@@ -171,6 +301,12 @@ class Account:
     @property
     def ok(self) -> bool:
         return self.email is not None and self.error is None
+
+    @property
+    def signed_in(self) -> bool:
+        """Identity is confirmed. Usage may still be missing: a busy account
+        rate limits the usage endpoint, and that is not a login problem."""
+        return self.email is not None
 
 
 def human_delta(iso: Optional[str]) -> str:
@@ -216,6 +352,66 @@ def _parse_limits(data: dict) -> list[Limit]:
     return out
 
 
+# --------------------------------------------------------------------------- usage cache
+
+USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
+_BACKOFF_MIN, _BACKOFF_MAX = 300, 900
+
+
+def _cache_read() -> dict:
+    try:
+        with open(USAGE_CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _cache_write(store: dict) -> None:
+    try:
+        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+        tmp = USAGE_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(store, f)
+        os.replace(tmp, USAGE_CACHE)
+    except OSError:
+        pass
+
+
+def _usage(name: str, token: str, force: bool = False) -> tuple[list[Limit], float, Optional[str]]:
+    """Usage for one account: cached, and backed off after a 429.
+
+    /api/oauth/usage is rate limited per account, and every running Claude Code
+    session polls it too. So the account doing the most work is exactly the one
+    whose row we cannot fetch, and a 429 must never blank it. Serve the last
+    payload instead and stop asking for a while. Reset times in the payload are
+    absolute, so a cached row still counts down correctly and still rolls a
+    finished window to 0%.
+
+    Returns (limits, when they were fetched, error). An error means there is no
+    cached payload either.
+    """
+    store = _cache_read()
+    entry = store.get(name) or {}
+    cached, at = entry.get("data"), entry.get("at", 0.0)
+    now = time.time()
+    if cached and not force and now < entry.get("retry_after", 0):
+        return _parse_limits(cached), at, None
+    try:
+        data = _get("/api/oauth/usage", token)
+    except Exception as e:
+        code = getattr(e, "code", None)
+        if code == 429:
+            wait = min(max(entry.get("backoff", 0) * 2, _BACKOFF_MIN), _BACKOFF_MAX)
+            store[name] = {**entry, "backoff": wait, "retry_after": now + wait}
+            _cache_write(store)
+        if cached:
+            return _parse_limits(cached), at, None
+        return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
+    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0}
+    _cache_write(store)
+    return _parse_limits(data), now, None
+
+
 # --------------------------------------------------------------------------- accounts
 
 def slot_dir(name: str) -> str:
@@ -225,7 +421,8 @@ def slot_dir(name: str) -> str:
 def account_names() -> list[str]:
     try:
         return sorted(n for n in os.listdir(ACCOUNTS_DIR)
-                      if os.path.isdir(os.path.join(ACCOUNTS_DIR, n)) and not n.startswith("."))
+                      if os.path.isdir(os.path.join(ACCOUNTS_DIR, n))
+                      and not n.startswith(".") and not n.endswith(".lock"))
     except OSError:
         return []
 
@@ -274,24 +471,33 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     return None
 
 
-def load_account(name: str, with_usage: bool = True) -> Account:
+def adopt(config_dir: str, blob: dict) -> bool:
+    """Write a credential into a config dir under Claude Code's locks."""
+    try:
+        with locks.credentials(config_dir):
+            keychain.write_credentials(config_dir, blob)
+        return True
+    except (locks.LockBusy, RuntimeError):
+        return False
+
+
+def load_account(name: str, with_usage: bool = True, force: bool = False) -> Account:
     slot = slot_dir(name)
     acct = Account(name=name, slot=slot, checked_at=time.time())
     blob = live_blob(slot)
     info = profile(blob.get("accessToken")) if blob else {}
     email = info.get("email")
     if not email:
+        # A slot whose token was rotated elsewhere is stranded, not signed out:
+        # the live successor is sitting in whichever context did the rotating.
         healed = find_live_blob(recorded_email(slot))
         if healed:
-            try:
-                keychain.write_credentials(slot, healed)
-            except RuntimeError:
-                pass
+            adopt(slot, healed)
             blob = healed
             info = profile(healed.get("accessToken"))
             email = info.get("email") or recorded_email(slot)
     if not blob:
-        acct.error = "not signed in"
+        acct.error = "login expired" if keychain.read_credentials(slot) else "not signed in"
         return acct
     if not email:
         acct.error = "login expired"
@@ -299,12 +505,7 @@ def load_account(name: str, with_usage: bool = True) -> Account:
     acct.email = email
     acct.plan = info.get("plan") or blob.get("subscriptionType")
     if with_usage:
-        try:
-            acct.limits = _parse_limits(_get("/api/oauth/usage", blob["accessToken"]))
-        except urllib.error.HTTPError as e:
-            acct.error = f"usage HTTP {e.code}"
-        except Exception as e:
-            acct.error = str(e)[:60]
+        acct.limits, acct.usage_at, acct.error = _usage(name, blob["accessToken"], force)
     return acct
 
 
@@ -472,6 +673,31 @@ class Context:
         return (whoami(blob.get("accessToken")) if blob else None) or recorded_email(self.path)
 
 
+def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
+    """Which account each context is signed in as, without asking the API.
+
+    A context holds a copy of an account's credential, so equal refresh tokens
+    already identify it. Only a context matching no account costs a request,
+    which keeps the panel honest while the API is rate limiting us: a failed
+    lookup used to just drop the "in use by" mark.
+    """
+    by_fp: dict[str, str] = {}
+    for a in accts:
+        fp = fingerprint(keychain.read_credentials(a.slot))
+        if fp and a.email:
+            by_fp[fp] = a.email
+    out: dict[str, str] = {}
+    for path in paths:
+        blob = keychain.read_credentials(path)
+        if not blob:
+            out[path] = ""
+            continue
+        out[path] = (by_fp.get(fingerprint(blob))
+                     or whoami(blob.get("accessToken"))
+                     or recorded_email(path))
+    return out
+
+
 def _routes() -> tuple[dict[str, str], list[tuple[str, str]]]:
     named: dict[str, str] = {}
     paths: list[tuple[str, str]] = []
@@ -504,6 +730,10 @@ def contexts() -> list[Context]:
     try:
         for n in sorted(os.listdir(CTX_DIR)):
             d = os.path.join(CTX_DIR, n)
+            # Claude Code's legacy credential lock is a sibling directory
+            # (`<config dir>.lock`), so it briefly looks like another context.
+            if n.endswith(".lock") or n.startswith("."):
+                continue
             if os.path.isdir(d) and os.path.abspath(d) not in seen:
                 out.append(Context(name=n, path=d))
                 seen.add(os.path.abspath(d))
@@ -612,8 +842,14 @@ def swap(account: str, context: Context) -> tuple[bool, str]:
     if not blob or not email:
         return False, f"{account} has no usable login (add it again)"
     before = context.email or "unknown"
+    # Under Claude Code's own locks: a swap that lands inside a session's
+    # refresh window is overwritten by the OLD account's refreshed token, and
+    # the swap looks like it silently did nothing.
     try:
-        keychain.write_credentials(context.path, blob)
+        with locks.credentials(context.path):
+            keychain.write_credentials(context.path, blob)
+    except locks.LockBusy:
+        return False, "Claude Code is refreshing credentials right now; try again in a few seconds"
     except RuntimeError as e:
         return False, str(e)
     try:

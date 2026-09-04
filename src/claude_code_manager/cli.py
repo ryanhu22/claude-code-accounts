@@ -18,18 +18,22 @@ def _bar(pct: float, width: int = 20) -> str:
 
 def cmd_list(_args) -> int:
     ctxs = core.contexts()
-    emails = {c.path: (c.email or "") for c in ctxs}
-    for name in core.account_names():
-        acct = core.load_account(name)
+    accts = [core.load_account(n) for n in core.account_names()]
+    emails = core.context_owners([c.path for c in ctxs], accts)
+    for acct in accts:
         used = [c.name for c in ctxs if emails.get(c.path, "").lower() == (acct.email or "").lower()]
         head = f"\033[1m{acct.name}{X}"
-        if acct.ok:
+        if acct.signed_in:
             head += f"  {D}{acct.email} · {acct.plan}{X}"
             if used:
                 head += f"  {G}<- in use by {', '.join(used)}{X}"
+            if acct.stale:
+                head += f"  {Y}(usage {int(acct.usage_age // 60)}m old){X}"
+        if acct.error:
+            head += f"  {Y}{acct.error}{X}"
         print(head)
-        if not acct.ok:
-            print(f"  {Y}{acct.error}{X}  (ccm add {acct.name})\n")
+        if not acct.signed_in:
+            print(f"  (ccm add {acct.name})\n")
             continue
         for lim in acct.limits:
             when = f"{D}resets {lim.resets_in}{X}" if lim.resets_at else f"{D}idle{X}"
