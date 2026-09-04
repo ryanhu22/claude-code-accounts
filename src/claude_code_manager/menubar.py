@@ -32,8 +32,9 @@ ICON = "⇄"
 # title cannot colour the bucket that is nearly spent.
 BAR_W = 10
 NAME_W = 14
-REPO_W = 20
+REPO_W = 18
 DETAIL_W = 30
+CTX_BAR_W = 6
 
 
 def _fit(text: str, width: int) -> str:
@@ -211,6 +212,21 @@ def _pct(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:.0f}%"
 
 
+def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
+    """How full this session's context window is.
+
+    Read from the last request the session made, so it answers the question a
+    long conversation actually raises: is this one about to compact?
+    """
+    pct = sess.context_pct
+    if pct is None:
+        return [(" " * (CTX_BAR_W + 5), "dim")]
+    filled = max(0, min(CTX_BAR_W, round(pct / 100 * CTX_BAR_W)))
+    tone = _tone(pct)
+    return [(" ", "dim"), (FULL * filled, tone), (EMPTY * (CTX_BAR_W - filled), "dim"),
+            (f"{pct:3.0f}%", tone)]
+
+
 def _status_tone(status: str) -> str:
     """Working sessions stand out; idle ones stay quiet."""
     return {"busy": "ok", "shell": "warn"}.get(status, "dim")
@@ -264,7 +280,8 @@ class ManagerApp(rumps.App):
         snap.accounts = [core.load_account(n, force=force) for n in core.account_names()]
         snap.contexts = core.contexts()
         snap.context_email = core.context_owners([c.path for c in snap.contexts], snap.accounts)
-        snap.sessions = sessions.live(core.credential_dirs(), with_git=True)
+        snap.sessions = sessions.live(core.credential_dirs(), with_git=True,
+                                      with_transcript=True)
         snap.pins = core.term_pins()
         snap.taken_at = time.time()
         return snap
@@ -415,16 +432,17 @@ class ManagerApp(rumps.App):
                            path=sess.env_config_dir)
         head = f"  {sess.label} — {acct_name} · {sess.status or sess.kind}"
         item = rumps.MenuItem(head)
-        # Fixed columns: pin mark, chip, repo, branch, status, idle age. The
-        # branch is what separates sibling worktrees, so it carries the
-        # emphasis and the repeated repo name is dimmed.
+        # Fixed columns: pin mark, chip, repo, what the session is, context
+        # bar, status, idle age. The repo repeats down the list, so the
+        # emphasis goes on the column that tells the rows apart.
         _apply_style(item, [
             ("\u25c9 " if pinned else "  ", "text" if pinned else "dim"),
             _chip(acct_name, NAME_W),
             ("  ", "dim"),
-            (_fit(sess.repo, REPO_W), "dim" if sess.is_worktree else "text"),
+            (_fit(sess.repo, REPO_W), "dim"),
             (" ", "dim"),
-            (_fit(sess.detail or sess.label, DETAIL_W), "text" if sess.is_worktree else "dim"),
+            (_fit(sess.detail or sess.label, DETAIL_W), "text"),
+            *_context_bar(sess),
             (f" {(sess.status or sess.kind):<6}", _status_tone(sess.status)),
             (f"{_age(sess.idle_for):>6}", "dim"),
         ])
@@ -432,6 +450,12 @@ class ManagerApp(rumps.App):
         where = rumps.MenuItem(sess.cwd.replace(core.HOME, "~") or "?", callback=None)
         _apply_style(where, [("  ", "dim"), (sess.cwd.replace(core.HOME, "~"), "dim")])
         item.add(where)
+        if sess.context_tokens:
+            note = (f"{sess.context_tokens:,} of {sess.window:,} context tokens"
+                    f" · {sess.model or 'unknown model'}")
+            ctx_item = rumps.MenuItem(note, callback=None)
+            _apply_style(ctx_item, [("  ", "dim"), (note, "dim")])
+            item.add(ctx_item)
         item.add(rumps.separator)
 
         if sess.term_id:

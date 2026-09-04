@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from . import transcripts
+
 # A session file is only rewritten while its session lives, so a stale one is
 # just litter from a process that died without cleaning up.
 STALE_AFTER = 7 * 24 * 3600
@@ -41,7 +43,12 @@ class Session:
     updated_at: float = 0.0
     term_id: str = ""            # terminal tab, from the process environment
     env_config_dir: str = ""     # CLAUDE_CONFIG_DIR the process actually launched with
+    name_source: str = ""        # "user" when named deliberately, else "derived"
     branch: str = ""
+    title: str = ""              # Claude Code's own description of the conversation
+    context_tokens: int = 0
+    model: str = ""
+    context_pct: Optional[float] = None
 
     @property
     def is_worktree(self) -> bool:
@@ -57,20 +64,37 @@ class Session:
         return parts[-1] or self.cwd
 
     @property
+    def window(self) -> int:
+        return transcripts.window_for(self.model)
+
+    @property
+    def derived_name(self) -> bool:
+        """True when the name is Claude Code's placeholder, not a real one.
+
+        A derived name is the repo plus a few hex characters ("acme-ehr-9d"),
+        which says nothing at all once the repo is already its own column.
+        """
+        return self.name_source == "derived" or not self.name
+
+    @property
     def detail(self) -> str:
         """What tells this session apart from its siblings.
 
-        Worktrees of one repo differ by branch. Several sessions in the same
-        checkout share a branch, usually main, so there the name Claude Code
-        gave the session is the only thing that separates them; its repo
-        prefix is dropped because the repo column already says that.
+        Worktrees of one repo differ by branch, and that is also which worktree
+        you are looking at, so it wins there. Sessions sharing a checkout are
+        all on main instead, and are told apart by what they are about: the
+        name if one was chosen, otherwise the title Claude Code wrote for the
+        conversation.
         """
         if self.is_worktree:
             return self.branch or self.cwd.rstrip("/").split("/")[-1]
-        name, repo = self.name, self.repo
-        if name.lower().startswith(repo.lower() + "-"):
-            name = name[len(repo) + 1:]
-        return name or self.branch
+        if not self.derived_name:
+            name, repo = self.name, self.repo
+            if name.lower().startswith(repo.lower() + "-"):
+                name = name[len(repo) + 1:]
+            if name:
+                return name
+        return self.title or self.branch or self.name
 
     @property
     def interactive(self) -> bool:
@@ -139,6 +163,7 @@ def _read(path: str, config_dir: str) -> Optional[Session]:
         name=d.get("name") or "",
         kind=d.get("kind") or "",
         entrypoint=d.get("entrypoint") or "",
+        name_source=d.get("nameSource") or "",
         status=d.get("status") or "",
         started_at=(d.get("startedAt") or 0) / 1000,
         updated_at=(d.get("updatedAt") or d.get("startedAt") or 0) / 1000,
@@ -156,8 +181,18 @@ def branch_of(path: str) -> str:
     return name if name and name != "HEAD" else ""
 
 
+def transcript_roots(config_dirs: Iterable[str]) -> list[str]:
+    """The distinct projects/ trees behind a set of config dirs.
+
+    Contexts symlink projects/ back to ~/.claude so history stays in one place,
+    so resolving the link first keeps this to a single tree in practice.
+    """
+    roots = {os.path.realpath(os.path.join(d, "projects")) for d in config_dirs}
+    return sorted(r for r in roots if os.path.isdir(r))
+
+
 def live(config_dirs: Iterable[str], with_env: bool = True,
-         with_git: bool = False) -> list[Session]:
+         with_git: bool = False, with_transcript: bool = False) -> list[Session]:
     """Every running session across the given config dirs, newest first.
 
     A pid can appear in two registries when a session moved between config
@@ -179,6 +214,12 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
     if with_git:
         for s in out:
             s.branch = branch_of(s.cwd) if s.cwd else ""
+    if with_transcript:
+        roots = transcript_roots(config_dirs)
+        for s in out:
+            g = transcripts.digest(transcripts.find(s.session_id, roots))
+            s.title, s.context_tokens = g.title, g.context_tokens
+            s.model, s.context_pct = g.model, g.context_pct
     return sorted(out, key=lambda s: s.updated_at, reverse=True)
 
 

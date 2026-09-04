@@ -143,6 +143,23 @@ account and running sessions poll it too, so the busiest account is exactly the
 one whose row fails to load. A 429 serves the last payload instead of blanking
 the row; reset times in it are absolute, so a cached row still counts down.
 
+## What a session row says
+
+Claude Code names a session `<repo>-<hash>` until it has something better, and
+that hash says nothing once the repo is already its own column. So a row shows,
+in order of preference: the branch for a worktree (which is also *which*
+worktree), a name that was chosen deliberately, or the title Claude Code wrote
+for the conversation.
+
+Each row also carries a context bar: how full that session's context window is,
+taken from the last request it made. It answers the question a long
+conversation raises, which is whether this one is about to compact.
+
+Both come from a tail read of the session's transcript, cached against the
+file's size and mtime, so a refresh that changed nothing costs nothing. A tail
+that lands inside one oversized record (a pasted image, a large file read)
+escalates to a wider window rather than reporting nothing.
+
 ## Per-session accounts
 
 A login belongs to a config dir, so every session sharing one always bills to
