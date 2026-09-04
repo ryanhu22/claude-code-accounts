@@ -180,7 +180,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
         return "dim"
     if not lim.resets_at:
         return "ok"
-    if lim.percent < 85:
+    if lim.spent < 85:
         return "dim"
     try:
         dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
@@ -195,7 +195,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
 
 
 def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
-    pct = lim.percent if lim else None
+    pct = lim.spent if lim else None
     tone = _tone(pct)
     if pct is None:
         return [(f"  {label:>5} ", "dim"), (" " * BAR_W, "dim"), ("    —", "dim"),
@@ -208,8 +208,8 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         (f" {pct:3.0f}%", tone),
     ]
     if show_reset:
-        out.append((f" \u21bb{_compact_reset(lim.resets_at if lim else None):>4}",
-                    _reset_tone(lim)))
+        left = _compact_reset(lim.resets_at) if lim and not lim.over else "idle"
+        out.append((f" \u21bb{left:>4}", _reset_tone(lim)))
     return out
 
 
@@ -741,8 +741,9 @@ class ManagerApp(rumps.App):
         it belongs beside it rather than one click away. A window that has not
         started has nothing to count down, and says so by staying blank.
         """
-        pct = lim.percent if lim else None
-        reset = _compact_reset(lim.resets_at) if lim and lim.resets_at else ""
+        pct = lim.spent if lim else None
+        reset = (_compact_reset(lim.resets_at)
+                 if lim and lim.resets_at and not lim.over else "")
         return gauge.Cell(caption, pct, _tone(pct), reset, _reset_tone(lim))
 
     def _apply_title(self, snap: Snapshot) -> None:
