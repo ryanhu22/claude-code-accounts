@@ -1454,7 +1454,13 @@ class ManagerApp(rumps.App):
                 _set_icon(self._line(item, f"tab:{sess.pid}", "Take me to that tab",
                                      callback=self._make_reveal(sess)),
                           "arrow.up.forward.app")
-            item.add(rumps.separator)   # only when there is something above it
+            # The account it is actually spending, not the one the rule
+            # names. Until the tab restarts, that is the one being drawn down.
+            spending = next((a for a in snap.accounts if a.name == running_on), None)
+            if spending is not None and spending.reading:
+                self._usage_block(item, spending)
+            else:
+                item.add(rumps.separator)   # only when there is something above it
         elif running_on:
             # Which account, and which rule chose it. The row shows the account
             # as a chip; the rule behind it was only ever said when it was
@@ -1464,7 +1470,16 @@ class ManagerApp(rumps.App):
             d = rumps.MenuItem(f"why:{sess.pid}", callback=None)
             _apply_style(d, [("  ", "dim"), (line, "dim")], mono=False)
             item.add(d)
-            item.add(rumps.separator)
+            # How the account named on the line above is doing. That line
+            # says which subscription this session spends, and the next
+            # question it raises is how much of that subscription is left.
+            # The answer used to be in another section of the menu, which
+            # meant closing this one to go and read it.
+            spending = next((a for a in snap.accounts if a.name == running_on), None)
+            if spending is not None and spending.reading:
+                self._usage_block(item, spending)
+            else:
+                item.add(rumps.separator)
 
         if sess.term_id:
             self._add_scope(item, "Use for this session", "session", sess.term_id,
