@@ -38,6 +38,8 @@ SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
 DETAIL_W = 35
+NOTE_LABEL_W = 12          # "cache write" is the widest label in a spec line
+NOTE_NUM_W = 13            # and 458,378,917 the widest figure
 SUB_DETAIL_W = 30          # the same field inside a submenu, which is narrower
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
@@ -465,7 +467,7 @@ def _compact_tokens(n: int) -> str:
     return str(n)
 
 
-def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
+def _context_bar(sess: "sessions.Session", named: bool = True) -> list[tuple[str, str]]:
     """How full this session's context window is, labelled so it reads as that.
 
     Taken from the last request the session made, so it answers the question a
@@ -478,11 +480,13 @@ def _context_bar(sess: "sessions.Session") -> list[tuple[str, str]]:
     # Context is not a quota being spent down, it is a buffer filling up, so
     # this one stays the way round it reads: 61% means 61% of the window is in
     # use. Same bracket and same cells, so it is still one family.
+    # The name comes off inside a block already headed "Context", where the
+    # word was the third time the same thing was said on one line.
+    head = ("  ctx " if named else "  ", "dim")
     if pct is None:
-        return [("  ctx ", "dim"), *_gauge(None, CTX_BAR_W, "dim"), ("    ", "dim")]
+        return [head, *_gauge(None, CTX_BAR_W, "dim"), ("    ", "dim")]
     tone = _quiet(_tone(pct))
-    return [("  ctx ", "dim"), *_gauge(pct, CTX_BAR_W, tone),
-            (f"{pct:3.0f}%", tone)]
+    return [head, *_gauge(pct, CTX_BAR_W, tone), (f"{pct:3.0f}%", tone)]
 
 
 # Where one shade of the token ladder ends and the next begins. Lifetime
@@ -1578,37 +1582,85 @@ class ManagerApp(rumps.App):
             self._line(item, f"runhead:{tag}", empty, tone="dim")
         for sess in here:
             reachable = bool(focus.bundle_for_program(sess.term_program) and sess.tty)
-            notes = _usage_notes(sess)
+            notes = bool(sess.context_tokens or sess.spent.total or sess.model)
             # A row with a submenu cannot also be clicked, so the jump to the
             # tab moves inside the submenu rather than being lost. A session
             # with nothing to show and nowhere to go stays a plain row.
-            detailed = bool(notes) or reachable
+            detailed = notes or reachable
             row = rumps.MenuItem(
                 f"run:{tag}:{sess.pid}",
                 callback=None)
             _apply_style(row, _session_line(sess))
             if detailed:
-                self._session_notes(row, sess, notes, reachable, tag)
+                self._session_notes(row, sess, reachable, tag)
             item.add(row)
 
-    def _session_notes(self, row: rumps.MenuItem, sess: "sessions.Session",
-                       notes: list, reachable: bool, tag: str) -> None:
-        """What the condensed row leaves out, behind one hover.
+    def _spec(self, row: rumps.MenuItem, key: str, label: str,
+              value: list, lead: str = "") -> None:
+        """One line of a specification: what it is, then what it reads.
 
-        Monospaced, because these are figures in tabular form. The bar is
-        repeated at the top so the hover opens with the same shape the wide
-        row in the main menu shows, and the exact counts follow it.
+        The label is left aligned and the figure is right aligned in a column
+        of its own, so four numbers of wildly different size can be compared
+        by where they end rather than by counting digits.
         """
-        head = rumps.MenuItem(f"note:{tag}:{sess.pid}:bar", callback=None)
-        _apply_style(head, [("  ", "dim"), *_context_bar(sess), _spent_cell(sess)])
-        row.add(head)
-        for i, line in enumerate(notes):
-            note = rumps.MenuItem(f"note:{tag}:{sess.pid}:{i}", callback=None)
-            _apply_style(note, [("  ", "dim"), (line, "dim")])
+        note = rumps.MenuItem(key, callback=None)
+        _apply_style(note, [(f"    {label:<{NOTE_LABEL_W}}", "dim"), *value,
+                            (f"  {lead}" if lead else "", "dim")])
+        row.add(note)
+
+    def _session_notes(self, row: rumps.MenuItem, sess: "sessions.Session",
+                       reachable: bool, tag: str) -> None:
+        """What the condensed row leaves out, laid out as a specification.
+
+        This was a stack of sentences, every one of them in the same grey,
+        each starting at a different place and ending at a different place:
+        "Context now: 573,398 of 1,000,000 (57% full)". Read as a paragraph it
+        is fine. Scanned, which is what a panel is for, it gives the eye
+        nothing to line up on and repeats the two figures the row above
+        already showed.
+
+        So it is a table now, under two headings, with the labels in one
+        column and the figures right aligned in another. Monospaced, because
+        that is the only way a column of numbers is a column.
+        """
+        pid, t = sess.pid, sess.spent
+        n = lambda v: (f"{v:,}".rjust(NOTE_NUM_W), "text")
+
+        if sess.context_tokens:
+            self._legend(row, f"ctx:{tag}:{pid}", "Context")
+            # The count, what it is a count of, and the same bar the main menu
+            # draws, on one line. The bar had a line of its own and sat under
+            # the number column with nothing to its left, which read as a
+            # second row rather than as the shape of the one above it.
+            note = rumps.MenuItem(f"note:{tag}:{pid}:ctx", callback=None)
+            _apply_style(note, [(f"    {'in use':<{NOTE_LABEL_W}}", "dim"),
+                                n(sess.context_tokens),
+                                (f"  of {sess.window:,}".ljust(16), "dim"),
+                                *_context_bar(sess, named=False)])
             row.add(note)
+        if sess.model:
+            # Left aligned. It is a name, not a quantity, and right aligning it
+            # against a column of figures pushed a long one out past their left
+            # edge, which made the numbers look ragged instead.
+            self._spec(row, f"note:{tag}:{pid}:model", "model",
+                       [(sess.model, "text")])
+
+        if t.total:
+            self._legend(row, f"spend:{tag}:{pid}", "Tokens spent")
+            # Kept apart because they are not interchangeable: a cache read
+            # costs a fraction of a fresh input token, and a long conversation
+            # re-reads its whole context every turn, so cache reads dominate
+            # the total and one number hides what was really spent.
+            for label, value in (("input", t.input), ("cache write", t.cache_write),
+                                 ("cache read", t.cache_read), ("output", t.output)):
+                self._spec(row, f"note:{tag}:{pid}:{label}", label, [n(value)])
+            self._spec(row, f"note:{tag}:{pid}:total", "total",
+                       [(f"{t.total:,}".rjust(NOTE_NUM_W), _spent_tone(t.total))],
+                       f"over {t.turns:,} turns")
+
         if reachable:
             row.add(rumps.separator)
-            go = self._line(row, f"go:{tag}:{sess.pid}", "Take me to that tab",
+            go = self._line(row, f"go:{tag}:{pid}", "Take me to that tab",
                             callback=self._make_reveal(sess))
             _set_icon(go, "arrow.up.forward.app")
 
