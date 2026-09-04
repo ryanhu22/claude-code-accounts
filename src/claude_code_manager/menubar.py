@@ -37,7 +37,7 @@ SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab
 # title cannot colour the bucket that is nearly spent.
 NAME_W = 13                # the longest account name, so chips form a column
 REPO_W = 12
-DETAIL_W = 44
+DETAIL_W = 35
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
 PROFILE_W = 16
@@ -200,86 +200,39 @@ def _compact_reset(iso: Optional[str]) -> str:
     return f"{round(hours / 24)}d"
 
 
-# How long each window runs, so the time already gone can be drawn as a share
-# of it rather than as a bare number the reader has to scale in their head.
-_WINDOW_SECONDS = {"session": 5 * 3600,
-                   "weekly_all": 7 * 86400,
-                   "weekly_scoped": 7 * 86400}
-CLOCK_W = 3                      # cells in the clock track
-
-
-def _elapsed(lim: Optional[core.Limit]) -> Optional[float]:
-    """How far through its window this limit is, nought to a hundred.
-
-    The endpoint sends when a window ends, never when it began, so the start
-    is taken from the length the window is known to run for. That is exact for
-    every window here: five hours, or seven days.
-    """
-    if lim is None or not lim.resets_at:
-        return None
-    span = _WINDOW_SECONDS.get(lim.kind)
-    if not span:
-        return None
-    try:
-        dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    left = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
-    return max(0.0, min(100.0, (span - left) / span * 100.0))
-
-
-def _clock(lim: Optional[core.Limit]) -> list[tuple[str, str]]:
-    """A track for the window's clock, beside the track for its usage.
-
-    Shading the countdown was not enough to see: four steps of grey on a three
-    character number is a difference you have to look for, and the whole point
-    is not having to. A track has a length, and a length is read without
-    reading. Read against the usage bar to its left it also answers the
-    question neither number does on its own, which is whether the spending is
-    keeping pace with the clock: a fuller clock than bar means the window
-    resets before the allowance runs out.
-
-    Blue, because this is time and everything else in the row is quota. Green
-    and orange already mean "how much is left", and a second meaning for them
-    here would make both mean nothing.
-    """
-    frac = _elapsed(lim)
-    if frac is None:
-        return [(" [", "dim"), (TICK * CLOCK_W, "dim"), ("]", "dim")]
-    filled = max(0, min(CLOCK_W, round(frac / 100 * CLOCK_W)))
-    return [(" [", "dim"), (FILL * filled, "time"),
-            (TICK * (CLOCK_W - filled), "dim"), ("]", "dim")]
-
-
 def _reset_tone(lim: Optional[core.Limit]) -> str:
-    """How a countdown is drawn: brightness for how soon, colour for whether
-    it blocks you.
+    """The countdown's colour: how soon this window comes back.
 
-    Two questions get asked of this column and they are independent, so they
-    get a channel each. "How soon" is a magnitude, and it reads as weight: a
-    reset inside the hour is at full strength, one days away is nearly out of
-    the way. Scanning down the column now sorts itself, and a row of equally
-    bright countdowns no longer hides the one that is about to land.
+    Steps a reader can tell apart at a glance, not a grey ramp. Four weights
+    of the same grey on a three character number is a difference you have to
+    look for, and the point of this column is not having to look.
 
-    "Does it matter" is a state, and it takes the colour. A window with room
-    left resets whenever it resets, and nothing is waiting on it, so it stays
-    grey at whatever weight its distance earns. Once a window is nearly spent
-    the wait is the thing standing between you and work: green when relief is
-    inside the hour, orange within the working day, red beyond it.
+    Green is relief inside the hour. Blue is later today, which is a different
+    kind of answer: worth planning around, not worth waiting for. Past a day
+    the number stops being news and goes quiet, because a weekly window with
+    six days left is not information anybody acts on.
+
+    Once a window is nearly spent the wait is what stands between the user and
+    work, so it takes the warning colours instead: orange within the working
+    day, red beyond it. Green still means relief is close, whatever has been
+    spent.
     """
     if lim is None:
         return "dim"
     if not lim.resets_at:
-        return "ink2"          # no clock to run down, so no distance to show
+        return "dim"           # no clock running, and the word says so
     try:
         dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
     except ValueError:
-        return "ink2"
+        return "dim"
     mins = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
+    if mins < 60:
+        return "ok"
     if lim.spent >= 85:
-        return "ok" if mins < 60 else "warn" if mins < 360 else "hot"
-    return ("ink4" if mins < 60 else "ink3" if mins < 360
-            else "ink2" if mins < 1440 else "ink1")
+        return "warn" if mins < 360 else "hot"
+    if mins < 360:
+        return "time"
+    return "text" if mins < 1440 else "dim"
 
 
 def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
@@ -374,13 +327,12 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # number is, so a separator is enough.
         when = "" if spent is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
-        # The track first, then the number it stands for. Parentheses used to
-        # hold this apart from the percentage on its left; the track does that
-        # now, so they came off and paid for most of its width.
-        out += _clock(lim)
-        out.append((f"{when:<6}" if when else "      ", _reset_tone(lim)))
+        # Left aligned in a fixed field, so it hugs the number it belongs to
+        # and the slack falls on the far side, before the next window.
+        out.append((f" {'(' + when + ')':<8}" if when else "         ",
+                    _reset_tone(lim)))
     else:
-        out.append((" " * (CLOCK_W + 9), "dim"))
+        out.append(("         ", "dim"))
     return out
 
 
