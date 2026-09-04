@@ -204,20 +204,39 @@ def cmd_resolve(_args) -> int:
 
 
 def cmd_login(args) -> int:
-    """Sign an account in through the browser, in two steps."""
-    attempt = core.sign_in_begin(args.account)
+    """Sign an account in through the browser.
+
+    The browser returns the code to a local port, so there is nothing to copy.
+    If nothing can listen, or the wait times out, fall back to pasting it.
+    """
+    cb = None
+    if not args.paste:
+        try:
+            cb = oauth.Callback()
+        except OSError:
+            cb = None
+    attempt = core.sign_in_begin(args.account, cb.redirect_uri if cb else "")
     err = oauth.open_in(attempt.url, args.browser or "")
     if err:
         print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
               file=sys.stderr)
     else:
         print(f"Signing in as “{args.account}”. A browser is opening.")
-    print(f"\n{D}Sign in, then paste the code it shows.{X}")
-    try:
-        pasted = input("code: ")
-    except EOFError:
-        print("\nno code given; nothing changed", file=sys.stderr)
-        return 1
+    pasted = ""
+    if cb:
+        print(f"{D}Waiting for the browser…{X}")
+        if cb.wait(300) and cb.code:
+            pasted = f"{cb.code}#{cb.state}"
+        elif cb.error:
+            print(f"{Y}{cb.error}{X}", file=sys.stderr)
+        cb.close()
+    if not pasted:
+        print(f"{D}Paste the code the page shows.{X}")
+        try:
+            pasted = input("code: ")
+        except EOFError:
+            print("\nno code given; nothing changed", file=sys.stderr)
+            return 1
     ok, msg = core.sign_in_finish(attempt, pasted)
     print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1
@@ -263,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("login", help="sign an account in through the browser")
     p.add_argument("account")
     p.add_argument("--browser", help='e.g. "Google Chrome", "Safari"')
+    p.add_argument("--paste", action="store_true", help="paste the code instead of listening")
     p.set_defaults(func=cmd_login)
     p = sub.add_parser("add", help="print the command that signs an account in")
     p.add_argument("account")

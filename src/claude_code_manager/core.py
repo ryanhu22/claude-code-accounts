@@ -513,7 +513,8 @@ def _cache_write(store: dict, path: str = "") -> None:
         pass
 
 
-def _usage(name: str, token: str, force: bool = False) -> tuple[list[Limit], float, Optional[str]]:
+def _usage(name: str, token: str, force: bool = False,
+           fp: Optional[str] = None) -> tuple[list[Limit], float, Optional[str]]:
     """Usage for one account: cached, and backed off after a 429.
 
     /api/oauth/usage is rate limited per account, and every running Claude Code
@@ -528,6 +529,12 @@ def _usage(name: str, token: str, force: bool = False) -> tuple[list[Limit], flo
     """
     store = _cache_read()
     entry = store.get(name) or {}
+    # Cached against the credential, not just the account name. Signing an
+    # account in again gives it a different login, and serving the old payload
+    # then shows one subscription's usage under another's name — which reads as
+    # two accounts with identical bars rather than as stale data.
+    if fp and entry.get("fp") and entry["fp"] != fp:
+        entry = {}
     cached, at = entry.get("data"), entry.get("at", 0.0)
     now = time.time()
     if cached and not force and now < entry.get("retry_after", 0):
@@ -543,7 +550,7 @@ def _usage(name: str, token: str, force: bool = False) -> tuple[list[Limit], flo
         if cached:
             return _parse_limits(cached), at, None
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
-    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0}
+    store[name] = {"data": data, "at": now, "backoff": 0, "retry_after": 0, "fp": fp}
     _cache_write(store)
     return _parse_limits(data), now, None
 
@@ -694,7 +701,8 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
         # does, because the credential works. It is just the wrong one.
         acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
-        acct.limits, acct.usage_at, acct.error = _usage(name, blob["accessToken"], force)
+        acct.limits, acct.usage_at, acct.error = _usage(
+            name, blob["accessToken"], force, fingerprint(blob))
     return acct
 
 
@@ -802,9 +810,15 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     return True, f"{old} is now {new}"
 
 
-def sign_in_begin(name: str) -> oauth.Attempt:
-    """Start signing an account in. Returns the attempt to hand back later."""
-    return oauth.begin(name)
+def sign_in_begin(name: str, redirect_uri: str = "") -> oauth.Attempt:
+    """Start signing an account in. Returns the attempt to hand back later.
+
+    The account this slot last held is offered to the sign-in page, so the
+    browser lands on the right one instead of whichever it is already signed
+    into. Switching accounts part way through is what loses the code.
+    """
+    hint = recorded_email(slot_dir(name)) or _cached_email(slot_dir(name))
+    return oauth.begin(name, redirect_uri or oauth.CALLBACK_URL, login_hint=hint)
 
 
 def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:

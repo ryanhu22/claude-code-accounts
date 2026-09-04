@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
+import http.server
 import secrets
+import socket
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -32,12 +34,69 @@ SCOPES = ("user:profile", "user:inference", "user:sessions:claude_code",
           "user:mcp_servers", "user:file_upload")
 
 
+DONE_PAGE = (b"<!doctype html><meta charset=utf-8>"
+             b"<title>Signed in</title>"
+             b"<body style=\"font:15px -apple-system,sans-serif;margin:4rem auto;max-width:28rem\">"
+             b"<h2>Signed in.</h2><p>You can close this tab and go back to the app.</p>")
+
+
+class Callback:
+    """A one-shot local server that catches the redirect.
+
+    The token endpoint accepts `http://localhost:<port>/callback` for this
+    client, so the browser can hand the code straight back and the user never
+    copies anything. That also removes the step most likely to go wrong:
+    switching accounts part-way through loses the page the code was on.
+    """
+
+    def __init__(self) -> None:
+        self.code = self.state = self.error = ""
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                query = urllib.parse.urlparse(self.path).query
+                got = urllib.parse.parse_qs(query)
+                outer.code = (got.get("code") or [""])[0]
+                outer.state = (got.get("state") or [""])[0]
+                outer.error = (got.get("error_description") or got.get("error") or [""])[0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(DONE_PAGE)
+                outer._done.set()
+
+            def log_message(self, *_a):
+                pass
+
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self._done = threading.Event()
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def redirect_uri(self) -> str:
+        return f"http://localhost:{self.port}/callback"
+
+    def wait(self, timeout: float = 300.0) -> bool:
+        return self._done.wait(timeout)
+
+    def close(self) -> None:
+        try:
+            self._server.shutdown()
+            self._server.server_close()
+        except Exception:
+            pass
+
+
 @dataclass
 class Attempt:
     """One sign-in in progress: what we sent, so the exchange can prove it."""
     verifier: str
     state: str
     account: str
+    redirect_uri: str = CALLBACK_URL
+    login_hint: str = ""
     started_at: float = field(default_factory=time.time)
 
     @property
@@ -48,11 +107,15 @@ class Attempt:
             "code": "true",
             "client_id": CLIENT_ID,
             "response_type": "code",
-            "redirect_uri": CALLBACK_URL,
+            "redirect_uri": self.redirect_uri,
             "scope": " ".join(SCOPES),
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "state": self.state,
+            # Land on the account this slot is for, rather than whichever one
+            # the browser happens to be signed into. Switching accounts part
+            # way through is what loses the code.
+            **({"login_hint": self.login_hint} if self.login_hint else {}),
         })
         return f"{AUTHORIZE_URL}?{query}"
 
@@ -60,10 +123,10 @@ class Attempt:
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 
-def begin(account: str) -> Attempt:
+def begin(account: str, redirect_uri: str = CALLBACK_URL, login_hint: str = "") -> Attempt:
     """Start a sign-in. The verifier never leaves this process."""
     return Attempt(verifier=secrets.token_urlsafe(64), state=secrets.token_urlsafe(24),
-                   account=account)
+                   account=account, redirect_uri=redirect_uri, login_hint=login_hint)
 
 
 def split_code(pasted: str) -> tuple[str, str]:
@@ -93,7 +156,7 @@ def finish(attempt: Attempt, pasted: str, post, profile_result) -> tuple[Optiona
     body = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": CALLBACK_URL,
+        "redirect_uri": attempt.redirect_uri,
         "client_id": CLIENT_ID,
         "code_verifier": attempt.verifier,
         "state": attempt.state,

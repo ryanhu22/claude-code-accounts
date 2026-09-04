@@ -26,6 +26,11 @@ Sign each subscription in once, through the browser:
 ccm login work-account                          # or --browser "Google Chrome"
 ```
 
+The browser returns the code to a local port, so there is nothing to copy. The
+page is asked to land on the account that slot last held, because switching
+account part way through is what loses the code. `--paste` falls back to typing
+it in, and so does the app if nothing can listen locally.
+
 The menu bar does the same thing: an account that is signed out offers
 **Sign in**, and lets you pick the browser. Which browser matters, because the
 sign-in uses whichever account that browser is already logged into. With
