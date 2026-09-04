@@ -191,27 +191,32 @@ def _compact_reset(iso: Optional[str]) -> str:
 def _reset_tone(lim: Optional[core.Limit]) -> str:
     """How much the countdown matters, not merely how long it is.
 
-    A far-off reset on a barely-used bucket is noise, so it stays dim. Once a
-    bucket is nearly spent the countdown becomes the number you care about:
-    green if relief is close, red if you are locked out for a long while.
+    Every countdown is legible, because knowing when a window comes back is
+    half of reading this panel and the reader should not have to hunt for it.
+    This used to leave all of them in the secondary grey until a bucket passed
+    85%, which put the answer to "when does this reset" below the brackets
+    around it in contrast.
+
+    Colour is kept for the two cases that are worth interrupting a scan. A
+    window inside its last half hour is about to hand the allowance back, so
+    it turns green whatever it has spent. A window that is nearly spent AND
+    far from resetting is the one that will stop work, so it turns red.
     A window with no clock is green: nothing has been spent in it.
     """
     if lim is None:
         return "dim"
     if not lim.resets_at:
         return "ok"
-    if lim.spent < 85:
-        return "dim"
     try:
         dt = _dt.datetime.fromisoformat(str(lim.resets_at).replace("Z", "+00:00"))
     except ValueError:
-        return "dim"
+        return "text"
     mins = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() / 60
-    if mins < 60:
+    if mins < 30:
         return "ok"
-    if mins < 360:
-        return "warn"
-    return "hot"
+    if lim.spent < 85:
+        return "text"
+    return "ok" if mins < 60 else "warn" if mins < 360 else "hot"
 
 
 def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
@@ -288,7 +293,12 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     # the whitespace between instruments instead of inside one. Reading a panel
     # depends on each instrument holding together as a unit, and even spacing
     # made the row one long strip of characters.
-    out = [(f"  {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
+    # Three spaces before the label, not two, and one after the number rather
+    # than five. The countdown used to sit the same distance from its own
+    # percentage as from the next window's name, so it read as belonging to
+    # whichever one the eye reached first. The row is the same width either
+    # way; the space just moved to where it separates instead of joins.
+    out = [(f"   {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
            # Four wide, so a full window keeps its gap from the track.
            ("    —" if spent is None else f"{spent:4.0f}%", _quiet(tone))]
     if show_reset:
@@ -298,9 +308,10 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
         # number is, so a separator is enough.
         when = "" if spent is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
-        # Seven wide, so the longest countdown keeps its gap from the number.
-        out.append((f"{'(' + when + ')':>9}" if when else "         ",
-                    _quiet(_reset_tone(lim))))
+        # Left aligned in a fixed field, so it hugs the number it belongs to
+        # and the slack falls on the far side, before the next window.
+        out.append((f" {'(' + when + ')':<7}" if when else "        ",
+                    _reset_tone(lim)))
     else:
         out.append(("", "dim"))
     return out
@@ -996,14 +1007,13 @@ class ManagerApp(rumps.App):
         weekly = acct.limit("weekly_all")
         segments += _bucket("5h", acct.limit("session"))
         segments += _bucket("7d", weekly)
-        # A model window sits inside the weekly one and rolls over with it, so
-        # its countdown was the previous column said again. Compared as they
-        # are drawn, because the two timestamps differ by microseconds and
-        # nobody is reading microseconds off a menu.
+        # The model window usually rolls over with the weekly one, and its
+        # countdown was hidden when the two matched to avoid saying the same
+        # thing twice. That traded a repeated word for a hole in the row: the
+        # only way to read the blank was to know the rule that made it, and
+        # scanning a column of resets is easier when every window has one.
         if fable:
-            twice = bool(weekly and _compact_reset(fable.resets_at)
-                         == _compact_reset(weekly.resets_at))
-            segments += _bucket(fable.label, fable, show_reset=not twice)
+            segments += _bucket(fable.label, fable)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
         if pending:
