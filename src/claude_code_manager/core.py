@@ -970,8 +970,14 @@ SHARED_ITEMS = ("CLAUDE.md", "commands", "agents", "skills", "hooks", "workflows
                 "plugins", "projects")
 
 
+_ROOTS: dict[str, str] = {}
+
+
 def project_root(cwd: str) -> str:
     """Main checkout for a directory: a worktree resolves to its parent repo.
+
+    Answers are remembered for the life of the process: this shells out to git,
+    and a redraw asks about the same handful of directories over and over.
 
     A path that no longer exists still answers, as itself: rules outlive the
     directories they were written for, and one deleted worktree must not stop
@@ -980,6 +986,8 @@ def project_root(cwd: str) -> str:
     import subprocess as _sp
     if not cwd or not os.path.isdir(cwd):
         return os.path.abspath(cwd or HOME)
+    if cwd in _ROOTS:
+        return _ROOTS[cwd]
     try:
         r = _sp.run(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
                     capture_output=True, text=True, timeout=5)
@@ -989,8 +997,11 @@ def project_root(cwd: str) -> str:
         gitdir = r.stdout.strip()
         if not os.path.isabs(gitdir):
             gitdir = os.path.join(cwd, gitdir)
-        return os.path.dirname(os.path.abspath(gitdir)) or cwd
-    return os.path.abspath(cwd)
+        root = os.path.dirname(os.path.abspath(gitdir)) or cwd
+    else:
+        root = os.path.abspath(cwd)
+    _ROOTS[cwd] = root
+    return root
 
 
 def _ctx_name(path: str) -> str:
@@ -1280,6 +1291,40 @@ def account_of_dir(config_dir: str, accts: Iterable["Account"]) -> str:
     return next((a.name for a in accts if (a.email or "").lower() == email.lower()), email)
 
 
+def dirs_to_accounts(dirs: Iterable[str], accts: Iterable["Account"]) -> dict[str, str]:
+    """Name the account behind each config dir, reading each credential once.
+
+    Doing this a directory at a time re-read every account's credential to
+    compare against, and each read is a `security` call: the cost was the
+    number of directories times the number of accounts. Here every credential
+    is read once and matched by fingerprint.
+    """
+    accts = list(accts)
+    by_fp: dict[str, str] = {}
+    for a in accts:
+        fp = fingerprint(keychain.read_credentials(a.slot))
+        if fp:
+            by_fp[fp] = a.name
+    out: dict[str, str] = {}
+    for d in dirs:
+        if not d:
+            continue
+        base = os.path.basename(os.path.abspath(d).rstrip("/"))
+        if is_account_dir(d) and any(a.name == base for a in accts):
+            out[d] = base
+            continue
+        blob = keychain.read_credentials(d)
+        if not blob:
+            out[d] = ""
+            continue
+        name = by_fp.get(fingerprint(blob))
+        if not name:
+            email = (identity(d, blob)[0].get("email") or recorded_email(d) or "").lower()
+            name = next((a.name for a in accts if (a.email or "").lower() == email), email)
+        out[d] = name
+    return out
+
+
 def rules_using(account: str, r: Optional[profiles.Rules] = None) -> list[str]:
     """Every rule pointing at an account, described for a human."""
     r = r or rules()
@@ -1312,7 +1357,9 @@ def bootstrap() -> profiles.Rules:
     return r
 
 
-def assign(scope: str, key: str, account: str, cwd: str = "") -> tuple[bool, str]:
+def assign(scope: str, key: str, account: str, cwd: str = "",
+           live: Optional[Iterable["sessions.Session"]] = None,
+           applied_out: Optional[dict] = None) -> tuple[bool, str]:
     """Point one scope at an account. The scope decides how far it reaches.
 
     Nothing is copied and no session is disturbed: this rewrites the rules and
@@ -1354,15 +1401,18 @@ def assign(scope: str, key: str, account: str, cwd: str = "") -> tuple[bool, str
     save_rules(r)
     for root in moved:
         carry_project_state(root, before, account_dir(account))
-    live = apply_now()
-    if live:
-        n = len(live)
+    moved_live, applied = apply_now(live)
+    if applied_out is not None:
+        applied_out.update(applied)      # so a caller can redraw without re-reading
+    if moved_live:
+        n = len(moved_live)
         return True, (f"{where} now uses {account}. {n} running session"
                       f"{'s' if n != 1 else ''} switch within about 30 seconds.")
     return True, f"{where} now uses {account}"
 
 
-def apply_now() -> list[str]:
+def apply_now(live: Optional[Iterable["sessions.Session"]] = None
+              ) -> tuple[list[str], dict[str, str]]:
     """Hand the current rules to every live session that has a dir of its own.
 
     This is what makes a rule change land without a restart: the session re-reads
@@ -1371,9 +1421,13 @@ def apply_now() -> list[str]:
 
     A session started before it had a dir of its own is skipped; there is
     nowhere to write that only it would see.
+
+    Returns the sessions that moved and, for the caller that wants to redraw
+    without reading anything back, what each directory was given.
     """
     moved: list[str] = []
-    for sess in sessions.live(credential_dirs()):
+    applied: dict[str, str] = {}
+    for sess in (live if live is not None else sessions.live(credential_dirs())):
         if not sess.term_id:
             continue
         path = session_dir(sess.term_id)
@@ -1384,7 +1438,8 @@ def apply_now() -> list[str]:
         if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
             if adopt(path, want):
                 moved.append(sess.label)
-    return moved
+                applied[path] = account
+    return moved, applied
 
 
 def clear(scope: str, key: str, cwd: str = "") -> tuple[bool, str]:

@@ -164,9 +164,10 @@ def cmd_sessions(_args) -> int:
     if not live:
         print("no Claude Code sessions running")
         return 0
+    owners = core.dirs_to_accounts({s.env_config_dir for s in live}, accts)
     for s in live:
         pinned = s.term_id and s.term_id in r.sessions
-        running_on = core.account_of_dir(s.env_config_dir, accts)
+        running_on = owners.get(s.env_config_dir, "")
         wanted, reason = core.resolve(s.cwd, s.term_id)
         drift = f"  {Y}-> {wanted} on restart{X}" if wanted and wanted != running_on else ""
         print(f"{'\u25cf' if pinned else ' '} {s.label[:24]:<25} {s.status or s.kind:<7} "
