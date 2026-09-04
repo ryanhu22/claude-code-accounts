@@ -191,7 +191,51 @@ def _icon_run(name: str, size: float = 12.0):
     return AppKit.NSAttributedString.attributedStringWithAttachment_(att)
 
 
-def _styled(segments, size: float = 12.0, mono: bool = True):
+_FACES = ("ui", "fig", "mono")
+
+
+def _face(kind: str, size: float = 12.0):
+    """One of three faces, chosen by what a run is.
+
+    ui    what macOS sets every menu in. For words.
+    fig   the same face with tabular figures. Digits line up without the text
+          around them turning into a fixed pitch grid: every digit is 8.112
+          points wide in it, where the plain menu face gives a 1 5.95 and an 8
+          8.23, which is why a column of numbers set in it wandered.
+    mono  a real fixed pitch face. Only for bars and for tables whose columns
+          are words. A block is 11.7 points and a middle dot 3.8 in the system
+          face, so a bar drawn there grew longer as it filled.
+    """
+    import AppKit
+    if kind == "mono":
+        return AppKit.NSFont.monospacedSystemFontOfSize_weight_(
+            size, AppKit.NSFontWeightRegular)
+    if kind == "fig":
+        return AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(
+            13.0, AppKit.NSFontWeightRegular)
+    return AppKit.NSFont.menuFontOfSize_(0)
+
+
+def _tab_style(tabs, indent: float = 16.0):
+    """Columns without a grid: one tab stop per column, aligned as asked.
+
+    This is what lets the words stay words. Padding a label to a character
+    width only lines anything up when every glyph is the same size, which was
+    the reason this menu was monospaced from end to end.
+    """
+    import AppKit
+    para = AppKit.NSMutableParagraphStyle.alloc().init()
+    para.setFirstLineHeadIndent_(indent)
+    para.setHeadIndent_(indent)
+    para.setTabStops_([
+        AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
+            AppKit.NSTextAlignmentRight if how == "r" else AppKit.NSTextAlignmentLeft,
+            where, {})
+        for how, where in tabs])
+    return para
+
+
+def _styled(segments, size: float = 12.0, mono: bool = True, tabs=None):
     """Build an NSAttributedString from runs.
 
     A run is (text, tone) or (text, tone, chip_key); with a chip key the run is
@@ -206,12 +250,14 @@ def _styled(segments, size: float = 12.0, mono: bool = True):
     """
     import AppKit
     colors = _colors()
-    font = (AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
-            if mono else AppKit.NSFont.menuFontOfSize_(0))
+    default = "mono" if mono else "ui"
+    para = _tab_style(tabs) if tabs else None
     out = AppKit.NSMutableAttributedString.alloc().init()
     for run in segments:
         text, tone = run[0], run[1]
-        chip_key = run[2] if len(run) > 2 else None
+        # A third element names a chip, unless it names one of the faces.
+        extra = run[2] if len(run) > 2 else None
+        chip_key = None if extra in _FACES else extra
         if tone == "icon":
             # An SF Symbol inside the text, not on the menu item. A menu item's
             # image lives in a gutter macOS reserves for a whole run of items,
@@ -220,7 +266,10 @@ def _styled(segments, size: float = 12.0, mono: bool = True):
             # moves nothing.
             out.appendAttributedString_(_icon_run(text, size))
             continue
-        attrs = {AppKit.NSFontAttributeName: font}
+        attrs = {AppKit.NSFontAttributeName:
+                 _face(extra if extra in _FACES else default, size)}
+        if para is not None:
+            attrs[AppKit.NSParagraphStyleAttributeName] = para
         if tone == "head":
             # Letter spacing on a short uppercase label reads as a legend
             # printed on the panel rather than as a row of the data below it.
@@ -282,58 +331,52 @@ SPEC_FIGURE_X = 172.0          # right edge of the figures
 SPEC_NOTE_X = 180.0            # where anything after them starts
 
 
-def _spec_style():
-    import AppKit
-    para = AppKit.NSMutableParagraphStyle.alloc().init()
-    para.setFirstLineHeadIndent_(SPEC_INDENT)
-    para.setHeadIndent_(SPEC_INDENT)
-    para.setTabStops_([
-        AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
-            AppKit.NSTextAlignmentRight, SPEC_FIGURE_X, {}),
-        AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
-            AppKit.NSTextAlignmentLeft, SPEC_NOTE_X, {}),
-    ])
-    return para
+SPEC_TABS = (("r", SPEC_FIGURE_X), ("l", SPEC_NOTE_X))
+# The account picker: a chip, then its five hour figure right aligned far
+# enough out that the longest account name clears it.
+PICK_TABS = (("r", 150.0),)
 
 
 def _spec_line(label: str, figure: str, tone: str = "text", after=()):
-    """A label in the menu font, a figure in the monospaced one, one line.
+    """A label in the menu face, a figure in the tabular one, one line.
 
-    Only the figures are monospaced. The words around them are words, and
-    setting a word in a fixed pitch face makes it read as output rather than
-    as a caption, which is what the whole menu looked like before.
+    Nothing here is monospaced except a bar. The words are words, and the
+    digits hold their column because the face has tabular figures, not because
+    every glyph in the row is the same width.
     """
-    import AppKit
-    colors = _colors()
-    ui = AppKit.NSFont.menuFontOfSize_(0)
-    mono = AppKit.NSFont.monospacedSystemFontOfSize_weight_(12.0, AppKit.NSFontWeightRegular)
-    para = _spec_style()
-    out = AppKit.NSMutableAttributedString.alloc().init()
-
-    def add(text, font, tone_name):
-        out.appendAttributedString_(
-            AppKit.NSAttributedString.alloc().initWithString_attributes_(text, {
-                AppKit.NSFontAttributeName: font,
-                AppKit.NSForegroundColorAttributeName: colors.get(tone_name, colors["text"]),
-                AppKit.NSParagraphStyleAttributeName: para,
-            }))
-
-    add(label, ui, "dim")
-    add("\t" + figure, mono, tone)
+    runs = [(label, "dim", "ui"), ("\t" + figure, tone, "fig")]
     if after:
-        add("\t", ui, "dim")
-        for text, run_tone in after:
-            add(text, mono if run_tone == "mono" else ui,
-                "dim" if run_tone == "mono" else run_tone)
-    return out
+        runs.append(("\t", "dim", "ui"))
+        runs += [(text, "dim" if kind == "mono" else kind,
+                  "mono" if kind == "mono" else "ui") for text, kind in after]
+    return _styled(runs, tabs=SPEC_TABS)
 
 
-def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True) -> None:
+def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True,
+                 tabs=None) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
-        item._menuitem.setAttributedTitle_(_styled(segments, mono=mono))
+        item._menuitem.setAttributedTitle_(_styled(segments, mono=mono, tabs=tabs))
     except Exception:
         pass
+
+
+def _clock_time(iso: Optional[str]) -> str:
+    """When a window comes back, on the wall clock.
+
+    A countdown says how long to wait; a time says whether that lands before
+    or after something else you already have planned. They answer different
+    questions, so both are here and neither replaces the other.
+    """
+    if not iso:
+        return ""
+    try:
+        dt = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    local = dt.astimezone()
+    return local.strftime("%-I:%M %p").lower() if local.date() == _dt.datetime.now().date() \
+        else local.strftime("%a %-I:%M %p").lower()
 
 
 def _compact_reset(iso: Optional[str]) -> str:
@@ -649,29 +692,62 @@ def _reason(snap: "Snapshot", sess: "sessions.Session") -> str:
         (os.path.abspath(sess.cwd), core.project_root(sess.cwd)), sess.term_id)[1]
 
 
+def _clip(text: str, width: float, kind: str = "ui") -> str:
+    """Cut a string to fit a column, measured rather than counted.
+
+    _fit counts characters, which is the same as measuring only in a fixed
+    pitch face. Once the words are set in the menu face a name of twelve
+    narrow letters and one of twelve wide ones are different widths, and a
+    tab stop does not truncate: text that overruns simply pushes past it and
+    takes the next column with it.
+    """
+    import AppKit
+    font = _face(kind)
+    attrs = {AppKit.NSFontAttributeName: font}
+
+    def w(t):
+        return AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            t, attrs).size().width
+
+    if w(text) <= width:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if w(text[:mid] + "\u2026") <= width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + "\u2026"
+
+
 def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, str]]:
     """A session, seen from an account or a profile rather than on its own.
 
     The wide row at the top of the menu answers "what is running". This
-    answers "what is running HERE", so it drops the account chip, which is
-    the thing the reader already knows by being where they are, and keeps
-    what tells one session from another.
+    answers "what is running HERE", so it drops the account chip, which the
+    reader already knows by being where they are, and keeps what tells one
+    session from another.
 
-    It also drops the context bar and the token count, which made this list
-    as wide as the menu it hangs off and forced a submenu to be wider than
-    its parent. Which tab, what it is doing, and whether it is working are
-    what this list is scanned for. The numbers are one hover away, spelled
-    out in full rather than abbreviated to fit a column.
+    Columns on tab stops rather than on a character grid, so the words can be
+    set in the face macOS sets menus in. Padding to a width only aligns
+    anything while every glyph is the same size, and a repository name and a
+    branch are words, not figures.
     """
     return [
-        ("    ", "dim"),
-        (_fit(sess.repo, REPO_W), "dim"),
-        (" ", "dim"),
-        (_fit(sess.detail or sess.label, SUB_DETAIL_W), "text"),
-        ("  " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
-        (f"{_age(sess.idle_for):>3}", "dim"),
-        (f"   {why}" if why else "", "dim"),
+        (_clip(sess.repo, RUN_REPO_W), "dim", "ui"),
+        ("\t" + _clip(sess.detail or sess.label, RUN_DETAIL_W), "text", "ui"),
+        ("\t" + (sess.status or sess.kind), _status_tone(sess.status), "ui"),
+        ("\t" + _age(sess.idle_for), "dim", "fig"),
+        (("\t" + why) if why else "", "dim", "ui"),
     ]
+
+
+# repository, what it is doing, whether it is working, how long since it last
+# did. The last is right aligned because it is a figure.
+RUN_TABS = (("l", 104.0), ("l", 324.0), ("l", 380.0), ("r", 414.0), ("l", 424.0))
+RUN_REPO_W = 82.0          # indent 16 to the first stop at 104, less a gap
+RUN_DETAIL_W = 210.0       # 104 to 324, less a gap
 
 
 def _why(reason: str) -> str:
@@ -1303,6 +1379,8 @@ class ManagerApp(rumps.App):
                      mono=False)
         item.add(who)
         item.add(rumps.separator)
+        self._usage_block(item, acct)
+
 
         self._running_block(
             item, [s for s in snap.sessions
@@ -1479,7 +1557,8 @@ class ManagerApp(rumps.App):
         # not a sentence, so it keeps the monospaced face.
         where = sess.cwd.replace(core.HOME, "~") or "?"
         note_item = rumps.MenuItem(f"note:{sess.pid}", callback=None)
-        _apply_style(note_item, [("  ", "dim"), (_fit(where, 52).rstrip(), "dim")])
+        _apply_style(note_item, [("  ", "dim"), (_fit(where, 60).rstrip(), "dim")],
+                     mono=False)
         try:
             note_item._menuitem.setToolTip_(where)
         except Exception:
@@ -1642,10 +1721,35 @@ class ManagerApp(rumps.App):
             row = rumps.MenuItem(
                 f"run:{tag}:{sess.pid}",
                 callback=None)
-            _apply_style(row, _session_line(sess))
+            _apply_style(row, _session_line(sess), mono=False, tabs=RUN_TABS)
             if detailed:
                 self._session_notes(row, sess, reachable, tag)
             item.add(row)
+
+    def _usage_block(self, item: rumps.MenuItem, acct: core.Account) -> None:
+        """Every window this account has, spelled out.
+
+        The row above carries the same three, abbreviated to fit beside four
+        other accounts. Here there is room for what got dropped: when each one
+        comes back as a clock time as well as a countdown, and how far through
+        its cycle it already is, which is the reading that says whether the
+        spending is ahead of the clock or behind it.
+        """
+        if not acct.reading:
+            return
+        self._legend(item, f"use:{acct.name}", "Usage")
+        for lim in acct.limits:
+            spent = lim.spent
+            if spent is None:
+                continue
+            when = _compact_reset(lim.resets_at) if lim.resets_at else "unused"
+            at = _clock_time(lim.resets_at)
+            self._spec(item, f"lim:{acct.name}:{lim.kind}", lim.label,
+                       f"{spent:.0f}%", _tone(spent),
+                       after=[("".join(t for t, *_ in _gauge(spent, BAR_W, "ok")), "mono"),
+                              (f"  resets in {when}", "dim"),
+                              (f" ({at})" if at else "", "dim")])
+        item.add(rumps.separator)
 
     @staticmethod
     def _spec(row: rumps.MenuItem, key: str, label: str, figure: str,
@@ -1730,10 +1834,14 @@ class ManagerApp(rumps.App):
             entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
                                    callback=None if same else
                                    self._make_assign(scope, key, acct.name, cwd))
-            _apply_style(entry, [("    ", "dim"),
-                                 *_chip(acct.name, NAME_W),
-                                 (f"  {_pct(acct.session_pct):>4}",
-                                  _tone(acct.session_pct))])
+            # The chip in its own colour, the figure on a tab stop. Padding
+            # the name to a width only lined these up while every glyph
+            # was the same size, which is what forced the fixed pitch face
+            # on a list that is five proper nouns and five percentages.
+            _apply_style(entry, [*_chip(acct.name),
+                                 (f"\t{_pct(acct.session_pct)}",
+                                  _tone(acct.session_pct), "fig")],
+                         mono=False, tabs=PICK_TABS)
             # A real tick, in the gutter macOS ticks every other menu in. It
             # used to be a check character in front of the chip, which moved
             # the chip of the account already in use two columns right of
