@@ -41,6 +41,8 @@ DETAIL_W = 35
 BAR_W = 5                  # a bucket gauge: coarse on purpose, the number is exact
 CTX_BAR_W = 6
 PROFILE_W = 16
+PROJ_W = 12                # "12 projects" is the widest this gets
+RUN_W = 11                 # "12 running"
 
 
 def _fit(text: str, width: int) -> str:
@@ -972,15 +974,14 @@ class ManagerApp(rumps.App):
         # of named things and a list of actions, so a symbol tells them apart
         # faster than reading the first word of each does.
         self._section("PROFILES")
+        # No icons on these two. They are a table with the same columns as the
+        # two sections above, and macOS pushes a row's text right by the width
+        # of its image, so an icon here moved these rows off the left edge
+        # every other row in the menu shares. The action rows below have no
+        # column to keep, which is why they can afford one.
         for prof in snap.rules.profiles:
-            item = self._profile_item(prof, snap)
-            _set_icon(item, "folder")
-            self.menu.add(item)
-        fallback = self._default_item(snap)
-        # Dashed, because this one is not a profile anybody made. It is the
-        # rule that catches whatever the named ones did not.
-        _set_icon(fallback, "square.dashed")
-        self.menu.add(fallback)
+            self.menu.add(self._profile_item(prof, snap))
+        self.menu.add(self._default_item(snap))
         new_profile = rumps.MenuItem("New profile…", callback=self._make_new_profile())
         _set_icon(new_profile, "folder.badge.plus")
         self.menu.add(new_profile)
@@ -1342,13 +1343,16 @@ class ManagerApp(rumps.App):
         head = f"  {prof.name} — {prof.account or 'no account'} · {n} repos"
         item = rumps.MenuItem(head)
         _apply_style(item, [
-            ("  ", "dim"),
+            # Three, to sit under the chips in the two sections above. A
+            # profile's name is what its row is about, the same way an
+            # account's chip is, so the two start in the same column.
+            ("   ", "dim"),
             (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"),
             *(_chip(prof.account, NAME_W) if prof.account
               else [(f"{'unassigned':<{NAME_W}}", "warn")]),
-            (f"   {n} project{'s' if n != 1 else ''}", "dim"),
-            (f"   {live_here} running" if live_here else "", "dim"),
+            (f"   {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
+            (f"{str(live_here) + ' running' if live_here else '':<{RUN_W}}", "dim"),
         ])
         self._add_scope(item, f"Use for every project in “{prof.name}”",
                         "profile", prof.name, snap, current=prof.account, cwd="")
@@ -1405,11 +1409,16 @@ class ManagerApp(rumps.App):
         loose = sum(1 for s in snap.sessions if _reason(snap, s) == "default")
         item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
         _apply_style(item, [
-            ("  ", "dim"),
+            ("   ", "dim"),
             (_fit("everything else", PROFILE_W), "dim"),
             ("  ", "dim"),
             *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
-            (f"   {loose} running" if loose else "", "dim"),
+            # The projects column is left empty rather than skipped. This rule
+            # covers whatever is not in a profile, so it has no count to put
+            # there, and running its number up into that column put the two
+            # rows' numbers under each other meaning different things.
+            (" " * (3 + PROJ_W), "dim"),
+            (f"{str(loose) + ' running' if loose else '':<{RUN_W}}", "dim"),
         ])
         self._running_block(
             item, [s for s in snap.sessions
