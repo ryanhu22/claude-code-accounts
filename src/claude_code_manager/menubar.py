@@ -982,11 +982,17 @@ class ManagerApp(rumps.App):
         for prof in snap.rules.profiles:
             self.menu.add(self._profile_item(prof, snap))
         self.menu.add(self._default_item(snap))
+        self.menu.add(rumps.separator)
+
+        # "New profile" sits with the other actions rather than under the
+        # profiles it makes. macOS reserves the image gutter for a run of
+        # items, so one icon inside the profiles block indented the section
+        # heading and the rows with it, and the block no longer began where
+        # the two blocks above it began. Everything with an icon is now below
+        # the separator, and everything above it is a table.
         new_profile = rumps.MenuItem("New profile…", callback=self._make_new_profile())
         _set_icon(new_profile, "folder.badge.plus")
         self.menu.add(new_profile)
-        self.menu.add(rumps.separator)
-
         add = rumps.MenuItem("Add an account…", callback=self._add_account)
         _set_icon(add, "person.badge.plus")
         self.menu.add(add)
@@ -1338,8 +1344,8 @@ class ManagerApp(rumps.App):
     def _profile_item(self, prof: "core.profiles.Profile", snap: Snapshot) -> rumps.MenuItem:
         """One profile: the account its repositories use, and which they are."""
         n = len(prof.repos)
-        live_here = sum(1 for s in snap.sessions
-                        if prof.covers(core.project_root(s.cwd)))
+        here = [s for s in snap.sessions
+                if prof.covers(core.project_root(s.cwd))]
         head = f"  {prof.name} — {prof.account or 'no account'} · {n} repos"
         item = rumps.MenuItem(head)
         # The account first, as in every other row in this menu. A subscription
@@ -1352,17 +1358,21 @@ class ManagerApp(rumps.App):
             ("  ", "dim"),
             *(_chip(prof.account, NAME_W) if prof.account
               else [(f"{'unassigned':<{NAME_W}}", "warn")]),
+            # The same lamp a subscription row uses, in the same column. Both
+            # rows are answering "how many sessions, and is any of them
+            # working", and the answer was a lit mark and a number up there
+            # and the words "6 running" down here.
+            ("  ", "dim"), *_lamps(here),
             ("  ", "dim"),
             (_fit(prof.name, PROFILE_W), "text"),
-            (f" {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
-            (f"{str(live_here) + ' running' if live_here else '':<{RUN_W}}", "dim"),
+            (f"  {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
         ])
         self._add_scope(item, f"Use for every project in “{prof.name}”",
                         "profile", prof.name, snap, current=prof.account, cwd="")
         item.add(rumps.separator)
 
         self._running_block(
-            item, [s for s in snap.sessions if prof.covers(core.project_root(s.cwd))],
+            item, here,
             "No sessions are running in these projects", f"prof:{prof.name}")
         item.add(rumps.separator)
 
@@ -1409,19 +1419,18 @@ class ManagerApp(rumps.App):
     def _default_item(self, snap: Snapshot) -> rumps.MenuItem:
         """Where anything with no rule goes."""
         name = snap.rules.default_account
-        loose = sum(1 for s in snap.sessions if _reason(snap, s) == "default")
+        loose = [s for s in snap.sessions if _reason(snap, s) == "default"]
         item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
         _apply_style(item, [
             ("  ", "dim"),
             *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
+            ("  ", "dim"), *_lamps(loose),
             ("  ", "dim"),
             (_fit("everything else", PROFILE_W), "dim"),
-            # The projects column is left empty rather than skipped. This rule
-            # covers whatever is not in a profile, so it has no count to put
-            # there, and running its number up into that column put the two
-            # rows' numbers under each other meaning different things.
-            (" " * (1 + PROJ_W), "dim"),
-            (f"{str(loose) + ' running' if loose else '':<{RUN_W}}", "dim"),
+            # No project count. This rule covers whatever is not in a profile,
+            # so it has nothing to count, and a number here would sit under
+            # the row above meaning something else.
+            (" " * (2 + PROJ_W), "dim"),
         ])
         self._running_block(
             item, [s for s in snap.sessions
