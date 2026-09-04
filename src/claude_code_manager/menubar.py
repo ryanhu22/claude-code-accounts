@@ -984,14 +984,10 @@ class ManagerApp(rumps.App):
 
         # The row already carries every bucket, so the submenu is for identity
         # and actions rather than a second copy of the usage.
-        detail = rumps.MenuItem(acct.email or "unknown account", callback=None)
-        _apply_style(detail, [("  ", "dim"), (acct.email or "unknown account", "text")])
-        item.add(detail)
-        plan = acct.plan
-        if plan:
-            plan_item = rumps.MenuItem(plan, callback=None)
-            _apply_style(plan_item, [("  ", "dim"), (plan, "dim")])
-            item.add(plan_item)
+        who = rumps.MenuItem(f"who:{acct.name}", callback=None)
+        _apply_style(who, [("  ", "dim"), (acct.email or "unknown account", "text"),
+                           (f"   {acct.plan}" if acct.plan else "", "dim")])
+        item.add(who)
         item.add(rumps.separator)
 
         self._running_block(
@@ -1003,9 +999,7 @@ class ManagerApp(rumps.App):
         # An account row is the place to hand it whole groups at once. Inline,
         # for the same reason the scope pickers are: the list is short and a
         # submenu would put it one hover away for nothing.
-        head = rumps.MenuItem(f"usehead:{acct.name}", callback=None)
-        _apply_style(head, [("  ", "dim"), ("Use this account for", "dim")])
-        item.add(head)
+        self._legend(item, f"use:{acct.name}", "Use this account for")
         groups = [("default", "", "every project with no rule",
                    snap.rules.default_account == acct.name)]
         groups += [("profile", p.name, f"profile “{p.name}”", p.account == acct.name)
@@ -1019,12 +1013,15 @@ class ManagerApp(rumps.App):
             item.add(row)
         item.add(rumps.separator)
 
+        # Poking a window that is already running does nothing, so it says so
+        # instead of offering an action that cannot have an effect.
         session = acct.limit("session")
-        idle = bool(session and not session.resets_at)
-        item.add(rumps.MenuItem(
-            "Poke to start the 5h window" if idle else "Poke (window already running)",
-            callback=self._make_poke(acct.name)))
-        item.add(rumps.separator)
+        if session and not session.resets_at:
+            self._line(item, f"poke:{acct.name}", "Start the 5h window",
+                       callback=self._make_poke(acct.name))
+        else:
+            self._line(item, f"poke:{acct.name}", "The 5h window is already running",
+                       tone="dim")
 
         # Signing in again is always a reasonable thing to want, and when a
         # directory is holding the wrong account it is the only way out — so it
@@ -1034,9 +1031,13 @@ class ManagerApp(rumps.App):
             _apply_style(note, [("  ", "dim"), (f"This is not {acct.name}. "
                                                 f"Sign in again to fix it.", "hot")])
             item.add(note)
-        item.add(self._browser_menu("Sign in again", acct.name))
-        item.add(rumps.MenuItem("Rename…", callback=self._make_rename(acct.name)))
-        palette = rumps.MenuItem("Colour")
+        signin = self._browser_menu("Sign in again", acct.name)
+        _apply_style(signin, [("  ", "dim"), ("Sign in again", "text")])
+        item.add(signin)
+        self._line(item, f"rename:{acct.name}", "Rename\u2026",
+                   callback=self._make_rename(acct.name))
+        palette = rumps.MenuItem(f"colour:{acct.name}")
+        _apply_style(palette, [("  ", "dim"), ("Colour", "text")])
         current = core.chip_index(acct.name, len(CHIP_COLORS))
         for idx, entry_def in enumerate(CHIP_COLORS):
             label = entry_def[0]
@@ -1047,7 +1048,8 @@ class ManagerApp(rumps.App):
                                  ("  ✓" if idx == current else "", "text")])
             palette.add(entry)
         item.add(palette)
-        item.add(rumps.MenuItem("Remove account…", callback=self._make_remove(acct.name)))
+        self._line(item, f"rm:{acct.name}", "Remove account\u2026",
+                   callback=self._make_remove(acct.name))
         return item
 
     def _session_item(self, sess: sessions.Session, snap: Snapshot) -> rumps.MenuItem:
@@ -1087,8 +1089,8 @@ class ManagerApp(rumps.App):
                 _apply_style(d, [("  ", "dim"), (line, tone)])
                 item.add(d)
             if focus.bundle_for_program(sess.term_program) and sess.tty:
-                item.add(rumps.MenuItem("Take me to that tab",
-                                        callback=self._make_reveal(sess)))
+                self._line(item, f"tab:{sess.pid}", "Take me to that tab",
+                           callback=self._make_reveal(sess))
             item.add(rumps.separator)   # only when there is something above it
         elif running_on:
             # Which account, and which rule chose it. The row shows the account
@@ -1126,10 +1128,12 @@ class ManagerApp(rumps.App):
             for p in snap.rules.profiles:
                 join.add(rumps.MenuItem(p.name, callback=self._make_join(p.name, root)))
             join.add(rumps.separator)
-            join.add(rumps.MenuItem("New profile…", callback=self._make_new_profile(root)))
+            self._line(join, f"newp:{sess.pid}", "New profile\u2026",
+                       callback=self._make_new_profile(root), indent=" ")
             item.add(join)
         item.add(rumps.separator)
-        item.add(rumps.MenuItem("Open in Finder", callback=self._make_open(sess.cwd)))
+        self._line(item, f"finder:{sess.pid}", "Open in Finder",
+                   callback=self._make_open(sess.cwd))
         # Reference last, and on one line. This was six rows of numbers, which
         # is a third of the menu's height spent on figures nobody opens a menu
         # to read. The path names the session; the rest waits in the tooltip
@@ -1174,9 +1178,7 @@ class ManagerApp(rumps.App):
         # to open a submenu holding a single "remove" item, which is a hover
         # spent on a menu that was never a choice. Removal is its own list.
         if prof.repos:
-            head = rumps.MenuItem(f"inhead:{prof.name}", callback=None)
-            _apply_style(head, [("  ", "dim"), ("Projects", "dim")])
-            item.add(head)
+            self._legend(item, f"in:{prof.name}", "Projects")
         for repo in prof.repos:
             entry = rumps.MenuItem(f"in:{prof.name}:{repo}", callback=None)
             _apply_style(entry, [("    ", "dim"), (repo, "dim")])
@@ -1188,9 +1190,7 @@ class ManagerApp(rumps.App):
 
         spare = [r for r in _known_roots(snap) if not prof.covers(r)]
         if spare:
-            add_head = rumps.MenuItem(f"addhead:{prof.name}", callback=None)
-            _apply_style(add_head, [("  ", "dim"), ("Add a project", "dim")])
-            item.add(add_head)
+            self._legend(item, f"add:{prof.name}", "Add a project")
             for root in spare:
                 row = rumps.MenuItem(f"add:{prof.name}:{root}",
                                      callback=self._make_join(prof.name, root))
@@ -1208,8 +1208,10 @@ class ManagerApp(rumps.App):
                              [(" ", "dim"), (repo, "text")])
             item.add(drop)
         item.add(rumps.separator)
-        item.add(rumps.MenuItem("Rename…", callback=self._make_rename_profile(prof.name)))
-        item.add(rumps.MenuItem("Remove profile…", callback=self._make_remove_profile(prof.name)))
+        self._line(item, f"pren:{prof.name}", "Rename\u2026",
+                   callback=self._make_rename_profile(prof.name))
+        self._line(item, f"prm:{prof.name}", "Remove profile\u2026",
+                   callback=self._make_remove_profile(prof.name))
         return item
 
     def _default_item(self, snap: Snapshot) -> rumps.MenuItem:
@@ -1233,6 +1235,35 @@ class ManagerApp(rumps.App):
                         "default", "", snap, current=name, cwd="")
         return item
 
+    @staticmethod
+    def _legend(item: rumps.MenuItem, key: str, text: str) -> rumps.MenuItem:
+        """A heading inside a submenu.
+
+        Two tiers of heading, both letter spaced so they read as printed
+        labels rather than as data. The sections at the top of the menu are
+        upper case; these are sentence case, because several of them carry a
+        project or profile name and upper casing somebody's directory is a lie
+        about what it is called.
+        """
+        row = rumps.MenuItem(f"lg:{key}", callback=None)
+        _apply_style(row, [("  ", "dim"), (text, "head")])
+        item.add(row)
+        return row
+
+    @staticmethod
+    def _line(item: rumps.MenuItem, key: str, label: str, callback=None,
+              tone: str = "text", indent: str = "  ") -> rumps.MenuItem:
+        """One row of a submenu, drawn in the same face as everything else.
+
+        Rows built as plain titles came out in the 13 point system font while
+        the styled rows around them were 12 point monospaced, so the actions at
+        the bottom of a menu looked like they belonged to another program.
+        """
+        row = rumps.MenuItem(key, callback=callback)
+        _apply_style(row, [(indent, "dim"), (label, tone)])
+        item.add(row)
+        return row
+
     def _running_block(self, item: rumps.MenuItem, here: list, empty: str,
                        tag: str) -> None:
         """The sessions running on whatever this menu is about.
@@ -1242,10 +1273,10 @@ class ManagerApp(rumps.App):
         which is the question those numbers raise. Each line opens the tab it
         names, so the account at 95% is one click from the terminal burning it.
         """
-        head = rumps.MenuItem(f"runhead:{tag}", callback=None)
-        _apply_style(head, [("  ", "dim"),
-                            (f"Running now · {len(here)}" if here else empty, "dim")])
-        item.add(head)
+        if here:
+            self._legend(item, f"run:{tag}", f"Running now \u00b7 {len(here)}")
+        else:
+            self._line(item, f"runhead:{tag}", empty, tone="dim")
         for sess in here:
             reachable = focus.bundle_for_program(sess.term_program) and sess.tty
             row = rumps.MenuItem(f"run:{tag}:{sess.pid}",
@@ -1264,8 +1295,8 @@ class ManagerApp(rumps.App):
         the accounts under it turns two hovers into one, and lets two scopes be
         read at the same time instead of one at a time.
         """
-        head = rumps.MenuItem(title, callback=None)
-        _apply_style(head, [("  ", "dim"), (title, "dim")])
+        head = rumps.MenuItem(f"sc:{scope}:{key}", callback=None)
+        _apply_style(head, [("  ", "dim"), (title, "head")])
         rows = [head]
         for acct in snap.accounts:
             if not acct.signed_in:
