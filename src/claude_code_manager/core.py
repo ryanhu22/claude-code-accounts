@@ -22,8 +22,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
 
 from . import codex, keychain, locks, oauth, profiles, sessions
 
@@ -49,7 +49,7 @@ ANTHROPIC_VERSION = "2023-06-01"
 POKE_MODEL = "claude-haiku-4-5-20251001"
 POKE_MODEL_SCOPED = {"fable": "claude-fable-5-1"}
 
-_UA: Optional[str] = None
+_UA: str | None = None
 
 
 def pref(key, default=None):
@@ -105,8 +105,8 @@ def oauth_headers() -> dict:
 
 # --------------------------------------------------------------------------- http
 
-def _post(url: str, body: dict, token: Optional[str] = None, timeout: int = 30,
-          extra_headers: Optional[dict] = None) -> dict:
+def _post(url: str, body: dict, token: str | None = None, timeout: int = 30,
+          extra_headers: dict | None = None) -> dict:
     headers = {"Content-Type": "application/json", **oauth_headers(), **(extra_headers or {})}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -124,7 +124,7 @@ def _get(path: str, token: str, timeout: int = 20) -> dict:
 
 # --------------------------------------------------------------------------- tokens
 
-def fingerprint(blob: Optional[dict]) -> Optional[str]:
+def fingerprint(blob: dict | None) -> str | None:
     """Identity of a credential GENERATION, from its refresh token.
 
     Two config dirs showing the same fingerprint hold the same copy of one
@@ -134,7 +134,7 @@ def fingerprint(blob: Optional[dict]) -> Optional[str]:
     return hashlib.sha256(token.encode()).hexdigest()[:16] if token else None
 
 
-def expiring(blob: Optional[dict], margin: float = 120) -> bool:
+def expiring(blob: dict | None, margin: float = 120) -> bool:
     exp = (blob or {}).get("expiresAt")
     return bool(exp) and exp / 1000 < time.time() + margin
 
@@ -151,7 +151,7 @@ def _apply(blob: dict, resp: dict) -> dict:
     return out
 
 
-def refresh(blob: dict) -> tuple[Optional[dict], Optional[str]]:
+def refresh(blob: dict) -> tuple[dict | None, str | None]:
     """Exchange a refresh token. Returns (grant response, error).
 
     The error is classified because the two failures need opposite handling. A
@@ -192,7 +192,7 @@ def refresh(blob: dict) -> tuple[Optional[dict], Optional[str]]:
     return None, last
 
 
-def token_account(resp: dict) -> Optional[str]:
+def token_account(resp: dict) -> str | None:
     """The email a grant response names, when it names one.
 
     Identity for free, and from the same exchange that produced the token, so
@@ -204,7 +204,7 @@ def token_account(resp: dict) -> Optional[str]:
     return acct.get("email_address") or acct.get("email")
 
 
-def carry_identity(config_dir: str, old_fp: Optional[str], new_fp: Optional[str]) -> None:
+def carry_identity(config_dir: str, old_fp: str | None, new_fp: str | None) -> None:
     """Move a cached identity onto a rotated credential.
 
     Refreshing a token never changes whose token it is, so re-asking the server
@@ -238,7 +238,7 @@ def credential_dirs() -> list[str]:
     return out
 
 
-def propagate(spent: Optional[str], resp: dict, skip: str) -> list[str]:
+def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
     """Hand a rotated token to every other copy of the same credential.
 
     A refresh token is single use: rotating it in one config dir spends it
@@ -280,7 +280,7 @@ def _stash_path(config_dir: str) -> str:
     return os.path.join(STASH_DIR, digest + ".json")
 
 
-def _persist(config_dir: str, rotated: dict, spent: Optional[str]) -> bool:
+def _persist(config_dir: str, rotated: dict, spent: str | None) -> bool:
     """Store a rotated credential, and never lose it if the keychain refuses.
 
     A refresh token is single use. Once the exchange succeeds the stored one is
@@ -306,7 +306,7 @@ def _persist(config_dir: str, rotated: dict, spent: Optional[str]) -> bool:
     return True
 
 
-def _take_stash(config_dir: str, current: Optional[dict]) -> Optional[dict]:
+def _take_stash(config_dir: str, current: dict | None) -> dict | None:
     """A successor left behind by a write that failed, if it fits what is stored."""
     try:
         with open(_stash_path(config_dir)) as f:
@@ -326,7 +326,7 @@ def _drop_stash(config_dir: str) -> None:
         pass
 
 
-def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
+def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
     """Usable credentials for a config dir, refreshed in place when stale.
 
     The refresh runs under Claude Code's own locks and re-reads the credential
@@ -370,7 +370,7 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> Optional[dict]:
     return rotated
 
 
-def profile_result(token: Optional[str]) -> tuple[dict, Optional[str]]:
+def profile_result(token: str | None) -> tuple[dict, str | None]:
     """Account facts for a token, and why the lookup failed when it did.
 
     The error matters more than the facts. "rejected" means the server refused
@@ -392,13 +392,14 @@ def profile_result(token: Optional[str]) -> tuple[dict, Optional[str]]:
     label = " ".join(w.title() if w.isalpha() else w
                      for w in tier.replace("default_claude_", "").split("_") if w)
     if not label:
-        label = "Max" if account.get("has_claude_max") else "Pro" if account.get("has_claude_pro") else ""
+        label = ("Max" if account.get("has_claude_max")
+                 else "Pro" if account.get("has_claude_pro") else "")
     return {"email": account.get("email"), "plan": label or None,
             "tier": tier or None,          # raw, for writing a credential
             "extra_usage": org.get("has_extra_usage_enabled")}, None
 
 
-def profile(token: Optional[str]) -> dict:
+def profile(token: str | None) -> dict:
     """Live account facts for a token: identity and plan.
 
     Read from the API rather than from the stored credential blob. The blob's
@@ -412,7 +413,7 @@ def profile(token: Optional[str]) -> dict:
 IDENTITY_CACHE = os.path.join(ACCOUNTS_DIR, ".identity.json")
 
 
-def identity(config_dir: str, blob: Optional[dict]) -> tuple[dict, Optional[str]]:
+def identity(config_dir: str, blob: dict | None) -> tuple[dict, str | None]:
     """Who a config dir is signed in as, asked at most once per credential.
 
     An account's email and plan cannot change while its credential does not, so
@@ -444,7 +445,7 @@ def identity(config_dir: str, blob: Optional[dict]) -> tuple[dict, Optional[str]
     return {}, err
 
 
-def whoami(token: Optional[str]) -> Optional[str]:
+def whoami(token: str | None) -> str | None:
     """The account a token belongs to. Identity is never inferred from a name."""
     return profile(token).get("email")
 
@@ -456,7 +457,7 @@ class Limit:
     kind: str
     label: str
     percent: float
-    resets_at: Optional[str]
+    resets_at: str | None
     span: int = 0              # window length in seconds, 0 when unknown
     scope: str = ""            # empty for an account-wide window
 
@@ -492,11 +493,11 @@ class Limit:
 class Account:
     name: str
     slot: str
-    email: Optional[str] = None
-    plan: Optional[str] = None
+    email: str | None = None
+    plan: str | None = None
     limits: list[Limit] = field(default_factory=list)
-    error: Optional[str] = None
-    mismatch: Optional[str] = None   # holds a different account than its name
+    error: str | None = None
+    mismatch: str | None = None   # holds a different account than its name
     checked_at: float = 0.0
     usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
     provider: str = "claude"
@@ -526,18 +527,18 @@ class Account:
         """
         return self.usage_age > 600
 
-    def limit(self, kind: str) -> Optional[Limit]:
-        return next((l for l in self.limits if l.kind == kind), None)
+    def limit(self, kind: str) -> Limit | None:
+        return next((lim for lim in self.limits if lim.kind == kind), None)
 
     @property
-    def session_pct(self) -> Optional[float]:
-        l = self.limit("session")
-        return l.spent if l else None
+    def session_pct(self) -> float | None:
+        lim = self.limit("session")
+        return lim.spent if lim else None
 
     @property
-    def weekly_pct(self) -> Optional[float]:
-        l = self.limit("weekly_all")
-        return l.spent if l else None
+    def weekly_pct(self) -> float | None:
+        lim = self.limit("weekly_all")
+        return lim.spent if lim else None
 
     @property
     def ok(self) -> bool:
@@ -550,7 +551,7 @@ class Account:
         return self.email is not None
 
 
-def human_delta(iso: Optional[str]) -> str:
+def human_delta(iso: str | None) -> str:
     if not iso:
         return ""
     try:
@@ -654,7 +655,7 @@ def _cache_write(store: dict, path: str = "") -> None:
         pass
 
 
-def _retry_after(err) -> Optional[float]:
+def _retry_after(err) -> float | None:
     """How long the server asked us to wait, when it says so in seconds."""
     try:
         return max(0.0, float(err.headers.get("Retry-After")))
@@ -662,7 +663,7 @@ def _retry_after(err) -> Optional[float]:
         return None
 
 
-def _waiting(entry: dict, now: float) -> Optional[str]:
+def _waiting(entry: dict, now: float) -> str | None:
     """Why there is nothing to show for this account, counted from now.
 
     Only for the case where there is also no cached payload. A wait is not an
@@ -681,7 +682,7 @@ def _waiting(entry: dict, now: float) -> Optional[str]:
 
 
 def _usage(name: str, fetch, force: bool = False,
-           who: str = "", parse=_parse_limits) -> tuple[list[Limit], float, Optional[str]]:
+           who: str = "", parse=_parse_limits) -> tuple[list[Limit], float, str | None]:
     """Usage for one account: cached, and backed off after a 429.
 
     /api/oauth/usage is rate limited per account, and every running Claude Code
@@ -773,9 +774,9 @@ class UnknownAccount(Exception):
 def resolve_account(query: str) -> str:
     """Accept a short nickname for an account slot.
 
-    Exact name wins, then a unique prefix, then a unique substring, so "rr"
-    finds "account-c", "200" finds "account-a" and "acme" finds
-    "work" without anyone maintaining an alias table.
+    Exact name wins, then a unique prefix, then a unique substring, so "wo"
+    finds "work", "son" finds "personal" and "cm" finds
+    "acme" without anyone maintaining an alias table.
     """
     names = account_names()
     if query in names:
@@ -805,10 +806,11 @@ def resolve_any(query: str) -> tuple[str, str]:
             return pool[0]
         if len(pool) > 1:
             raise UnknownAccount(f"{query!r} matches {', '.join(n for _, n in pool)}")
-    raise UnknownAccount(f"no account matches {query!r} (have: {', '.join(n for _, n in names) or 'none'})")
+    have = ", ".join(n for _, n in names) or "none"
+    raise UnknownAccount(f"no account matches {query!r} (have: {have})")
 
 
-def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
+def find_live_blob(email: str, prefer: str | None = None) -> dict | None:
     """Any live login for an account, from wherever it currently exists.
 
     A swap copies one login into a context, so a slot and a context can share a
@@ -821,7 +823,8 @@ def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
     candidates = ([prefer] if prefer else []) + credential_dirs()
     for cand in dict.fromkeys(c for c in candidates if c):
         # never refresh a context: a session may be running there
-        blob = live_blob(cand) if os.path.abspath(cand) in slots else keychain.read_credentials(cand)
+        blob = (live_blob(cand) if os.path.abspath(cand) in slots
+                else keychain.read_credentials(cand))
         if blob and (identity(cand, blob)[0].get("email") or "").lower() == email.lower():
             return blob
     return None
@@ -939,7 +942,8 @@ def load_codex_account(name: str, with_usage: bool = True, force: bool = False) 
     if with_usage:
         key = f"codex:{name}"
         acct.limits, acct.usage_at, acct.error = _usage(
-            key, lambda: codex.fetch_usage(auth), force, acct.email.lower(), parse=codex.parse_limits)
+            key, lambda: codex.fetch_usage(auth), force, acct.email.lower(),
+            parse=codex.parse_limits)
         entry = _cache_read().get(key) or {}
         data = entry.get("data")
         # A slot may have changed hands outside the manager. Never put the old
@@ -1129,7 +1133,8 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
         return False, "signed in, but the keychain refused to store it"
     _cache_write({**_cache_read(IDENTITY_CACHE),
                   os.path.abspath(slot): {"fp": fingerprint(blob), "email": email,
-                                          "plan": profile_result(blob["accessToken"])[0].get("plan"),
+                                          "plan": profile_result(
+                                              blob["accessToken"])[0].get("plan"),
                                           "at": time.time()}}, IDENTITY_CACHE)
     if before and before.lower() != email.lower():
         # The browser signs in as whoever it was already logged into, which is
@@ -1226,7 +1231,7 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
             try:
                 provider, _ = resolve_any(name)
             except UnknownAccount:
-                raise original
+                raise original from None
             if provider == "codex":
                 return False, "Poking a Codex account is not supported"
             raise original
@@ -1489,7 +1494,7 @@ def account_dirs_for(account: str, live_terms: Iterable[str]) -> list[str]:
     return out
 
 
-def sync_credentials(live: Iterable["sessions.Session"]) -> list[str]:
+def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
     """Give every copy of an account's login the freshest one of ITS lineage.
 
     Copies of a single refresh token cannot all refresh: the token is single
@@ -1665,7 +1670,7 @@ def account_for_email(email: str) -> str:
     return ""
 
 
-def account_of_dir(config_dir: str, accts: Iterable["Account"]) -> str:
+def account_of_dir(config_dir: str, accts: Iterable[Account]) -> str:
     """Which account a config dir is signed in as, by name.
 
     An account's own directory answers by its name alone. Anything else, such
@@ -1690,7 +1695,7 @@ def account_of_dir(config_dir: str, accts: Iterable["Account"]) -> str:
     return next((a.name for a in accts if (a.email or "").lower() == email.lower()), email)
 
 
-def dirs_to_accounts(dirs: Iterable[str], accts: Iterable["Account"]) -> dict[str, str]:
+def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
     """Name the account behind each config dir, reading each credential once.
 
     Doing this a directory at a time re-read every account's credential to
@@ -1727,7 +1732,7 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable["Account"]) -> dict[st
 ALL_SCOPES = ("default", "profile", "project", "session")
 
 
-def rules_using(account: str, r: Optional[profiles.Rules] = None,
+def rules_using(account: str, r: profiles.Rules | None = None,
                 scopes: Iterable[str] = ALL_SCOPES) -> list[str]:
     """Every rule pointing at an account, described for a human.
 
@@ -1774,8 +1779,8 @@ def bootstrap() -> profiles.Rules:
 
 
 def assign(scope: str, key: str, account: str, cwd: str = "",
-           live: Optional[Iterable["sessions.Session"]] = None,
-           applied_out: Optional[dict] = None) -> tuple[bool, str]:
+           live: Iterable[sessions.Session] | None = None,
+           applied_out: dict | None = None) -> tuple[bool, str]:
     """Point one scope at an account. The scope decides how far it reaches.
 
     Nothing is copied and no session is disturbed: this rewrites the rules and
@@ -1784,7 +1789,8 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     """
     try:
         if account in codex_account_names():
-            return False, f"{account} is a Codex account. Routing Codex accounts is not supported yet"
+            return False, (f"{account} is a Codex account. "
+                           "Routing Codex accounts is not supported yet")
         try:
             account = resolve_account(account)
         except UnknownAccount as original:
@@ -1792,9 +1798,10 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
             try:
                 provider, name = resolve_any(account)
             except UnknownAccount:
-                raise original
+                raise original from None
             if provider == "codex":
-                return False, f"{name} is a Codex account. Routing Codex accounts is not supported yet"
+                return False, (f"{name} is a Codex account. "
+                               "Routing Codex accounts is not supported yet")
             raise original
     except UnknownAccount as e:
         return False, str(e)
@@ -1835,8 +1842,8 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     return True, landed(f"{where} now uses {account}", live, applied_out)
 
 
-def landed(where: str, live: Optional[Iterable["sessions.Session"]] = None,
-           applied_out: Optional[dict] = None) -> str:
+def landed(where: str, live: Iterable[sessions.Session] | None = None,
+           applied_out: dict | None = None) -> str:
     """Push the rules that were just saved to live sessions, and report.
 
     Every rule edit ends the same way, so the sentence a user reads is written
@@ -1853,7 +1860,7 @@ def landed(where: str, live: Optional[Iterable["sessions.Session"]] = None,
             f"switch{'' if n != 1 else 'es'} within about 30 seconds")
 
 
-def apply_now(live: Optional[Iterable["sessions.Session"]] = None
+def apply_now(live: Iterable[sessions.Session] | None = None
               ) -> tuple[list[str], dict[str, str]]:
     """Hand the current rules to every live session that has a dir of its own.
 
@@ -1885,8 +1892,8 @@ def apply_now(live: Optional[Iterable["sessions.Session"]] = None
 
 
 def clear(scope: str, key: str, cwd: str = "",
-          live: Optional[Iterable["sessions.Session"]] = None,
-          applied_out: Optional[dict] = None) -> tuple[bool, str]:
+          live: Iterable[sessions.Session] | None = None,
+          applied_out: dict | None = None) -> tuple[bool, str]:
     """Drop a rule so the level above it decides again."""
     r = rules()
     if scope == "session":
@@ -1908,8 +1915,8 @@ def clear(scope: str, key: str, cwd: str = "",
 
 
 def add_profile(name: str, account: str = "",
-                live: Optional[Iterable["sessions.Session"]] = None,
-                applied_out: Optional[dict] = None) -> tuple[bool, str]:
+                live: Iterable[sessions.Session] | None = None,
+                applied_out: dict | None = None) -> tuple[bool, str]:
     name = name.strip()
     if not name:
         return False, "a profile needs a name"
@@ -1927,8 +1934,8 @@ def add_profile(name: str, account: str = "",
 
 
 def remove_profile(name: str,
-                   live: Optional[Iterable["sessions.Session"]] = None,
-                   applied_out: Optional[dict] = None) -> tuple[bool, str]:
+                   live: Iterable[sessions.Session] | None = None,
+                   applied_out: dict | None = None) -> tuple[bool, str]:
     r = rules()
     if not r.profile(name):
         return False, f"no profile named {name}"
@@ -1952,8 +1959,8 @@ def rename_profile(old: str, new: str) -> tuple[bool, str]:
 
 
 def profile_add_repo(name: str, path: str,
-                     live: Optional[Iterable["sessions.Session"]] = None,
-                     applied_out: Optional[dict] = None) -> tuple[bool, str]:
+                     live: Iterable[sessions.Session] | None = None,
+                     applied_out: dict | None = None) -> tuple[bool, str]:
     r = rules()
     prof = r.profile(name)
     if not prof:
@@ -1969,8 +1976,8 @@ def profile_add_repo(name: str, path: str,
 
 
 def profile_remove_repo(name: str, path: str,
-                        live: Optional[Iterable["sessions.Session"]] = None,
-                        applied_out: Optional[dict] = None) -> tuple[bool, str]:
+                        live: Iterable[sessions.Session] | None = None,
+                        applied_out: dict | None = None) -> tuple[bool, str]:
     r = rules()
     if not r.profile(name):
         return False, f"no profile named {name}"

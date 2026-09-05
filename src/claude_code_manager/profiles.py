@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
 
 HOME = os.path.expanduser("~")
 CCM_HOME = os.environ.get("CCM_HOME", os.path.join(HOME, ".claude-manager"))
@@ -61,7 +60,7 @@ class Profile:
     def paths(self) -> list[str]:
         return [expand(r) for r in self.repos]
 
-    def covers(self, path: str) -> Optional[str]:
+    def covers(self, path: str) -> str | None:
         """The repo of this profile that contains `path`, longest first."""
         best = ""
         for repo in self.paths:
@@ -79,10 +78,10 @@ class Rules:
 
     # ---------------------------------------------------------------- lookup
 
-    def profile(self, name: str) -> Optional[Profile]:
+    def profile(self, name: str) -> Profile | None:
         return next((p for p in self.profiles if p.name == name), None)
 
-    def profile_for(self, path: str) -> Optional[Profile]:
+    def profile_for(self, path: str) -> Profile | None:
         """The profile owning a directory. The most specific repo wins, so a
         repo listed in two profiles resolves to the one that named it deeper."""
         best, best_len = None, -1
@@ -92,7 +91,7 @@ class Rules:
                 best, best_len = prof, len(hit)
         return best
 
-    def project_rule_for(self, path: str) -> Optional[str]:
+    def project_rule_for(self, path: str) -> str | None:
         """The project rule covering a directory, as a ~-relative key."""
         best, best_len = None, -1
         for key in self.projects:
@@ -159,13 +158,13 @@ class Rules:
         if prof:
             prof.repos = [r for r in prof.repos if expand(r) != target]
 
-    def set_project(self, path: str, account: Optional[str]) -> None:
+    def set_project(self, path: str, account: str | None) -> None:
         key = tilde(expand(path))
         self.projects.pop(key, None)
         if account:
             self.projects[key] = account
 
-    def set_session(self, term_id: str, account: Optional[str]) -> None:
+    def set_session(self, term_id: str, account: str | None) -> None:
         self.sessions.pop(term_id, None)
         if account:
             self.sessions[term_id] = account
@@ -173,7 +172,7 @@ class Rules:
     # ---------------------------------------------------------------- io
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Rules":
+    def from_dict(cls, d: dict) -> Rules:
         return cls(
             default_account=d.get("default_account") or "",
             profiles=[Profile(name=p.get("name") or "", account=p.get("account") or "",
@@ -264,7 +263,7 @@ def write_resolver() -> None:
     """The routing logic, as a script on disk rather than a shell function.
 
     A shell function lives in the shell that defined it, so a terminal opened
-    weeks ago keeps whatever logic was current then — and will happily read a
+    weeks ago keeps whatever logic was current then, and will happily read a
     file that has since moved, silently routing to the wrong account. Keeping
     the logic in a file the wrapper calls means an old terminal is only one
     line behind, and that line never changes.

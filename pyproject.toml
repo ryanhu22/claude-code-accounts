@@ -1,11 +1,33 @@
 [project]
 name = "claude-code-manager"
 version = "0.1.0"
-description = "Manage multiple Claude Code subscriptions: usage, per-project accounts, and a macOS menu bar app"
+description = "Several Claude Code and Codex subscriptions on one Mac: usage in the menu bar, and which account each project uses"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Ryan Hu" }]
+license-files = ["LICENSE"]
+keywords = ["claude-code", "codex", "menubar", "macos", "usage", "subscriptions"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ryanhu22/claude-code-manager"
+Repository = "https://github.com/ryanhu22/claude-code-manager"
+Issues = "https://github.com/ryanhu22/claude-code-manager/issues"
+Changelog = "https://github.com/ryanhu22/claude-code-manager/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 menubar = ["rumps>=0.4.0"]
@@ -22,3 +44,21 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_code_manager"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["claude_code_manager"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

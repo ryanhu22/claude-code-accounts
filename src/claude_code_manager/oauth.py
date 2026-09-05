@@ -17,12 +17,10 @@ import base64
 import hashlib
 import http.server
 import secrets
-import socket
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Optional
 
 AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
 CALLBACK_URL = "https://platform.claude.com/oauth/code/callback"
@@ -204,7 +202,7 @@ def split_code(pasted: str) -> tuple[str, str]:
     return pasted, ""
 
 
-def finish(attempt: Attempt, pasted: str, post, profile_result) -> tuple[Optional[dict], str]:
+def finish(attempt: Attempt, pasted: str, post, profile_result) -> tuple[dict | None, str]:
     """Exchange a pasted code for a complete, verified credential.
 
     `post` and `profile_result` are passed in rather than imported so this
@@ -284,7 +282,7 @@ BROWSERS = (
 )
 
 
-_INSTALLED: Optional[list[tuple[str, str]]] = None
+_INSTALLED: list[tuple[str, str]] | None = None
 
 
 def installed_browsers() -> list[tuple[str, str]]:

@@ -8,3 +8,7 @@ build/
 
 # worktrees live inside the repo but are separate checkouts
 .claude/worktrees/
+
+.pytest_cache/
+.ruff_cache/
+*.log
