@@ -194,11 +194,15 @@ def _icon_run(name: str, size: float = 12.0):
 
 def _glyph_run(provider: str, size: float, tint, background=None):
     """Keep the service mark in the text grid, just like an inline symbol."""
-    img = glyphs.image(provider, size - 1.0, tint)
-    return _image_run(img, size, background=background)
+    # Two points smaller than a symbol and set against the left of its box,
+    # so the slack of the box falls between the mark and the name. Centred at
+    # full size the mark touched the first letter, and a badge whose icon
+    # crowds its label reads as one smudge rather than as icon and word.
+    img = glyphs.image(provider, size - 2.0, tint)
+    return _image_run(img, size, background=background, align="left")
 
 
-def _image_run(img, size: float, background=None):
+def _image_run(img, size: float, background=None, align: str = "center"):
     """Share the attachment box so provider marks and symbols align."""
     import AppKit
     font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
@@ -213,11 +217,13 @@ def _image_run(img, size: float, background=None):
     box_w, box_h = cell * 2, cell * 1.7
     src = img.size()
     scale = min(box_w / src.width, box_h / src.height) if src.width and src.height else 1.0
+    if align == "left":
+        scale = min(scale, 1.0)   # a mark keeps its size; the slack is the gap
     w, h = src.width * scale, src.height * scale
     boxed = AppKit.NSImage.alloc().initWithSize_(AppKit.NSMakeSize(box_w, box_h))
     boxed.lockFocus()
     img.drawInRect_fromRect_operation_fraction_(
-        AppKit.NSMakeRect((box_w - w) / 2, (box_h - h) / 2, w, h),
+        AppKit.NSMakeRect(0 if align == "left" else (box_w - w) / 2, (box_h - h) / 2, w, h),
         AppKit.NSZeroRect, AppKit.NSCompositingOperationSourceOver, 1.0)
     boxed.unlockFocus()
     att = AppKit.NSTextAttachment.alloc().init()
