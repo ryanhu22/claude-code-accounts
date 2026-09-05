@@ -25,11 +25,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-from . import keychain, locks, oauth, profiles, sessions
+from . import codex, keychain, locks, oauth, profiles, sessions
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
 DEFAULT_CONFIG = os.path.join(HOME, ".claude")
+PREFS_FILE = os.path.join(profiles.CCM_HOME, "prefs.json")
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 TOKEN_URLS = ("https://platform.claude.com/v1/oauth/token",
@@ -49,6 +50,36 @@ POKE_MODEL = "claude-haiku-4-5-20251001"
 POKE_MODEL_SCOPED = {"fable": "claude-fable-5-1"}
 
 _UA: Optional[str] = None
+
+
+def pref(key, default=None):
+    """Read the whole file so another menu process's choices are visible."""
+    try:
+        with open(PREFS_FILE) as f:
+            data = json.load(f)
+        return data.get(key, default) if isinstance(data, dict) else default
+    except (OSError, ValueError):
+        return default
+
+
+def set_pref(key, value):
+    """Replace the file atomically so a reader never sees half a preference."""
+    try:
+        with open(PREFS_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data[key] = value
+    try:
+        os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
+        tmp = PREFS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, PREFS_FILE)
+    except OSError:
+        pass
 
 
 def user_agent() -> str:
@@ -426,6 +457,8 @@ class Limit:
     label: str
     percent: float
     resets_at: Optional[str]
+    span: int = 0              # window length in seconds, 0 when unknown
+    scope: str = ""            # empty for an account-wide window
 
     @property
     def resets_in(self) -> str:
@@ -466,6 +499,12 @@ class Account:
     mismatch: Optional[str] = None   # holds a different account than its name
     checked_at: float = 0.0
     usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
+    provider: str = "claude"
+    extras: dict = field(default_factory=dict)
+
+    @property
+    def is_codex(self) -> bool:
+        return self.provider == "codex"
 
     @property
     def reading(self) -> bool:
@@ -567,7 +606,9 @@ def _parse_limits(data: dict) -> list[Limit]:
                     pct, resets = 0.0, None
             except ValueError:
                 pass
-        out.append(Limit(kind=kind, label=label, percent=pct, resets_at=resets))
+        out.append(Limit(kind=kind, label=label, percent=pct, resets_at=resets,
+                         span=18000 if kind == "session" else 604800,
+                         scope="" if kind in ("session", "weekly_all") else label))
     return out
 
 
@@ -639,8 +680,8 @@ def _waiting(entry: dict, now: float) -> Optional[str]:
     return f"rate limited, retrying in {max(1, round(left / 60))}m"
 
 
-def _usage(name: str, token: str, force: bool = False,
-           who: str = "") -> tuple[list[Limit], float, Optional[str]]:
+def _usage(name: str, fetch, force: bool = False,
+           who: str = "", parse=_parse_limits) -> tuple[list[Limit], float, Optional[str]]:
     """Usage for one account: cached, and backed off after a 429.
 
     /api/oauth/usage is rate limited per account, and every running Claude Code
@@ -674,7 +715,7 @@ def _usage(name: str, token: str, force: bool = False,
     # A cached payload that says nothing counts as no payload here, so the
     # wait gets reported rather than swallowed: the row has no numbers to show
     # and the reason it has none is the only thing left to say.
-    told = _parse_limits(cached) if cached else []
+    told = parse(cached) if cached else []
     speak = None if has_reading(told) else _waiting(entry, now)
     if force and now - (entry.get("tried_at") or 0) < _FORCE_FLOOR:
         return told, at, speak
@@ -683,7 +724,7 @@ def _usage(name: str, token: str, force: bool = False,
     if told and not force and now - at < _MIN_AGE:
         return told, at, speak
     try:
-        data = _get("/api/oauth/usage", token)
+        data = fetch()
     except Exception as e:
         code = getattr(e, "code", None)
         if code == 429:
@@ -702,12 +743,12 @@ def _usage(name: str, token: str, force: bool = False,
             if not cached:
                 return [], 0.0, note
         if cached:
-            return _parse_limits(cached), at, None
+            return parse(cached), at, None
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
     store[name] = {"data": data, "at": now, "retry_after": 0,
                    "who": who, "tried_at": now}
     _cache_write(store)
-    return _parse_limits(data), now, None
+    return parse(data), now, None
 
 
 # --------------------------------------------------------------------------- accounts
@@ -747,6 +788,24 @@ def resolve_account(query: str) -> str:
         if len(pool) > 1:
             raise UnknownAccount(f"{query!r} matches {', '.join(pool)}")
     raise UnknownAccount(f"no account matches {query!r} (have: {', '.join(names) or 'none'})")
+
+
+def codex_account_names() -> list[str]:
+    return codex.account_names()
+
+
+def resolve_any(query: str) -> tuple[str, str]:
+    """Accept the same nicknames across providers, refusing ambiguous ones."""
+    names = [("claude", n) for n in account_names()] + [("codex", n) for n in codex_account_names()]
+    q = query.lower()
+    for pool in ([a for a in names if a[1] == query],
+                 [a for a in names if a[1].lower().startswith(q)],
+                 [a for a in names if q in a[1].lower()]):
+        if len(pool) == 1:
+            return pool[0]
+        if len(pool) > 1:
+            raise UnknownAccount(f"{query!r} matches {', '.join(n for _, n in pool)}")
+    raise UnknownAccount(f"no account matches {query!r} (have: {', '.join(n for _, n in names) or 'none'})")
 
 
 def find_live_blob(email: str, prefer: Optional[str] = None) -> Optional[dict]:
@@ -847,18 +906,63 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
     acct.email = email
     acct.plan = info.get("plan") or blob.get("subscriptionType")
     # An account holding somebody else's login still answers every question,
-    # it just answers them about the wrong subscription — which reads as two
+    # it just answers them about the wrong subscription, which reads as two
     # accounts reporting identical usage rather than as a fault. Say it.
     was = recorded_email(slot)
     if was and email and was.lower() != email.lower():
         # Its own field: the usage fetch below sets `error`, and would
-        # otherwise clear this the moment usage came back fine — which it
+        # otherwise clear this the moment usage came back fine, which it
         # does, because the credential works. It is just the wrong one.
         acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
         acct.limits, acct.usage_at, acct.error = _usage(
-            name, blob["accessToken"], force, (email or "").lower())
+            name, lambda: _get("/api/oauth/usage", blob["accessToken"]),
+            force, (email or "").lower())
     return acct
+
+
+def load_codex_account(name: str, with_usage: bool = True, force: bool = False) -> Account:
+    slot = codex.slot_dir(name)
+    acct = Account(provider="codex", name=name, slot=slot, checked_at=time.time())
+    if not os.path.islink(slot):
+        codex.ensure_account_dir(name)
+    auth = codex.live_auth(slot)
+    if auth is None:
+        raw = codex.read_auth(slot)
+        acct.error = "not signed in" if not raw else "login expired"
+        return acct
+    info = codex.identity(auth)
+    if not info.get("email"):
+        acct.error = "login unreadable"
+        return acct
+    acct.email, acct.plan = info["email"], info["plan"]
+    if with_usage:
+        key = f"codex:{name}"
+        acct.limits, acct.usage_at, acct.error = _usage(
+            key, lambda: codex.fetch_usage(auth), force, acct.email.lower(), parse=codex.parse_limits)
+        entry = _cache_read().get(key) or {}
+        data = entry.get("data")
+        # A slot may have changed hands outside the manager. Never put the old
+        # payload's identity back after the cache has refused its usage.
+        if data and (not entry.get("who") or entry["who"] == acct.email.lower()):
+            acct.extras = codex.extras(data)
+            if data.get("plan_type"):
+                acct.plan = codex.plan_label(data["plan_type"])
+            if data.get("email"):
+                acct.email = data["email"]
+    return acct
+
+
+_CODEX_ADOPTED = False
+
+
+def all_accounts(with_usage: bool = True, force: bool = False) -> list[Account]:
+    global _CODEX_ADOPTED
+    if not _CODEX_ADOPTED:
+        codex.adopt_default()
+        _CODEX_ADOPTED = True
+    return ([load_account(n, with_usage, force) for n in account_names()]
+            + [load_codex_account(n, with_usage, force) for n in codex_account_names()])
 
 
 def recorded_email(config_dir: str) -> str:
@@ -946,24 +1050,29 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
         return False, "name must contain letters, digits, - or _"
     if new == old:
         return True, "unchanged"
-    if new in account_names():
+    if new in account_names() or new in codex_account_names():
         return False, f"{new} already exists"
-    old_slot, new_slot = slot_dir(old), slot_dir(new)
-    blob = keychain.read_credentials(old_slot) or find_live_blob(recorded_email(old_slot))
-    if not blob:
-        return False, f"{old} has no login to move"
-    os.makedirs(new_slot, exist_ok=True)
-    for entry in os.listdir(old_slot):
+    if old in codex_account_names():
+        ok, msg = codex.rename_account(old, new)
+        if not ok:
+            return ok, msg
+    else:
+        old_slot, new_slot = slot_dir(old), slot_dir(new)
+        blob = keychain.read_credentials(old_slot) or find_live_blob(recorded_email(old_slot))
+        if not blob:
+            return False, f"{old} has no login to move"
+        os.makedirs(new_slot, exist_ok=True)
+        for entry in os.listdir(old_slot):
+            try:
+                shutil.move(os.path.join(old_slot, entry), os.path.join(new_slot, entry))
+            except (OSError, shutil.Error):
+                pass
         try:
-            shutil.move(os.path.join(old_slot, entry), os.path.join(new_slot, entry))
-        except (OSError, shutil.Error):
-            pass
-    try:
-        keychain.write_credentials(new_slot, blob)
-    except RuntimeError as e:
-        return False, str(e)
-    keychain.delete(keychain.service_for(old_slot))
-    shutil.rmtree(old_slot, ignore_errors=True)
+            keychain.write_credentials(new_slot, blob)
+        except RuntimeError as e:
+            return False, str(e)
+        keychain.delete(keychain.service_for(old_slot))
+        shutil.rmtree(old_slot, ignore_errors=True)
     try:                                     # keep its colour through the rename
         with open(CHIP_FILE) as f:
             table = json.load(f)
@@ -1031,6 +1140,30 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
     return True, f"“{attempt.account}” is signed in as {email}"
 
 
+def sign_in_begin_codex(name: str) -> codex.Attempt:
+    return codex.begin(name)
+
+
+def sign_in_finish_codex(attempt: codex.Attempt, code: str, state: str) -> tuple[bool, str]:
+    auth, result = codex.finish(attempt, code, state)
+    if auth is None:
+        return False, result
+    email = result
+    try:
+        slot = codex.ensure_account_dir(attempt.account)
+        before = codex.identity(codex.read_auth(slot) or {}).get("email") or ""
+        codex.write_auth(slot, auth)
+    except OSError:
+        return False, "signed in, but the login could not be stored"
+    store = _cache_read()
+    key = f"codex:{attempt.account}"
+    cached_email = (store.get(key) or {}).get("who") or ""
+    if before.lower() != email.lower() or (cached_email and cached_email != email.lower()):
+        store.pop(key, None)
+        _cache_write(store)
+    return True, f"“{attempt.account}” is signed in as {email}"
+
+
 def add_account_command(name: str) -> str:
     """Shell command that signs an account into its own directory.
 
@@ -1044,6 +1177,8 @@ def add_account_command(name: str) -> str:
 
 
 def remove_account(name: str) -> bool:
+    if name in codex_account_names():
+        return codex.remove_account(name)
     slot = slot_dir(name)
     ok = keychain.delete(keychain.service_for(slot))
     try:
@@ -1082,7 +1217,19 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     window that still has no reset time gets the request that starts it.
     """
     try:
-        name = resolve_account(name)
+        if name in codex_account_names():
+            return False, "Poking a Codex account is not supported"
+        try:
+            name = resolve_account(name)
+        except UnknownAccount as original:
+            # Claude nicknames keep their meaning even when Codex has a match.
+            try:
+                provider, _ = resolve_any(name)
+            except UnknownAccount:
+                raise original
+            if provider == "codex":
+                return False, "Poking a Codex account is not supported"
+            raise original
     except UnknownAccount as e:
         return False, str(e)
     blob = live_blob(slot_dir(name))
@@ -1093,7 +1240,7 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     # them. A scoped window needs its own model; everything else rides along
     # with any request, so the general model is only sent when it is the only
     # thing that would start a window.
-    limits, _, _ = _usage(name, blob["accessToken"], force=True)
+    limits, _, _ = _usage(name, lambda: _get("/api/oauth/usage", blob["accessToken"]), force=True)
     stopped = [lim for lim in limits if not lim.resets_at]
     if limits and not stopped:
         return True, "every window is already running"
@@ -1139,6 +1286,7 @@ def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, 
     which keeps the panel honest while the API is rate limiting us: a failed
     lookup used to just drop the "in use by" mark.
     """
+    accts = [a for a in accts if a.provider == "claude"]
     by_fp: dict[str, str] = {}
     for a in accts:
         fp = fingerprint(keychain.read_credentials(a.slot))
@@ -1357,6 +1505,7 @@ def sync_credentials(live: Iterable["sessions.Session"]) -> list[str]:
 
     Keychain work only, apart from that one confirmation, which is cached.
     """
+    # account_names stays Claude-only; Codex homes never enter the keychain pass.
     groups: dict[str, list[str]] = {n: [] for n in account_names()}
     for sess in live:
         if not sess.term_id:
@@ -1523,10 +1672,10 @@ def account_of_dir(config_dir: str, accts: Iterable["Account"]) -> str:
     as a directory a session was launched with before the rules existed, is
     matched on the credential it holds.
     """
+    accts = [a for a in accts if a.provider == "claude"]
     if not config_dir:
         return ""
     base = os.path.basename(os.path.abspath(config_dir).rstrip("/"))
-    accts = list(accts)
     if os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR:
         if any(a.name == base for a in accts):
             return base
@@ -1549,7 +1698,7 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable["Account"]) -> dict[st
     number of directories times the number of accounts. Here every credential
     is read once and matched by fingerprint.
     """
-    accts = list(accts)
+    accts = [a for a in accts if a.provider == "claude"]
     by_fp: dict[str, str] = {}
     for a in accts:
         fp = fingerprint(keychain.read_credentials(a.slot))
@@ -1634,7 +1783,19 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     Project settings follow the project so a move does not re-ask for trust.
     """
     try:
-        account = resolve_account(account)
+        if account in codex_account_names():
+            return False, f"{account} is a Codex account. Routing Codex accounts is not supported yet"
+        try:
+            account = resolve_account(account)
+        except UnknownAccount as original:
+            # Routing still belongs to Claude, so its nickname match wins.
+            try:
+                provider, name = resolve_any(account)
+            except UnknownAccount:
+                raise original
+            if provider == "codex":
+                return False, f"{name} is a Codex account. Routing Codex accounts is not supported yet"
+            raise original
     except UnknownAccount as e:
         return False, str(e)
     r = rules()
