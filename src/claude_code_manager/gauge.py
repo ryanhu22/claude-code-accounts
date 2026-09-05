@@ -40,7 +40,7 @@ NUB_W, NUB_H = 1.5, 3.5
 CHIP_H, CHIP_PAD = 14.0, 3.5
 GAP = 4.0                     # between cells
 GLYPH_IN = 10.0
-GLYPH_TEXT_GAP = 2.5
+GLYPH_TEXT_GAP = 4.0          # the mark and the name are two things, so a visible gap
 SEP_GAP, SEP_H = 7.0, 14.0
 
 
