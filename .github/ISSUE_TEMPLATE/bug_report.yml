@@ -1,0 +1,51 @@
+name: Bug report
+description: Report something that did not work.
+body:
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: Include the steps to reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: accounts
+    attributes:
+      label: ccm list output
+      description: Redact account names, email addresses and project paths. Do not include credentials.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: Output of claude --version, or not installed.
+    validations:
+      required: true
+  - type: input
+    id: codex
+    attributes:
+      label: Codex CLI version
+      description: Output of codex --version, or not installed.
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: Install method
+      description: Include the install command and ccm --version output.
+    validations:
+      required: true
