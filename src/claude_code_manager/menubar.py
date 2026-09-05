@@ -21,7 +21,7 @@ from typing import Optional
 
 import rumps
 
-from . import core, focus, gauge, keychain, oauth, sessions
+from . import codex, core, focus, gauge, glyphs, keychain, oauth, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
@@ -46,6 +46,11 @@ CTX_BAR_W = 6
 PROFILE_W = 16
 PROJ_W = 12                # "12 projects" is the widest this gets
 RUN_W = 11                 # "12 running"
+_CODEX_NAMES: set[str] = set()
+
+
+def _provider_of(name: str) -> str:
+    return "codex" if name in _CODEX_NAMES else "claude"
 
 
 def _fit(text: str, width: int) -> str:
@@ -117,15 +122,34 @@ def _chip_color(name: str):
     return AppKit.NSColor.colorWithHue_saturation_brightness_alpha_(hue, sat, bri, 1.0)
 
 
-def _chip(name: str, width: int = 0) -> list[tuple[str, str, str]]:
+def _chip_colors(chip_key: str):
+    """One wash and ink for both the account name and its service mark."""
+    import AppKit
+    # Terminal-style badge: a faint wash of the hue behind text drawn in
+    # that same hue. A solid fill with white text loses badly on the
+    # lighter hues, and fails outright in light mode.
+    base = _chip_color(chip_key)
+    bg = base.colorWithAlphaComponent_(0.22)
+    fg = base.blendedColorWithFraction_ofColor_(0.42, AppKit.NSColor.labelColor()) or base
+    return bg, fg
+
+
+def _chip(name: str, width: int = 0, wash: bool = True
+          ) -> list[tuple[str, str] | tuple[str, str, str]]:
     """A filled rectangle behind the account name, like a terminal badge.
+
+    The mark rides inside the badge so the account and its service read as
+    one token.
 
     The padding that squares the column sits OUTSIDE the fill. Putting it
     inside made every chip the width of the longest account name, so a short
     name floated in a block of colour and the eye read the block instead of
     the word.
     """
-    out = [(f" {name} ", "chip_fg", name)]
+    tone = "chip_fg" if wash else "text"
+    key = (name,) if wash else ()
+    out = [(" ", tone, *key), (_provider_of(name), "glyph", *key),
+           (f"{name} ", tone, *key)]
     if width and len(name) < width:
         out.append((" " * (width - len(name)), "dim"))
     return out
@@ -138,7 +162,7 @@ def _tone(pct: Optional[float]) -> str:
 
 
 def _icon_run(name: str, size: float = 12.0):
-    """One SF Symbol, sized to exactly one monospace cell.
+    """One SF Symbol, centred inside a two-cell attachment.
 
     Squared to the cell so a row that carries an icon keeps every column after
     it in the same place as a row that does not, which is the whole reason
@@ -146,8 +170,6 @@ def _icon_run(name: str, size: float = 12.0):
     """
     import AppKit
     font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
-    cell = AppKit.NSAttributedString.alloc().initWithString_attributes_(
-        "M", {AppKit.NSFontAttributeName: font}).size().width
     img = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
     if img is None:
         return AppKit.NSAttributedString.alloc().initWithString_attributes_(
@@ -167,6 +189,21 @@ def _icon_run(name: str, size: float = 12.0):
         img = tinted or img
     except Exception:
         img.setTemplate_(True)
+    return _image_run(img, size)
+
+
+def _glyph_run(provider: str, size: float, tint, background=None):
+    """Keep the service mark in the text grid, just like an inline symbol."""
+    img = glyphs.image(provider, size - 1.0, tint)
+    return _image_run(img, size, background=background)
+
+
+def _image_run(img, size: float, background=None):
+    """Share the attachment box so provider marks and symbols align."""
+    import AppKit
+    font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(size, AppKit.NSFontWeightRegular)
+    cell = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+        "M", {AppKit.NSFontAttributeName: font}).size().width
     # Drawn centred inside a box exactly two cells wide, rather than stretched
     # to fill one. Symbols are not square and they are not all the same shape
     # (a folder is 18 by 14, a dashed square is 15 by 14), so scaling each to
@@ -188,7 +225,12 @@ def _icon_run(name: str, size: float = 12.0):
     # Dropped below the baseline so the glyph sits on the same optical line as
     # the text beside it rather than riding above it.
     att.setBounds_(AppKit.NSMakeRect(0, -2.5, box_w, box_h))
-    return AppKit.NSAttributedString.attributedStringWithAttachment_(att)
+    out = AppKit.NSAttributedString.attributedStringWithAttachment_(att)
+    if background is not None:
+        out = AppKit.NSMutableAttributedString.alloc().initWithAttributedString_(out)
+        out.addAttribute_value_range_(AppKit.NSBackgroundColorAttributeName,
+                                      background, AppKit.NSMakeRange(0, 1))
+    return out
 
 
 _FACES = ("ui", "fig", "mono")
@@ -262,6 +304,11 @@ def _styled(segments, size: float = 12.0, mono: bool = True, tabs=None):
         # A third element names a chip, unless it names one of the faces.
         extra = run[2] if len(run) > 2 else None
         chip_key = None if extra in _FACES else extra
+        if tone == "glyph":
+            bg, fg = (_chip_colors(chip_key) if chip_key else
+                      (None, AppKit.NSColor.secondaryLabelColor()))
+            out.appendAttributedString_(_glyph_run(text, size, tint=fg, background=bg))
+            continue
         if tone == "icon":
             # An SF Symbol inside the text, not on the menu item. A menu item's
             # image lives in a gutter macOS reserves for a whole run of items,
@@ -280,13 +327,9 @@ def _styled(segments, size: float = 12.0, mono: bool = True, tabs=None):
             attrs[AppKit.NSKernAttributeName] = 1.6
             tone = "dim"
         if chip_key:
-            # Terminal-style badge: a faint wash of the hue behind text drawn in
-            # that same hue. A solid fill with white text loses badly on the
-            # lighter hues, and fails outright in light mode.
-            base = _chip_color(chip_key)
-            attrs[AppKit.NSBackgroundColorAttributeName] = base.colorWithAlphaComponent_(0.22)
-            attrs[AppKit.NSForegroundColorAttributeName] = base.blendedColorWithFraction_ofColor_(
-                0.42, AppKit.NSColor.labelColor()) or base
+            bg, fg = _chip_colors(chip_key)
+            attrs[AppKit.NSBackgroundColorAttributeName] = bg
+            attrs[AppKit.NSForegroundColorAttributeName] = fg
         else:
             attrs[AppKit.NSForegroundColorAttributeName] = colors.get(tone, colors["text"])
         out.appendAttributedString_(
@@ -452,7 +495,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     except ValueError:
         return "dim"
     left = (dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
-    span = _WINDOW_SECONDS.get(lim.kind)
+    span = lim.span if lim.span > 0 else _WINDOW_SECONDS.get(lim.kind)
     share = (left / span) if span else None
     if share is not None and share <= 0.10:
         return "ok"
@@ -472,7 +515,7 @@ def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str
     that came before it drew as static at this size.
     """
     if level is None:
-        return [("[", "dim"), ("\u2014".center(cells), "dim"), ("]", "dim")]
+        return [("[", "dim"), ("-".center(cells), "dim"), ("]", "dim")]
     filled = max(0, min(cells, round(level / 100 * cells)))
     return [("[", "dim"), (FILL * filled, tone),
             (TICK * (cells - filled), "dim"), ("]", "dim")]
@@ -528,6 +571,30 @@ def _nothing(_sender) -> None:
     """
 
 
+def _scoped(acct: core.Account) -> Optional[core.Limit]:
+    """Show the tighter Codex window, with the short clock winning a tie.
+
+    Claude has one model window. Codex reports a pair, and using the first
+    would hide the weekly limit whenever that is the one holding work up.
+    """
+    limits = [lim for lim in acct.limits if lim.scope]
+    if acct.is_codex:
+        return max(limits, key=lambda lim: (lim.spent, lim.span == 18000), default=None)
+    return next(iter(limits), None)
+
+
+def _span_label(lim: core.Limit) -> str:
+    """Spell out the clock because a model name alone cannot tell the pair apart."""
+    if lim.span == 18000:
+        return "5h"
+    if lim.span == 604800:
+        return "7d"
+    for span, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if lim.span and lim.span % span == 0:
+            return f"{lim.span // span}{unit}"
+    return f"{lim.span}s"
+
+
 def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
     """Every window an account has, as label and figure pairs on tab stops.
 
@@ -539,8 +606,7 @@ def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
     for kind in ("session", "weekly_all"):
         lim = acct.limit(kind)
         out += _window_cell(lim.label if lim else kind, lim)
-    scoped = next((l for l in acct.limits
-                   if l.kind not in ("session", "weekly_all")), None)
+    scoped = _scoped(acct)
     out += _window_cell(scoped.label if scoped else "fable", scoped)
     return out
 
@@ -590,7 +656,7 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     # way; the space just moved to where it separates instead of joins.
     out = [(f"  {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
            # Four wide, so a full window keeps its gap from the track.
-           ("    —" if spent is None else f"{spent:4.0f}%", tone)]
+           ("    -" if spent is None else f"{spent:4.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -607,8 +673,18 @@ def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> l
     return out
 
 
+def _blank_bucket(label: str) -> list[tuple[str, str]]:
+    """Keep the slot so the 7d column stays a column across providers.
+
+    The word says the plan has no such window, rather than that nothing is
+    known. The blank track includes the two cells used by its brackets.
+    """
+    return [(f"  {label:>5} ", "dim"), (" " * (BAR_W + 2), "dim"),
+            (" none", "dim"), (" " * 9, "dim")]
+
+
 def _pct(v: Optional[float]) -> str:
-    return "—" if v is None else f"{v:.0f}%"
+    return "-" if v is None else f"{v:.0f}%"
 
 
 def _compact_tokens(n: int) -> str:
@@ -955,7 +1031,7 @@ class ManagerApp(rumps.App):
         self._syncing = False
         # Accounts with a browser tab open for a sign-in, keyed to the attempt
         # that opened it. Main thread only, like every other menu state.
-        self._signing_in: dict[str, oauth.Attempt] = {}
+        self._signing_in: dict[str, oauth.Attempt | codex.Attempt] = {}
         # Per config dir, the fingerprint of the credential it held last time
         # it was looked at. What tells a cached owner from a stale one.
         self._owner_prints: dict[str, Optional[str]] = {}
@@ -1007,7 +1083,9 @@ class ManagerApp(rumps.App):
 
     def _repaint(self) -> None:
         """Redraw the text that changes without the menu changing shape."""
+        global _CODEX_NAMES
         snap = self._snapshot
+        _CODEX_NAMES = {a.name for a in snap.accounts if a.is_codex}
         for acct in snap.accounts:
             row = self._account_rows.get(acct.name)
             if row is not None:
@@ -1041,7 +1119,7 @@ class ManagerApp(rumps.App):
 
     def _collect(self, force: bool = False) -> Snapshot:
         snap = Snapshot()
-        snap.accounts = [core.load_account(n, force=force) for n in core.account_names()]
+        snap.accounts = core.all_accounts(force=force)
         snap.sessions = sessions.live(core.credential_dirs(), with_git=True,
                                       with_transcript=True)
         snap.rules = core.bootstrap()
@@ -1216,8 +1294,10 @@ class ManagerApp(rumps.App):
         self.menu.add(head)
 
     def _rebuild(self) -> None:
-        self._drawn_at = time.time()
+        global _CODEX_NAMES
         snap = self._snapshot
+        _CODEX_NAMES = {a.name for a in snap.accounts if a.is_codex}
+        self._drawn_at = time.time()
         reg = _registry()
         stale = list(reg) if reg is not None else []
         self._apply_title(snap)
@@ -1247,8 +1327,8 @@ class ManagerApp(rumps.App):
         # Everything in this menu that is not a session, counted rather than
         # guessed: a flash row when there is one, three headings, three
         # separators, one row per account, one per profile, the catch-all,
-        # and five actions. What is left is what the session list may have.
-        fixed = 1 + 3 + 3 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 5
+        # and up to six actions. What is left is what the session list may have.
+        fixed = 1 + 3 + 3 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 6
         shown, hidden = _capped(snap.sessions, _rows_that_fit() - fixed)
         for sess in shown:
             self.menu.add(self._session_item(sess, snap))
@@ -1281,9 +1361,11 @@ class ManagerApp(rumps.App):
         new_profile = rumps.MenuItem("New profile…", callback=self._make_new_profile())
         _set_icon(new_profile, "folder.badge.plus")
         self.menu.add(new_profile)
-        add = rumps.MenuItem("Add an account…", callback=self._add_account)
-        _set_icon(add, "person.badge.plus")
-        self.menu.add(add)
+        for provider, label in (("claude", "Claude"), ("codex", "Codex")):
+            add = rumps.MenuItem(f"Add a {label} account…",
+                                 callback=self._make_add_provider(provider))
+            add._menuitem.setImage_(glyphs.template(provider))
+            self.menu.add(add)
         follow = rumps.MenuItem("Show the front tab's account",
                                 callback=self._toggle_follow)
         _set_icon(follow, "eye")
@@ -1307,7 +1389,11 @@ class ManagerApp(rumps.App):
 
     def _shown_account(self, snap: Snapshot) -> tuple[Optional[core.Account], Optional[str],
                                                        Optional[sessions.Session]]:
-        """The account the menu bar describes: the front tab's, else the default account's."""
+        """Show the pinned account, then the front tab's, then the default account."""
+        preferred = core.pref("bar_account", "")
+        acct = next((a for a in snap.accounts if a.name == preferred), None)
+        if acct is not None:
+            return acct, acct.name, None
         sess = self._tracker.focus.session if self._tracker.enabled else None
         if sess is not None:
             name = snap.running_on.get(sess.env_config_dir, "")
@@ -1334,21 +1420,28 @@ class ManagerApp(rumps.App):
         acct, name, sess = self._shown_account(snap)
         name = acct.name if acct else (_short(name) if name else "?")
         if acct and acct.reading:
-            fable = next((l for l in acct.limits
-                          if l.kind not in ("session", "weekly_all")), None)
-            cells = [self._cell("5h", acct.limit("session")),
-                     self._cell("7d", acct.limit("weekly_all"))]
-            if fable:
-                cells.append(self._cell(fable.label, fable))
+            scoped = _scoped(acct)
+            cells = []
+            for caption, kind in (("5h", "session"), ("7d", "weekly_all")):
+                lim = acct.limit(kind)
+                if not acct.is_codex or lim is not None:
+                    cells.append(self._cell(caption, lim))
+            if scoped:
+                cells.append(self._cell(scoped.label, scoped))
         else:
             # A battery reads as what is left, so an empty answer drew as a
             # full one: three hundreds and a confident bar, off no data at all.
-            cells = [gauge.Cell("5h", None, "dim"), gauge.Cell("7d", None, "dim")]
+            cells = ([gauge.Cell("7d", None, "dim")] if acct and acct.is_codex else
+                     [gauge.Cell("5h", None, "dim"), gauge.Cell("7d", None, "dim")])
         # The tab being followed is named in the menu's first row, not here:
         # the bar is shared with every other app and stays as narrow as it can.
         dim = bool(acct and (acct.error or acct.stale or not acct.reading))
+        # Keep the fallback independent of AppKit, including chip colours:
+        # a failure making a colour should still leave the account readable.
         try:
-            img = gauge.status_image(name, _chip_color(name), cells, dim=dim)
+            section = gauge.Section(acct.provider if acct else "claude", name,
+                                    _chip_color(name), cells, dim)
+            img = gauge.status_image([section])
             item = self._nsapp.nsstatusitem
             item.setTitle_("")
             item.button().setImage_(img)
@@ -1380,7 +1473,22 @@ class ManagerApp(rumps.App):
 
     def _toggle_follow(self, _sender) -> None:
         self._tracker.enabled = not self._tracker.enabled
+        if self._tracker.enabled:
+            core.set_pref("bar_account", "")
         self._rebuild()
+
+    def _make_show_bar(self, name: str):
+        def handler(_sender):
+            core.set_pref("bar_account", name)
+            self._tracker.enabled = False
+            self._rebuild()
+        return handler
+
+    def _bar_choice(self, item: rumps.MenuItem, acct: core.Account) -> None:
+        row = self._line(item, f"bar:{acct.name}", "Show this account in the menu bar",
+                         callback=self._make_show_bar(acct.name))
+        _set_icon(row, "menubar.rectangle")
+        row._menuitem.setState_(1 if core.pref("bar_account", "") == acct.name else 0)
 
     def _account_segments(self, acct: core.Account, snap: Snapshot) -> list:
         """One account row. Split out because the countdowns in it age.
@@ -1400,15 +1508,15 @@ class ManagerApp(rumps.App):
         # sign-in is there to fix, and while the browser tab is open the news
         # is that it is being fixed, not what was wrong.
         pending = acct.name in self._signing_in
-        fable = next((l for l in acct.limits
-                      if l.kind not in ("session", "weekly_all")), None)
+        scoped = _scoped(acct)
         # The account the menu bar is showing gets the mark the front session
         # gets. The numbers in the menu bar belong to exactly one of these
         # five rows, and until now nothing on the row said which, so the
         # figures up there and the figures down here were two readings a
         # reader had to match by name.
         shown = self._shown_account(snap)[1] == acct.name
-        sure = not self._tracker.enabled or self._tracker.focus.exact
+        sure = (bool(core.pref("bar_account", ""))
+                or not self._tracker.enabled or self._tracker.focus.exact)
         segments = [(f"{FOCUS_MARK} ", "ok" if sure else "warn")
                     if shown else ("  ", "dim"),
                     *_chip(acct.name, NAME_W), ("  ", "dim"), *_lamps(here)]
@@ -1416,7 +1524,7 @@ class ManagerApp(rumps.App):
             # Nothing usable came back. Every window draws as unknown rather
             # than as empty, because empty is a claim and this is the absence
             # of one, and the note below says the fetch is still trying.
-            for label in ("5h", "7d", "fable"):
+            for label in ("5h", "7d", "model" if acct.is_codex else "fable"):
                 segments += _bucket(label, None)
             # Says the app is still trying, because a row of dashes on its own
             # reads as broken rather than as pending.
@@ -1424,15 +1532,17 @@ class ManagerApp(rumps.App):
                             else (f"   {acct.error or 'asking again'}", "dim"))
             return segments
         weekly = acct.limit("weekly_all")
-        segments += _bucket("5h", acct.limit("session"))
+        segments += (_blank_bucket("5h")
+                     if acct.is_codex and acct.extras.get("has_5h") is False
+                     else _bucket("5h", acct.limit("session")))
         segments += _bucket("7d", weekly)
         # The model window usually rolls over with the weekly one, and its
         # countdown was hidden when the two matched to avoid saying the same
         # thing twice. That traded a repeated word for a hole in the row: the
         # only way to read the blank was to know the rule that made it, and
         # scanning a column of resets is easier when every window has one.
-        if fable:
-            segments += _bucket(fable.label, fable)
+        if scoped:
+            segments += _bucket(scoped.label, scoped)
         if used_by:
             segments.append((f"   {', '.join(used_by)}", "dim"))
         if pending:
@@ -1447,16 +1557,17 @@ class ManagerApp(rumps.App):
 
     def _account_item(self, acct: core.Account, snap: Snapshot) -> rumps.MenuItem:
         if not acct.signed_in:
-            item = rumps.MenuItem(f"  {acct.name} — {acct.error}")
-            _apply_style(item, [(f"  {acct.name:<{NAME_W}}", "text"),
+            item = rumps.MenuItem(f"  {acct.name} - {acct.error}")
+            _apply_style(item, [("  ", "dim"), *_chip(acct.name, NAME_W, wash=False),
                                 SIGNING_TAIL if acct.name in self._signing_in
                                 else (f"  {acct.error}", "hot")])
             self._signing_row(item, acct.name)
             again = "Sign in again" if acct.error == "login expired" else "Sign in"
-            item.add(self._browser_menu(again, acct.name))
+            self._bar_choice(item, acct)
+            item.add(self._browser_menu(again, acct.name, provider=acct.provider))
             return item
         # plain title stays unique: rumps keys its callback registry by it
-        head = f"{acct.name} — {_pct(acct.session_pct)} 5h"
+        head = f"{acct.name} - {_pct(acct.session_pct)} 5h"
         item = rumps.MenuItem(head)
         _apply_style(item, self._account_segments(acct, snap))
         self._account_rows[acct.name] = item
@@ -1478,10 +1589,14 @@ class ManagerApp(rumps.App):
         self._usage_block(item, acct)
 
 
-        self._running_block(
-            item, [s for s in snap.sessions
-                   if snap.running_on.get(s.env_config_dir) == acct.name],
-            "No sessions are running on this account", f"acct:{acct.name}")
+        if acct.is_codex:
+            self._line(item, f"runhead:acct:{acct.name}",
+                       "No sessions are listed for Codex accounts yet", tone="dim")
+        else:
+            self._running_block(
+                item, [s for s in snap.sessions
+                       if snap.running_on.get(s.env_config_dir) == acct.name],
+                "No sessions are running on this account", f"acct:{acct.name}")
         item.add(rumps.separator)
 
         # There is no "use this account for" block here. It listed the profiles
@@ -1499,7 +1614,7 @@ class ManagerApp(rumps.App):
         # so an account whose only stopped clock was the Fable one showed no
         # button at all, and the row it would have fixed kept reading "unused".
         stopped = [lim for lim in acct.limits if not lim.resets_at]
-        if acct.reading and stopped:
+        if not acct.is_codex and acct.reading and stopped:
             names = ", ".join(lim.label for lim in stopped)
             _set_icon(self._line(item, f"poke:{acct.name}",
                                  f"Start the {names} window now" if len(stopped) == 1
@@ -1508,7 +1623,7 @@ class ManagerApp(rumps.App):
             item.add(rumps.separator)
 
         # Signing in again is always a reasonable thing to want, and when a
-        # directory is holding the wrong account it is the only way out — so it
+        # directory is holding the wrong account it is the only way out - so it
         # cannot live only on rows that already look broken.
         if acct.mismatch:
             note = rumps.MenuItem(f"This is not {acct.name}: {acct.mismatch}", callback=None)
@@ -1522,7 +1637,8 @@ class ManagerApp(rumps.App):
         # the image gutter for a whole run, so a run that is part icons and
         # part not indents itself unevenly, and the session table above must
         # keep the left edge it shares with the menu it opened from.
-        signin = self._browser_menu("Sign in again", acct.name)
+        self._bar_choice(item, acct)
+        signin = self._browser_menu("Sign in again", acct.name, provider=acct.provider)
         _apply_style(signin, [("  ", "dim"), ("Sign in again", "text")], mono=False)
         _set_icon(signin, "person.crop.circle.badge.checkmark")
         item.add(signin)
@@ -1559,7 +1675,7 @@ class ManagerApp(rumps.App):
             (os.path.abspath(sess.cwd), root), sess.term_id)
         ruled = bool(sess.term_id) and sess.term_id in r.sessions
         prof = r.profile_for(root)
-        head = f"  {sess.label} — {running_on or '?'} · {sess.status or sess.kind}"
+        head = f"  {sess.label} - {running_on or '?'} · {sess.status or sess.kind}"
         item = rumps.MenuItem(head)
         # Fixed columns: focus mark, rule mark, chip, repo, what the session
         # is, context bar, lifetime tokens, status, idle age. The repo repeats
@@ -1694,7 +1810,7 @@ class ManagerApp(rumps.App):
         n = len(prof.repos)
         here = [s for s in snap.sessions
                 if prof.covers(core.project_root(s.cwd))]
-        head = f"  {prof.name} — {prof.account or 'no account'} · {n} repos"
+        head = f"  {prof.name} - {prof.account or 'no account'} · {n} repos"
         item = rumps.MenuItem(head)
         # The account first, as in every other row in this menu. A subscription
         # row leads with the account it is, a session row with the account it
@@ -1705,7 +1821,7 @@ class ManagerApp(rumps.App):
         _apply_style(item, [
             ("  ", "dim"),
             *(_chip(prof.account, NAME_W) if prof.account
-              else [(f"{'unassigned':<{NAME_W}}", "warn")]),
+              else [(f"{'unassigned':<{NAME_W + 2}}", "warn")]),
             # The same lamp a subscription row uses, but after the profile
             # name rather than after the account. These sessions are running
             # because of this profile's rule, not because of the account it
@@ -1769,10 +1885,10 @@ class ManagerApp(rumps.App):
         """Where anything with no rule goes."""
         name = snap.rules.default_account
         loose = [s for s in snap.sessions if _reason(snap, s) == "default"]
-        item = rumps.MenuItem(f"  everything else — {name or 'not set'}")
+        item = rumps.MenuItem(f"  everything else - {name or 'not set'}")
         _apply_style(item, [
             ("  ", "dim"),
-            *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W}}", "hot")]),
+            *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W + 2}}", "hot")]),
             # Dashed, because this is not a profile anybody made. It is
             # what collects whatever the named ones did not.
             ("  ", "dim"), ("square.dashed", "icon"), (" ", "dim"),
@@ -1888,18 +2004,33 @@ class ManagerApp(rumps.App):
         if not acct.reading:
             return
         self._legend(item, f"use:{acct.name}", "Usage")
-        for lim in acct.limits:
+        for index, lim in enumerate(acct.limits):
             spent = lim.spent
             if spent is None:
                 continue
             when = _compact_reset(lim.resets_at) if lim.resets_at else "unused"
             at = _clock_time(lim.resets_at)
-            self._spec(item, f"lim:{acct.name}:{lim.kind}", lim.label,
+            label = f"{lim.scope} {_span_label(lim)}" if lim.scope else lim.label
+            # Multiple models can share a kind, so each window needs its own key.
+            self._spec(item, f"lim:{acct.name}:{lim.kind}:{index}", label,
                        f"{spent:.0f}%", _tone(spent),
                        after=[("".join(t for t, *_ in _gauge(spent, BAR_W, "ok")), "mono"),
-                              (f"  resets in {when}", "dim"),
+                              (f"  resets in {when}" if lim.resets_at else "  unused", "dim"),
                               (f" ({at})" if at else "", "dim")])
+        if acct.is_codex and acct.extras.get("has_5h") is False:
+            self._line(item, f"no5h:{acct.name}", "This plan has no 5h window.", tone="dim")
         item.add(rumps.separator)
+        if acct.is_codex and acct.extras:
+            balance = str(acct.extras.get("credits_balance") or "")
+            balance_text = ("none" if not acct.extras.get("has_credits")
+                            or balance in ("", "0") else balance)
+            n = acct.extras.get("reset_credits", 0)
+            note = f"  {n} reset credit{'s' if n != 1 else ''}" if n else ""
+            if acct.extras.get("reset_credits_applicable") == 0 and n > 0:
+                note += ", none apply right now"
+            self._spec(item, f"credits:{acct.name}", "credits", balance_text, "dim",
+                       after=[(note, "dim")] if note else [])
+            item.add(rumps.separator)
 
     @staticmethod
     def _spec(row: rumps.MenuItem, key: str, label: str, figure: str,
@@ -1975,7 +2106,7 @@ class ManagerApp(rumps.App):
         _apply_style(head, [("  ", "dim"), (title, "head")], mono=False)
         rows = [head]
         for acct in snap.accounts:
-            if not acct.signed_in:
+            if acct.is_codex or not acct.signed_in:
                 continue
             same = acct.name == current
             # The plain title has to be unique inside one menu, and it is what
@@ -2239,11 +2370,19 @@ class ManagerApp(rumps.App):
 
     def _make_remove(self, account: str):
         def handler(_sender):
-            confirm = rumps.alert(
-                title=f"Remove {account}?",
-                message="This deletes its stored login from the keychain. Your "
-                        "subscription is untouched, and you can add it back with a sign-in.",
-                ok="Remove", cancel="Cancel")
+            acct = next((a for a in self._snapshot.accounts if a.name == account), None)
+            title = f"Remove {account}?"
+            message = ("This deletes its stored login from the keychain. Your "
+                       "subscription is untouched, and you can add it back with a sign-in.")
+            if acct and acct.is_codex:
+                if os.path.islink(acct.slot):
+                    title = f"Stop tracking {account}?"
+                    message = ("This removes the account from the app. "
+                               "The login in ~/.codex is untouched.")
+                else:
+                    message = ("This deletes its login file. Your subscription is untouched, "
+                               "and you can add it back with a sign-in.")
+            confirm = rumps.alert(title=title, message=message, ok="Remove", cancel="Cancel")
             if confirm == 1:
                 core.remove_account(account)
                 self.refresh_now(None)
@@ -2254,7 +2393,12 @@ class ManagerApp(rumps.App):
             self._add_account(None, preset=name)
         return handler
 
-    def _browser_menu(self, title: str, name: str) -> rumps.MenuItem:
+    def _make_add_provider(self, provider: str):
+        def handler(_sender):
+            self._add_account(None, provider=provider)
+        return handler
+
+    def _browser_menu(self, title: str, name: str, provider: str = "claude") -> rumps.MenuItem:
         """Pick the browser to sign in with.
 
         Which browser matters: it signs in as whoever that browser is already
@@ -2263,23 +2407,29 @@ class ManagerApp(rumps.App):
         """
         menu = rumps.MenuItem(title)
         for label, app in oauth.installed_browsers():
-            menu.add(rumps.MenuItem(label, callback=self._make_sign_in(name, app)))
+            menu.add(rumps.MenuItem(label, callback=self._make_sign_in(name, app, provider)))
         return menu
 
-    def _make_sign_in(self, name: str, app: str):
+    def _make_sign_in(self, name: str, app: str, provider: str = "claude"):
         def handler(_sender):
-            self._sign_in(name, app)
+            self._sign_in(name, app, provider)
         return handler
 
-    def _sign_in(self, name: str, app: str = "") -> None:
+    def _sign_in(self, name: str, app: str = "", provider: str = "claude") -> None:
         """Sign an account in. The browser hands the code back by itself."""
         try:
-            cb = oauth.Callback()
+            cb = (oauth.Callback(port=codex.CALLBACK_PORT, path=codex.CALLBACK_PATH)
+                  if provider == "codex" else oauth.Callback())
         except OSError as e:
-            self._notify(f"Could not sign in as “{name}”. The app could not open "
-                         f"a local port for the browser to call back on.\n\n{e}")
+            if provider == "codex":
+                self._notify(f"Could not sign in as “{name}”. Port 1455 is in use. "
+                             "Close any other sign-in or `codex login` and try again.")
+            else:
+                self._notify(f"Could not sign in as “{name}”. The app could not open "
+                             f"a local port for the browser to call back on.\n\n{e}")
             return
-        attempt = core.sign_in_begin(name, cb.redirect_uri)
+        attempt = (core.sign_in_begin_codex(name) if provider == "codex"
+                   else core.sign_in_begin(name, cb.redirect_uri))
         # The server is made before the attempt, because the authorize URL
         # needs the port, so it learns which sign-in it is waiting for only
         # now. Anything on this machine can reach that port; without this it
@@ -2309,7 +2459,9 @@ class ManagerApp(rumps.App):
                 elif cb.error or not cb.code:
                     outcome = (False, f"Sign-in was refused: {cb.error or 'no code came back'}")
                 else:
-                    outcome = core.sign_in_finish(attempt, f"{cb.code}#{cb.state}")
+                    outcome = (core.sign_in_finish_codex(attempt, cb.code, cb.state)
+                               if provider == "codex" else
+                               core.sign_in_finish(attempt, f"{cb.code}#{cb.state}"))
             except Exception as e:
                 outcome = (False, f"Signing in as “{name}” failed: {e}")
             finally:
@@ -2347,22 +2499,25 @@ class ManagerApp(rumps.App):
                            ("   finish in the browser", "dim")])
         item.add(row)
 
-    def _add_account(self, _sender, preset: str = "") -> None:
-        """Open Claude Code in an account's own directory so /login can run.
+    def _add_account(self, _sender, preset: str = "", provider: str = "claude") -> None:
+        """Name an account before opening its provider's browser sign-in.
 
-        Signing in needs a browser round trip that only Claude Code can do, so
-        the most this can offer is to put the user in the right place: a fresh
-        Terminal already running Claude Code as that account, waiting for
-        /login. Names are asked for only when the account is new.
+        The label chooses where the returned login belongs, so it must be
+        settled before the browser opens. Existing rows already have a name.
         """
         name = preset
         if not name:
             win = rumps.Window(
-                title="Add a Claude account",
-                message="Name this account (letters, digits, dashes). It is a label "
-                        "for you, not the email.\nA Terminal opens running Claude Code "
-                        "as that account, where you type /login.",
-                ok="Open Terminal", cancel="Cancel", dimensions=(240, 22))
+                title="Add a Codex account" if provider == "codex" else "Add a Claude account",
+                message=("Name this account (letters, digits, dashes). It is a label "
+                         "for you, not the email.\nA browser opens to sign in to ChatGPT. "
+                         "Use the browser that is signed in to the account you want."
+                         if provider == "codex" else
+                         "Name this account (letters, digits, dashes). It is a label "
+                         "for you, not the email.\nA Terminal opens running Claude Code "
+                         "as that account, where you type /login."),
+                ok="Open browser" if provider == "codex" else "Open Terminal",
+                cancel="Cancel", dimensions=(240, 22))
             resp = win.run()
             if resp.clicked != 1:
                 return
@@ -2370,7 +2525,7 @@ class ManagerApp(rumps.App):
         name = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
         if not name:
             return
-        self._sign_in(name)   # default browser; per-browser entries live on the row
+        self._sign_in(name, provider=provider)   # per-browser entries live on the row
 
     @staticmethod
     def _make_open(path: str):
