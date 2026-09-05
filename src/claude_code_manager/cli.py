@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 
-from . import core, oauth, sessions, shell
+from . import codex, core, oauth, sessions, shell
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -18,10 +19,12 @@ def _bar(pct: float, width: int = 20) -> str:
 
 def cmd_list(_args) -> int:
     r = core.bootstrap()
-    accts = [core.load_account(n) for n in core.account_names()]
+    accts = core.all_accounts()
     for acct in accts:
-        used = core.rules_using(acct.name, r)
+        used = [] if acct.is_codex else core.rules_using(acct.name, r)
         head = f"\033[1m{acct.name}{X}"
+        if acct.is_codex:
+            head += f"{D} codex{X}"
         if acct.signed_in:
             head += f"  {D}{acct.email} · {acct.plan}{X}"
             if used:
@@ -34,11 +37,23 @@ def cmd_list(_args) -> int:
             head += f"  {Y}{acct.error}{X}"
         print(head)
         if not acct.signed_in:
-            print(f"  (ccm add {acct.name})\n")
+            hint = f"ccm login {acct.name} --codex" if acct.is_codex else f"ccm add {acct.name}"
+            print(f"  ({hint})\n")
             continue
         for lim in acct.limits:
             when = f"{D}resets {lim.resets_in}{X}" if lim.resets_at else f"{D}idle{X}"
-            print(f"  {lim.label:>6}  {_bar(lim.percent)} {lim.percent:5.1f}%  {when}")
+            span = {18000: "5h", 604800: "7d"}.get(lim.span, "")
+            label = f"{lim.scope} {span}".strip() if lim.scope else span or lim.label
+            print(f"  {label:>6}  {_bar(lim.percent)} {lim.percent:5.1f}%  {when}")
+        if acct.extras:
+            balance = acct.extras.get("credits_balance") or "none"
+            if balance == "0":
+                balance = "none"
+            detail = f"credits: {balance}"
+            resets = acct.extras.get("reset_credits") or 0
+            if resets > 0:
+                detail += f" · reset credits: {resets}"
+            print(f"  {D}{detail}{X}")
         print()
     return 0
 
@@ -210,6 +225,33 @@ def cmd_login(args) -> int:
     The browser returns the code to a local port, so there is nothing to copy.
     If nothing can listen, or the wait times out, fall back to pasting it.
     """
+    if args.codex:
+        if args.paste:
+            print("Codex sign-in has no paste flow", file=sys.stderr)
+            return 1
+        try:
+            cb = oauth.Callback(port=codex.CALLBACK_PORT, path=codex.CALLBACK_PATH)
+        except OSError:
+            print("port 1455 is in use (is another sign-in or `codex login` running?)", file=sys.stderr)
+            return 1
+        try:
+            attempt = core.sign_in_begin_codex(args.account)
+            cb.expect(attempt.state)
+            err = oauth.open_in(attempt.url, args.browser or "")
+            if err:
+                print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
+                      file=sys.stderr)
+            else:
+                print(f"Signing in as “{args.account}”. A browser is opening.")
+            print(f"{D}Waiting for the browser…{X}")
+            if cb.wait(300) and cb.code:
+                ok, msg = core.sign_in_finish_codex(attempt, cb.code, cb.state)
+            else:
+                ok, msg = False, cb.error or "no code returned within five minutes; try signing in again"
+        finally:
+            cb.close()
+        print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 1
     cb = None
     if not args.paste:
         try:
@@ -249,7 +291,11 @@ def cmd_login(args) -> int:
 
 
 def cmd_add(args) -> int:
-    print(core.add_account_command(args.account))
+    if args.codex:
+        slot = shlex.quote(codex.slot_dir(args.account))
+        print(f"mkdir -p {slot} && CODEX_HOME={slot} codex login")
+    else:
+        print(core.add_account_command(args.account))
     return 0
 
 
@@ -285,13 +331,15 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_pin)
     sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
     sub.add_parser("resolve", help="print the config dir for this shell").set_defaults(func=cmd_resolve)
-    p = sub.add_parser("login", help="sign an account in through the browser")
+    p = sub.add_parser("login", help="sign an account in through the browser (add --codex for an OpenAI Codex account)")
     p.add_argument("account")
     p.add_argument("--browser", help='e.g. "Google Chrome", "Safari"')
     p.add_argument("--paste", action="store_true", help="paste the code instead of listening")
+    p.add_argument("--codex", action="store_true", help="sign in to OpenAI Codex")
     p.set_defaults(func=cmd_login)
     p = sub.add_parser("add", help="print the command that signs an account in")
     p.add_argument("account")
+    p.add_argument("--codex", action="store_true", help="print the Codex sign-in command")
     p.set_defaults(func=cmd_add)
     args = parser.parse_args(argv)
     return args.func(args)

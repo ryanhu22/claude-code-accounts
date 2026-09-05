@@ -134,6 +134,23 @@ A weekly reset leaves an account at 0% with no window running: the 5-hour
 window starts when you first use it. `ccm poke` starts it deliberately for
 about 22 input tokens, so the window lines up with when you want it.
 
+## Codex accounts
+
+`ccm list` also tracks OpenAI Codex subscriptions: their plan, usage windows,
+credits and reset credits. Sign another account in through the browser:
+
+```sh
+ccm login <name> --codex
+```
+
+The login already in `~/.codex` appears as `codex`, through a symlink rather
+than a second copy of its refresh token. Each additional account owns a
+`CODEX_HOME` at `~/.codex-accts/<name>` with only `auth.json` of its own;
+everything else links back to `~/.codex`, so settings and history stay shared.
+
+Windows differ by plan. Pro Lite has a weekly window only; plans with a
+five-hour window show that too. Routing Codex accounts is not supported yet.
+
 ## How it works
 
 ### One config directory per account

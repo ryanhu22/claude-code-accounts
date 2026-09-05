@@ -73,15 +73,16 @@ class Callback:
     attempt, not swap in a code of its own.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, port: int = 0, path: str = CALLBACK_PATH) -> None:
         self.code = self.state = self.error = ""
         self.expected_state = ""
+        self.path = path
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
                 parsed = urllib.parse.urlparse(self.path)
-                if parsed.path != CALLBACK_PATH:
+                if parsed.path != outer.path:
                     self._reply(404, NOT_FOUND_PAGE)
                     return
                 got = urllib.parse.parse_qs(parsed.query)
@@ -112,14 +113,14 @@ class Callback:
             def log_message(self, *_a):
                 pass
 
-        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self._server = http.server.HTTPServer(("127.0.0.1", port), Handler)
         self._done = threading.Event()
         self.port = self._server.server_address[1]
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     @property
     def redirect_uri(self) -> str:
-        return f"http://localhost:{self.port}{CALLBACK_PATH}"
+        return f"http://localhost:{self.port}{self.path}"
 
     def expect(self, state: str) -> None:
         """Name the sign-in this server is waiting for.
