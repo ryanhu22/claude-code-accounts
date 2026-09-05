@@ -16,8 +16,6 @@ import os
 import subprocess
 import threading
 import time
-import webbrowser
-from typing import Optional
 
 import rumps
 
@@ -155,7 +153,7 @@ def _chip(name: str, width: int = 0, wash: bool = True
     return out
 
 
-def _tone(pct: Optional[float]) -> str:
+def _tone(pct: float | None) -> str:
     if pct is None:
         return "dim"
     return "ok" if pct < 60 else "warn" if pct < 85 else "hot"
@@ -369,7 +367,7 @@ def _icon(name: str, size: float = 13.0):
     return img
 
 
-def _set_icon(item: "rumps.MenuItem", name: str) -> None:
+def _set_icon(item: rumps.MenuItem, name: str) -> None:
     img = _icon(name)
     if img is not None:
         item._menuitem.setImage_(img)
@@ -413,7 +411,7 @@ def _spec_line(label: str, figure: str, tone: str = "text", after=()):
     return _styled(runs, tabs=SPEC_TABS)
 
 
-def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True,
+def _apply_style(item: rumps.MenuItem, segments, mono: bool = True,
                  tabs=None) -> None:
     """Style a row, falling back silently to its plain title if AppKit balks."""
     try:
@@ -422,7 +420,7 @@ def _apply_style(item: "rumps.MenuItem", segments, mono: bool = True,
         pass
 
 
-def _clock_time(iso: Optional[str]) -> str:
+def _clock_time(iso: str | None) -> str:
     """When a window comes back, on the wall clock.
 
     A countdown says how long to wait; a time says whether that lands before
@@ -440,7 +438,7 @@ def _clock_time(iso: Optional[str]) -> str:
         else local.strftime("%a %-I:%M %p").lower()
 
 
-def _compact_reset(iso: Optional[str]) -> str:
+def _compact_reset(iso: str | None) -> str:
     """Short countdown for an inline row: 45m, 4h, 34h, 3d.
 
     Computed from the absolute reset timestamp on every render, so it stays
@@ -474,7 +472,7 @@ _WINDOW_SECONDS = {"session": 5 * 3600,
                    "weekly_scoped": 7 * 86400}
 
 
-def _reset_tone(lim: Optional[core.Limit]) -> str:
+def _reset_tone(lim: core.Limit | None) -> str:
     """The countdown's colour: how close this window is to coming back.
 
     Measured as a share of the window, not as a count of hours. Absolute
@@ -512,7 +510,7 @@ def _reset_tone(lim: Optional[core.Limit]) -> str:
     return "time" if share <= 0.33 else "text" if share <= 0.66 else "dim"
 
 
-def _gauge(level: Optional[float], cells: int, tone: str) -> list[tuple[str, str]]:
+def _gauge(level: float | None, cells: int, tone: str) -> list[tuple[str, str]]:
     """A bar in a bracketed track, filled to `level` per cent.
 
     Every step of the scale is printed whether it is lit or not, so the bar can
@@ -577,7 +575,7 @@ def _nothing(_sender) -> None:
     """
 
 
-def _scoped(acct: core.Account) -> Optional[core.Limit]:
+def _scoped(acct: core.Account) -> core.Limit | None:
     """Show the tighter Codex window, with the short clock winning a tie.
 
     Claude has one model window. Codex reports a pair, and using the first
@@ -601,7 +599,7 @@ def _span_label(lim: core.Limit) -> str:
     return f"{lim.span}s"
 
 
-def _windows(acct: "core.Account") -> list[tuple[str, str, str]]:
+def _windows(acct: core.Account) -> list[tuple[str, str, str]]:
     """Every window an account has, as label and figure pairs on tab stops.
 
     Same three, same order and same colours as the row in the subscriptions
@@ -635,7 +633,7 @@ def _window_cell(label: str, lim) -> list[tuple[str, str, str]]:
             (f"\t{'(' + when + ')' if when else ''}", _reset_tone(lim), "ui")]
 
 
-def _bucket(label: str, lim: Optional[core.Limit], show_reset: bool = True) -> list[tuple[str, str]]:
+def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list[tuple[str, str]]:
     """One usage window: its name, how much is used, and when it comes back."""
     # The list fills as the window is spent, so the squares are the usage and
     # the number beside them is the same figure. The menu bar battery is the
@@ -689,7 +687,7 @@ def _blank_bucket(label: str) -> list[tuple[str, str]]:
             (" none", "dim"), (" " * 9, "dim")]
 
 
-def _pct(v: Optional[float]) -> str:
+def _pct(v: float | None) -> str:
     return "-" if v is None else f"{v:.0f}%"
 
 
@@ -702,7 +700,7 @@ def _compact_tokens(n: int) -> str:
     return str(n)
 
 
-def _context_bar(sess: "sessions.Session", named: bool = True) -> list[tuple[str, str]]:
+def _context_bar(sess: sessions.Session, named: bool = True) -> list[tuple[str, str]]:
     """How full this session's context window is, labelled so it reads as that.
 
     Taken from the last request the session made, so it answers the question a
@@ -751,7 +749,7 @@ def _spent_tone(total: int) -> str:
     return "hot"
 
 
-def _spent_cell(sess: "sessions.Session") -> tuple[str, str]:
+def _spent_cell(sess: sessions.Session) -> tuple[str, str]:
     """Lifetime tokens for the row, shaded by how many."""
     total = sess.spent.total
     # Twelve wide, not ten: two of those are the gap that separates this from
@@ -795,7 +793,7 @@ def _run_in_terminal(command: str) -> str:
     return ""
 
 
-def _session_segments(sess: "sessions.Session", running_on: str) -> list[tuple[str, str]]:
+def _session_segments(sess: sessions.Session, running_on: str) -> list[tuple[str, str]]:
     """A session row, everything after the focus mark.
 
     Split out so a row can be repainted with fresh status, context and age
@@ -819,7 +817,7 @@ def _session_segments(sess: "sessions.Session", running_on: str) -> list[tuple[s
     ]
 
 
-def _reason(snap: "Snapshot", sess: "sessions.Session") -> str:
+def _reason(snap: Snapshot, sess: sessions.Session) -> str:
     """Which rule decides this session's account, read from the snapshot.
 
     core.resolve reloads the rules from disk on every call, and the menu asks
@@ -829,7 +827,7 @@ def _reason(snap: "Snapshot", sess: "sessions.Session") -> str:
         (os.path.abspath(sess.cwd), core.project_root(sess.cwd)), sess.term_id)[1]
 
 
-def _session_line(sess: "sessions.Session", why: str = "") -> list[tuple[str, str]]:
+def _session_line(sess: sessions.Session, why: str = "") -> list[tuple[str, str]]:
     """A session, seen from an account or a profile rather than on its own.
 
     The wide row at the top of the menu answers "what is running". This
@@ -889,7 +887,7 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 48 else f"{hours // 24}d"
 
 
-def _short(email: Optional[str]) -> str:
+def _short(email: str | None) -> str:
     return (email or "?").split("@")[0]
 
 
@@ -935,7 +933,7 @@ def _capped(items: list, room: int) -> tuple[list, int]:
     return (items, 0) if len(items) <= room else (items[:room], len(items) - room)
 
 
-def _shape(snap: "Snapshot") -> tuple:
+def _shape(snap: Snapshot) -> tuple:
     """What the menu is made of, as opposed to what it says.
 
     Percentages, countdowns and ages change on every refresh and are repainted
@@ -954,7 +952,7 @@ def _shape(snap: "Snapshot") -> tuple:
     )
 
 
-def _registry() -> Optional[dict]:
+def _registry() -> dict | None:
     """rumps' map from NSMenuItem back to the Python object that owns it.
 
     rumps writes into this on every MenuItem it makes so it can find the
@@ -985,7 +983,7 @@ def _forget(stale: list) -> None:
         reg.pop(key, None)
 
 
-_WATCHER: Optional[type] = None
+_WATCHER: type | None = None
 
 
 def _watcher_class() -> type:
@@ -1031,7 +1029,7 @@ class ManagerApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Claude", title=f"{ICON} …", quit_button=None)
         self._snapshot = Snapshot()
-        self._pending: Optional[Snapshot] = None
+        self._pending: Snapshot | None = None
         self._lock = threading.Lock()
         self._busy = False
         self._syncing = False
@@ -1040,14 +1038,14 @@ class ManagerApp(rumps.App):
         self._signing_in: dict[str, oauth.Attempt | codex.Attempt] = {}
         # Per config dir, the fingerprint of the credential it held last time
         # it was looked at. What tells a cached owner from a stale one.
-        self._owner_prints: dict[str, Optional[str]] = {}
+        self._owner_prints: dict[str, str | None] = {}
         self._again = False
         self._polling = False
-        self._fresh_sessions: Optional[tuple] = None
+        self._fresh_sessions: tuple | None = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
         self._account_rows: dict[str, rumps.MenuItem] = {}
-        self._refresh_item: Optional[rumps.MenuItem] = None
+        self._refresh_item: rumps.MenuItem | None = None
         self._flash: tuple[str, str, float] = ("", "", 0.0)
         self._done: list = []
         self._drawn_at = 0.0
@@ -1393,8 +1391,8 @@ class ManagerApp(rumps.App):
 
     # ------------------------------------------------------------------ title
 
-    def _shown_account(self, snap: Snapshot) -> tuple[Optional[core.Account], Optional[str],
-                                                       Optional[sessions.Session]]:
+    def _shown_account(self, snap: Snapshot) -> tuple[core.Account | None, str | None,
+                                                       sessions.Session | None]:
         """Show the pinned account, then the front tab's, then the default account."""
         preferred = core.pref("bar_account", "")
         acct = next((a for a in snap.accounts if a.name == preferred), None)
@@ -1409,7 +1407,7 @@ class ManagerApp(rumps.App):
         return acct, name or None, sess
 
     @staticmethod
-    def _cell(caption: str, lim: "Optional[core.Limit]") -> gauge.Cell:
+    def _cell(caption: str, lim: core.Limit | None) -> gauge.Cell:
         """One battery: how much of a window is spent, and when it comes back.
 
         The countdown is the answer to the question the percentage raises, so
@@ -1584,7 +1582,7 @@ class ManagerApp(rumps.App):
         # that is identified by that name and by that colour, and the title
         # named only the email, so the one thing tying the two together was
         # which row the pointer happened to be on. Five accounts and four
-        # gmail addresses made that a real question.
+        # similar email addresses made that a real question.
         who = rumps.MenuItem(f"who:{acct.name}", callback=None)
         _apply_style(who, [("  ", "dim"), *_chip(acct.name),
                            ("   ", "dim"), (acct.email or "unknown account", "text"),
@@ -1811,7 +1809,7 @@ class ManagerApp(rumps.App):
         item.add(note_item)
         return item
 
-    def _profile_item(self, prof: "core.profiles.Profile", snap: Snapshot) -> rumps.MenuItem:
+    def _profile_item(self, prof: core.profiles.Profile, snap: Snapshot) -> rumps.MenuItem:
         """One profile: the account its repositories use, and which they are."""
         n = len(prof.repos)
         here = [s for s in snap.sessions
@@ -2049,7 +2047,7 @@ class ManagerApp(rumps.App):
             pass
         row.add(note)
 
-    def _session_notes(self, row: rumps.MenuItem, sess: "sessions.Session",
+    def _session_notes(self, row: rumps.MenuItem, sess: sessions.Session,
                        reachable: bool, tag: str) -> None:
         """What the condensed row leaves out, laid out as a specification.
 
@@ -2178,7 +2176,7 @@ class ManagerApp(rumps.App):
         _apply_style(item, [("  ", "dim"), (text, tone)])
         self.menu.add(item)
 
-    def _did(self, ok: bool, message: str, applied: Optional[dict] = None) -> None:
+    def _did(self, ok: bool, message: str, applied: dict | None = None) -> None:
         """Finish a rule change: redraw now, and say what happened in the menu.
 
         Only the rules moved, so nothing has to come back from the API before
@@ -2233,7 +2231,7 @@ class ManagerApp(rumps.App):
         self._flash = (message, "ok", time.time())
         self._reflect_rules(applied)
 
-    def _reflect_rules(self, applied: Optional[dict] = None) -> None:
+    def _reflect_rules(self, applied: dict | None = None) -> None:
         """Redraw immediately from the rules, without waiting on the network.
 
         Only the directories the change actually wrote to can have moved, and

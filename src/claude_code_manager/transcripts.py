@@ -16,8 +16,8 @@ from __future__ import annotations
 import glob
 import json
 import os
-from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 # Enough tail to hold several assistant turns and the periodic title record.
 # A single record can be far larger than a turn (a pasted image, a big file
@@ -66,7 +66,7 @@ class Totals:
 
 
 TOKEN_CACHE = os.path.join(os.path.expanduser("~"), ".claude-accts", ".tokens.json")
-_tokens: Optional[dict] = None
+_tokens: dict | None = None
 
 
 def _tokens_load() -> dict:
@@ -158,7 +158,7 @@ class Digest:
         return window_for(self.model)
 
     @property
-    def context_pct(self) -> Optional[float]:
+    def context_pct(self) -> float | None:
         if not self.context_tokens:
             return None
         return min(100.0, self.context_tokens / self.window * 100)

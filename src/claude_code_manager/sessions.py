@@ -19,8 +19,8 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
 
 from . import transcripts
 
@@ -51,8 +51,8 @@ class Session:
     title: str = ""              # Claude Code's own description of the conversation
     context_tokens: int = 0
     model: str = ""
-    context_pct: Optional[float] = None
-    spent: "transcripts.Totals" = field(default_factory=lambda: transcripts.Totals())
+    context_pct: float | None = None
+    spent: transcripts.Totals = field(default_factory=lambda: transcripts.Totals())
 
     @property
     def is_worktree(self) -> bool:
@@ -75,7 +75,7 @@ class Session:
     def derived_name(self) -> bool:
         """True when the name is Claude Code's placeholder, not a real one.
 
-        A derived name is the repo plus a few hex characters ("callie-ehr-9d"),
+        A derived name is the repo plus a few hex characters ("acme-app-9d"),
         which says nothing at all once the repo is already its own column.
         """
         return self.name_source == "derived" or not self.name
@@ -172,7 +172,7 @@ def _environ(pid: int, proc_start: str = "") -> tuple[dict[str, str], str]:
     return env, tty
 
 
-def _read(path: str, config_dir: str) -> Optional[Session]:
+def _read(path: str, config_dir: str) -> Session | None:
     try:
         with open(path) as f:
             d = json.load(f)
@@ -300,12 +300,12 @@ def prune(config_dirs: Iterable[str]) -> int:
     return removed
 
 
-def discover_config_dirs(home: Optional[str] = None) -> list[str]:
+def discover_config_dirs(home: str | None = None) -> list[str]:
     """Config dirs with a session running right now.
 
     Claude Code keys its keychain item on the config-dir path STRING, so two
     paths naming the same directory are two separate logins: `~/.claude-work`
-    is a symlink to `~/.claude-ryantrycallie` and has a login of its own.
+    is a symlink to `~/.claude-acme` and has a login of its own.
     A dir reached only through such an alias appears in no routing table while
     still billing real work, so it is found here by its live session files.
     """

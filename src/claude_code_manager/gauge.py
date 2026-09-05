@@ -13,7 +13,6 @@ not two, and a full bar means plenty on both.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from . import glyphs
 
@@ -47,7 +46,7 @@ SEP_GAP, SEP_H = 7.0, 14.0
 @dataclass
 class Cell:
     caption: str                # 5h, 7d, fable
-    used: Optional[float]       # percent used, None when unknown
+    used: float | None       # percent used, None when unknown
     tone: str                   # ok | warn | hot | dim
     reset: str = ""             # 45m, 3h, 5d; empty when the window has not started
     reset_tone: str = "dim"     # how much the countdown matters, not how long it is
@@ -251,7 +250,7 @@ def status_image(sections: list[Section]):
 
     def draw(_rect) -> bool:
         x = 0.0
-        for index, (section, (chip_w, widths)) in enumerate(zip(sections, layouts)):
+        for index, (section, (chip_w, widths)) in enumerate(zip(sections, layouts, strict=True)):
             if index:
                 x += SEP_GAP
                 _bar_ink().colorWithAlphaComponent_(0.25).setFill()
@@ -272,7 +271,7 @@ def status_image(sections: list[Section]):
             name_str.drawAtPoint_(AppKit.NSMakePoint(
                 x + CHIP_PAD + GLYPH_IN + GLYPH_TEXT_GAP, (HEIGHT - sz.height) / 2))
             x += chip_w
-            for cell, cell_w in zip(section.cells, widths):
+            for cell, cell_w in zip(section.cells, widths, strict=True):
                 x += GAP
                 cap, res = head(cell, dim)
                 hx = x + (cell_w - head_width(cap, res)) / 2

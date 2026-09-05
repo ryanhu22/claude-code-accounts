@@ -12,7 +12,6 @@ import json
 import os
 import pwd
 import subprocess
-from typing import Optional
 
 LEGACY_SERVICE = "Claude Code-credentials"
 _NOT_FOUND_RC = 44
@@ -29,11 +28,11 @@ def service_for(config_dir: str) -> str:
     return f"{LEGACY_SERVICE}-{digest}"
 
 
-def _run(args: list[str], stdin: Optional[str] = None) -> subprocess.CompletedProcess:
+def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=20)
 
 
-def read_raw(service: str) -> Optional[str]:
+def read_raw(service: str) -> str | None:
     r = _run(["security", "find-generic-password", "-s", service, "-a", account_name(), "-w"])
     if r.returncode == _NOT_FOUND_RC:
         return None
@@ -69,7 +68,7 @@ def delete(service: str) -> bool:
     return r.returncode in (0, _NOT_FOUND_RC)
 
 
-def read_credentials(config_dir: str) -> Optional[dict]:
+def read_credentials(config_dir: str) -> dict | None:
     """The claudeAiOauth blob a config dir is logged in with."""
     raw = read_raw(service_for(config_dir))
     if raw is None and os.path.abspath(config_dir) == os.path.expanduser("~/.claude"):

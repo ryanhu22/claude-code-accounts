@@ -21,13 +21,13 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from . import sessions
 
 # bundle id -> (TERM_PROGRAM value, AppleScript for the selected tab's tty)
-TERMINALS: dict[str, tuple[str, Optional[str]]] = {
+TERMINALS: dict[str, tuple[str, str | None]] = {
     "com.apple.Terminal": (
         "Apple_Terminal",
         'tell application "Terminal" to get tty of selected tab of front window'),
@@ -49,7 +49,7 @@ DENIED_BACKOFF = 30.0   # after AppleScript fails, wait this long before asking 
 
 @dataclass
 class Focus:
-    session: Optional[sessions.Session]
+    session: sessions.Session | None
     exact: bool = True        # tty match, as opposed to "newest tab of that app"
     note: str = ""            # why there is no exact answer, for the menu
 
@@ -129,7 +129,7 @@ class Tracker:
         self._asked_at = 0.0
         self._failed_at = 0.0
         self._busy = False
-        self._pending: Optional[tuple[str, str, str]] = None   # bundle, tty, error
+        self._pending: tuple[str, str, str] | None = None   # bundle, tty, error
         self.focus = Focus(None, exact=True)
         self.enabled = True
 

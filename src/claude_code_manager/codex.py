@@ -26,7 +26,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Optional
 
 HOME = os.path.expanduser("~")
 DEFAULT_HOME = os.path.join(HOME, ".codex")
@@ -44,7 +43,7 @@ PROVIDER = "codex"
 
 _AUTH_CLAIM = "https://api.openai.com/auth"
 _PROFILE_CLAIM = "https://api.openai.com/profile"
-_UA: Optional[str] = None
+_UA: str | None = None
 _RUNNING: tuple[float, set[str]] = (-1.0, set())
 
 
@@ -106,7 +105,7 @@ def ensure_account_dir(name: str) -> str:
     return path
 
 
-def adopt_default() -> Optional[str]:
+def adopt_default() -> str | None:
     """Track the existing login without copying its refresh-token lineage."""
     if not os.path.exists(os.path.join(DEFAULT_HOME, "auth.json")):
         return None
@@ -122,7 +121,7 @@ def adopt_default() -> Optional[str]:
     return name
 
 
-def read_auth(home: str) -> Optional[dict]:
+def read_auth(home: str) -> dict | None:
     try:
         with open(os.path.join(home, "auth.json")) as f:
             data = json.load(f)
@@ -237,10 +236,11 @@ def _post(body: dict, form: bool = False) -> dict:
 
 
 def _stamp() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return now.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def refresh(auth: dict) -> tuple[Optional[dict], Optional[str]]:
+def refresh(auth: dict) -> tuple[dict | None, str | None]:
     """Only an explicit invalid_grant says the stored lineage is spent.
 
     As on the Claude side, a nested error or a failed connection proves
@@ -275,7 +275,7 @@ def refresh(auth: dict) -> tuple[Optional[dict], Optional[str]]:
     return None, "transient"
 
 
-def live_auth(home: str) -> Optional[dict]:
+def live_auth(home: str) -> dict | None:
     """Refresh only an idle home, with one manager holding the grant at a time.
 
     Claude's copied lineages taught us that single-use refresh tokens cannot
@@ -354,7 +354,8 @@ def parse_limits(data: dict) -> list:
                 continue
             secs = int(window.get("limit_window_seconds") or 0)
             if scoped:
-                kind = {18000: "scoped_session", 604800: "scoped_weekly"}.get(secs, f"scoped_{secs}")
+                kind = {18000: "scoped_session", 604800: "scoped_weekly"}.get(
+                    secs, f"scoped_{secs}")
             else:
                 kind = {18000: "session", 604800: "weekly_all"}.get(secs, f"window_{secs}")
             percent = float(window.get("used_percent") or 0)
@@ -373,7 +374,8 @@ def parse_limits(data: dict) -> list:
     out = windows(data.get("rate_limit") or {})
     scoped = []
     for entry in data.get("additional_rate_limits") or []:
-        scoped.extend(windows(entry.get("rate_limit") or {}, short_name(entry.get("limit_name")), True))
+        scoped.extend(windows(
+            entry.get("rate_limit") or {}, short_name(entry.get("limit_name")), True))
     return out + sorted(scoped, key=lambda lim: lim.span)
 
 
@@ -414,10 +416,11 @@ class Attempt:
 
 
 def begin(account: str) -> Attempt:
-    return Attempt(verifier=secrets.token_urlsafe(64), state=secrets.token_urlsafe(24), account=account)
+    return Attempt(verifier=secrets.token_urlsafe(64), state=secrets.token_urlsafe(24),
+                   account=account)
 
 
-def finish(attempt: Attempt, code: str, state: str) -> tuple[Optional[dict], str]:
+def finish(attempt: Attempt, code: str, state: str) -> tuple[dict | None, str]:
     """Save no login until its usage endpoint confirms whose login it is."""
     if not code:
         return None, "no code was returned"
@@ -441,7 +444,8 @@ def finish(attempt: Attempt, code: str, state: str) -> tuple[Optional[dict], str
         "auth_mode": "chatgpt", "OPENAI_API_KEY": None,
         "tokens": {"id_token": resp["id_token"], "access_token": resp["access_token"],
                    "refresh_token": resp["refresh_token"],
-                   "account_id": (claims(resp["id_token"]).get(_AUTH_CLAIM) or {}).get("chatgpt_account_id")},
+                   "account_id": (claims(resp["id_token"]).get(_AUTH_CLAIM) or {}).get(
+                       "chatgpt_account_id")},
         "last_refresh": _stamp(),
     }
     try:

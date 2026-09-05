@@ -31,7 +31,7 @@ import os
 import random
 import threading
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 # Claude Code's credential locks run `stale: 60000, update: 5000`. A lock
 # younger than 60s belongs to a live holder and must never be stolen: its

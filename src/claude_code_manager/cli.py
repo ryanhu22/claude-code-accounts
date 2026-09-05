@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from . import codex, core, oauth, sessions, shell
+from . import __version__, codex, core, oauth, sessions, shell
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -76,9 +76,11 @@ def cmd_where(_args) -> int:
     why = _WHY.get(reason) or f"the “{reason.split(':', 1)[-1]}” profile"
     acct = core.load_account(account, with_usage=False) if account else None
     print(cwd)
-    print(f"  account : {G}{account or 'none'}{X}" + (f"  {D}{acct.email}{X}" if acct and acct.email else ""))
+    email = f"  {D}{acct.email}{X}" if acct and acct.email else ""
+    print(f"  account : {G}{account or 'none'}{X}" + email)
     print(f"  because : {D}{why}{X}")
-    print(f"  dir     : {D}{core.account_dir(account).replace(core.HOME, '~') if account else '-'}{X}")
+    directory = core.account_dir(account).replace(core.HOME, "~") if account else "-"
+    print(f"  dir     : {D}{directory}{X}")
     return 0
 
 
@@ -88,7 +90,8 @@ def _rule_table(r, accts) -> None:
     def chip(name: str) -> str:
         a = plan.get(name)
         return f"{name}" + (f" {D}({a.email}){X}" if a and a.email else "")
-    print(f"{'everything else':<22} {chip(r.default_account) if r.default_account else Y + 'not set' + X}")
+    default = chip(r.default_account) if r.default_account else Y + "not set" + X
+    print(f"{'everything else':<22} {default}")
     for prof in r.profiles:
         n = len(prof.repos)
         print(f"\n{prof.name:<22} {chip(prof.account) if prof.account else D + 'no account' + X}"
@@ -185,7 +188,8 @@ def cmd_sessions(_args) -> int:
         running_on = owners.get(s.env_config_dir, "")
         wanted, reason = core.resolve(s.cwd, s.term_id)
         drift = f"  {Y}-> {wanted} on restart{X}" if wanted and wanted != running_on else ""
-        print(f"{'\u25cf' if pinned else ' '} {s.label[:24]:<25} {s.status or s.kind:<7} "
+        pin_mark = "\u25cf" if pinned else " "
+        print(f"{pin_mark} {s.label[:24]:<25} {s.status or s.kind:<7} "
               f"{s.cwd.replace(core.HOME, '~')[:44]:<45} {running_on or '?':<15}"
               f"{D}{reason}{X}{drift}")
     print(f"\n{D}\u25cf = has a rule of its own. `ccm use <account> --session` pins the "
@@ -232,7 +236,8 @@ def cmd_login(args) -> int:
         try:
             cb = oauth.Callback(port=codex.CALLBACK_PORT, path=codex.CALLBACK_PATH)
         except OSError:
-            print("port 1455 is in use (is another sign-in or `codex login` running?)", file=sys.stderr)
+            print("port 1455 is in use (is another sign-in or `codex login` running?)",
+                  file=sys.stderr)
             return 1
         try:
             attempt = core.sign_in_begin_codex(args.account)
@@ -247,7 +252,8 @@ def cmd_login(args) -> int:
             if cb.wait(300) and cb.code:
                 ok, msg = core.sign_in_finish_codex(attempt, cb.code, cb.state)
             else:
-                ok, msg = False, cb.error or "no code returned within five minutes; try signing in again"
+                ok = False
+                msg = cb.error or "no code returned within five minutes; try signing in again"
         finally:
             cb.close()
         print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
@@ -301,6 +307,7 @@ def cmd_add(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ccm", description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="usage for every subscription").set_defaults(func=cmd_list)
     for verb in ("use", "swap"):
@@ -314,7 +321,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("shell-init", help="print the shell wrapper to eval in your rc file")
     p.add_argument("shell", nargs="?", default="zsh", choices=("zsh", "bash"))
     p.set_defaults(func=cmd_shell_init)
-    sub.add_parser("profiles", help="show every rule, least specific first").set_defaults(func=cmd_profiles)
+    sub.add_parser("profiles", help="show every rule, least specific first").set_defaults(
+        func=cmd_profiles)
     p = sub.add_parser("profile", help="create and edit profiles")
     p.add_argument("action", choices=("new", "rm", "rename", "add", "drop"))
     p.add_argument("name")
@@ -324,14 +332,20 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("poke", help="spend one token to start an account's 5h window")
     p.add_argument("account")
     p.set_defaults(func=cmd_poke)
-    sub.add_parser("where", help="which context and account this directory uses").set_defaults(func=cmd_where)
-    sub.add_parser("sessions", help="every running Claude Code session").set_defaults(func=cmd_sessions)
+    sub.add_parser("where", help="which context and account this directory uses").set_defaults(
+        func=cmd_where)
+    sub.add_parser("sessions", help="every running Claude Code session").set_defaults(
+        func=cmd_sessions)
     p = sub.add_parser("pin", help="give THIS terminal its own account")
     p.add_argument("account")
     p.set_defaults(func=cmd_pin)
     sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
-    sub.add_parser("resolve", help="print the config dir for this shell").set_defaults(func=cmd_resolve)
-    p = sub.add_parser("login", help="sign an account in through the browser (add --codex for an OpenAI Codex account)")
+    sub.add_parser("resolve", help="print the config dir for this shell").set_defaults(
+        func=cmd_resolve)
+    p = sub.add_parser(
+        "login",
+        help="sign an account in through the browser (add --codex for an OpenAI Codex account)",
+    )
     p.add_argument("account")
     p.add_argument("--browser", help='e.g. "Google Chrome", "Safari"')
     p.add_argument("--paste", action="store_true", help="paste the code instead of listening")
