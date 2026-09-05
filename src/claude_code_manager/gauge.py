@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from . import glyphs
+
 # Menu bar space is shared with everything else the user runs, so every
 # dimension here is the smallest that still reads at a glance. Captions sit
 # above their battery rather than beside it: the bar has spare height and no
@@ -37,6 +39,9 @@ DIM_ALPHA = 0.78
 NUB_W, NUB_H = 1.5, 3.5
 CHIP_H, CHIP_PAD = 14.0, 3.5
 GAP = 4.0                     # between cells
+GLYPH_IN = 10.0
+GLYPH_TEXT_GAP = 2.5
+SEP_GAP, SEP_H = 7.0, 14.0
 
 
 @dataclass
@@ -46,6 +51,15 @@ class Cell:
     tone: str                   # ok | warn | hot | dim
     reset: str = ""             # 45m, 3h, 5d; empty when the window has not started
     reset_tone: str = "dim"     # how much the countdown matters, not how long it is
+
+
+@dataclass
+class Section:
+    provider: str              # which service leads the account chip
+    name: str
+    chip_color: object
+    cells: list[Cell]
+    dim: bool = False
 
 
 def _tone_color(tone: str):
@@ -183,15 +197,17 @@ def _draw_battery(x: float, cell: Cell, dim: bool) -> None:
                                         baseline - abs(font.descender())))
 
 
-def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
-    """One image for the status item: the account chip, then a battery per window."""
+def status_image(sections: list[Section]):
+    """Draw account sections in one status item, each with its provider mark.
+
+    The menu bar uses one section in practice. Keep separators available for
+    a future caller that needs more than one section.
+    """
     import AppKit
     # Same badge as the menu rows: a faint wash of the account's hue behind
     # text in that hue, so the bar and the list agree on who is paying. The
     # text colour depends on the appearance, so it is chosen inside draw().
-    wash = chip_color.colorWithAlphaComponent_(0.12 if dim else 0.22)
-
-    def head(c: Cell):
+    def head(c: Cell, dim: bool):
         """A window's name and its countdown, built where they are drawn.
 
         Both take their colour from the menu bar's appearance, which is only
@@ -217,33 +233,56 @@ def status_image(name: str, chip_color, cells: list[Cell], dim: bool = False):
 
     battery_w = BATTERY_W + 1 + NUB_W
 
-    def name_text():
-        ink = _ink(chip_color)
-        return _text(name, 10.0, AppKit.NSFontWeightMedium,
-                     ink.colorWithAlphaComponent_(DIM_ALPHA) if dim else ink)
+    def name_text(section: Section):
+        ink = _ink(section.chip_color)
+        return _text(section.name, 10.0, AppKit.NSFontWeightMedium,
+                     ink.colorWithAlphaComponent_(DIM_ALPHA) if section.dim else ink)
 
-    chip_w = name_text().size().width + 2 * CHIP_PAD
-    widths = [max(battery_w, head_width(*head(c))) for c in cells]
-    width = 1 + chip_w + sum(GAP + w for w in widths) + 1
+    layouts = []
+    width = 0.0
+    for section in sections:
+        chip_w = (2 * CHIP_PAD + GLYPH_IN + GLYPH_TEXT_GAP
+                  + name_text(section).size().width)
+        widths = [max(battery_w, head_width(*head(c, section.dim)))
+                  for c in section.cells]
+        layouts.append((chip_w, widths))
+        width += 1 + chip_w + sum(GAP + w for w in widths) + 1
+    width += max(0, len(sections) - 1) * (2 * SEP_GAP + 1)
 
     def draw(_rect) -> bool:
-        x = 1.0
-        wash.setFill()
-        _rounded(x, (HEIGHT - CHIP_H) / 2, chip_w, CHIP_H, 3.0).fill()
-        name_str = name_text()
-        sz = name_str.size()
-        name_str.drawAtPoint_(AppKit.NSMakePoint(x + CHIP_PAD, (HEIGHT - sz.height) / 2))
-        x += chip_w
-        for cell, cell_w in zip(cells, widths):
-            x += GAP
-            cap, res = head(cell)
-            hx = x + (cell_w - head_width(cap, res)) / 2
-            cap.drawAtPoint_(AppKit.NSMakePoint(hx, CAPTION_Y))
-            if res is not None:
-                res.drawAtPoint_(AppKit.NSMakePoint(
-                    hx + cap.size().width + RESET_GAP, CAPTION_Y))
-            _draw_battery(x + (cell_w - battery_w) / 2, cell, dim)
-            x += cell_w
+        x = 0.0
+        for index, (section, (chip_w, widths)) in enumerate(zip(sections, layouts)):
+            if index:
+                x += SEP_GAP
+                _bar_ink().colorWithAlphaComponent_(0.25).setFill()
+                AppKit.NSRectFill(AppKit.NSMakeRect(x, (HEIGHT - SEP_H) / 2, 1, SEP_H))
+                x += 1 + SEP_GAP
+            x += 1
+            dim = section.dim
+            ink = _ink(section.chip_color)
+            if dim:
+                ink = ink.colorWithAlphaComponent_(DIM_ALPHA)
+            wash = section.chip_color.colorWithAlphaComponent_(0.12 if dim else 0.22)
+            wash.setFill()
+            _rounded(x, (HEIGHT - CHIP_H) / 2, chip_w, CHIP_H, 3.0).fill()
+            glyphs.draw(section.provider, x + CHIP_PAD,
+                        (HEIGHT - GLYPH_IN) / 2, GLYPH_IN, ink)
+            name_str = name_text(section)
+            sz = name_str.size()
+            name_str.drawAtPoint_(AppKit.NSMakePoint(
+                x + CHIP_PAD + GLYPH_IN + GLYPH_TEXT_GAP, (HEIGHT - sz.height) / 2))
+            x += chip_w
+            for cell, cell_w in zip(section.cells, widths):
+                x += GAP
+                cap, res = head(cell, dim)
+                hx = x + (cell_w - head_width(cap, res)) / 2
+                cap.drawAtPoint_(AppKit.NSMakePoint(hx, CAPTION_Y))
+                if res is not None:
+                    res.drawAtPoint_(AppKit.NSMakePoint(
+                        hx + cap.size().width + RESET_GAP, CAPTION_Y))
+                _draw_battery(x + (cell_w - battery_w) / 2, cell, dim)
+                x += cell_w
+            x += 1
         return True
 
     img = AppKit.NSImage.imageWithSize_flipped_drawingHandler_(
