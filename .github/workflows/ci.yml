@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv venv
+      - run: uv pip install -e ".[menubar]" pytest ruff
+      - run: uv run --no-sync ruff check src tests
+      - run: uv run --no-sync python -m compileall -q src
+      - run: uv run --no-sync python -c "import claude_code_manager.menubar, claude_code_manager.gauge, claude_code_manager.glyphs"
+      - run: uv run --no-sync pytest
