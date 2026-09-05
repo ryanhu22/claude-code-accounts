@@ -1,12 +1,27 @@
 # claude-code-manager
 
-Run several Claude Code subscriptions on one Mac without thinking about it.
-See what is left on each, decide which account pays for which work, and move
-work between accounts without touching a browser.
+Track several Claude Code subscriptions, and optional Codex subscriptions, on
+one Mac. See what is left on each and decide which Claude account pays for each
+project or session. Use the CLI (`ccm`) or the macOS menu bar app.
 
-A CLI (`ccm`) and a macOS menu bar app.
+Status: early, macOS only, used daily by its author. Expect rough edges.
+
+[![CI](https://github.com/ryanhu22/claude-code-manager/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanhu22/claude-code-manager/actions/workflows/ci.yml)
 
 <!-- screenshot goes here -->
+
+## Read this first
+
+This is an independent project. It is not affiliated with, endorsed by, or supported by Anthropic or OpenAI. Claude, Claude Code and the Claude mark are trademarks of Anthropic, PBC. OpenAI, ChatGPT, Codex and the OpenAI logo are trademarks of OpenAI. They appear in this tool only to say which service an account belongs to.
+
+Know what you are running:
+
+- This tool reads and moves your own sign-in credentials: the keychain items Claude Code writes and the `auth.json` file the Codex CLI writes. It calls endpoints those tools use internally. Those endpoints are not documented and can change or disappear without notice.
+- Anthropic's terms for Claude Code say that OAuth sign-in is for Claude Code and Anthropic's own applications, that third-party developers may not collect, store or intermediate Claude.ai credentials or session tokens, and that requests may not be routed through Free, Pro or Max plan credentials. Three parts of this tool do that with your own accounts: `ccm login`, `ccm poke`, and the credential copying that lets a running session change account without a restart. Anthropic says it may enforce these restrictions without notice. Using those parts can put your Claude account at risk. Read the terms yourself: https://code.claude.com/docs/en/legal-and-compliance
+- The Codex CLI is open source, and OpenAI maintainers have said that forks and tools like this are allowed under its terms. This tool reads the file the Codex CLI writes and signs in with the same flow the CLI uses. OpenAI's terms still apply to your account.
+- If you want to stay well inside both sets of rules, use the routing and session features only, sign in through Claude Code itself (`ccm add <name>` prints the command), and do not use `ccm login` or `ccm poke` for Claude accounts.
+
+You use this software at your own risk. See the MIT license.
 
 ## Why
 
@@ -14,16 +29,32 @@ Claude Code keeps one login per config directory, so several subscriptions can
 coexist. Nothing tells you how much of each is left, which project is spending
 which one, or how to move a project off an exhausted account. This does.
 
+## Requirements
+
+- macOS 13 or newer for PyObjC.
+- Python 3.10 or newer.
+- `uv` is recommended for installation.
+- Claude Code 2.1.224 or newer for per-config-dir keychain items.
+- The Codex CLI, only if you track Codex accounts.
+
 ## Install
 
+Installs come from GitHub. There is no PyPI release yet.
+
 ```sh
-uv tool install "claude-code-manager[menubar]"   # or without [menubar] for the CLI
+uv tool install "claude-code-manager[menubar] @ git+https://github.com/ryanhu22/claude-code-manager"
+```
+
+For the CLI alone:
+
+```sh
+uv tool install "claude-code-manager @ git+https://github.com/ryanhu22/claude-code-manager"
 ```
 
 Sign each subscription in once, through the browser:
 
 ```sh
-ccm login work-account                          # or --browser "Google Chrome"
+ccm login work                          # or --browser "Google Chrome"
 ```
 
 The browser returns the code to a local port, so there is nothing to copy. The
@@ -45,12 +76,22 @@ eval "$(ccm shell-init)"
 ```
 
 That defines a `claude` wrapper which resolves the right config directory
-before launching. Start the menu bar app at login:
+before launching. To start the menu bar app at login, get the LaunchAgent
+from a checkout of this repository:
 
 ```sh
-cp packaging/com.claude-code-manager.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-code-manager.plist
+git clone https://github.com/ryanhu22/claude-code-manager
+cd claude-code-manager
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+cp packaging/com.claude-code-manager.plist "$HOME/Library/LaunchAgents/"
+sed -i '' "s|\$HOME|$HOME|g" "$HOME/Library/LaunchAgents/com.claude-code-manager.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.claude-code-manager.plist"
 ```
+
+launchd does not expand `$HOME` in `ProgramArguments` or the other plist values.
+The `sed` command replaces it with your home path in the installed copy.
+The plist expects `ccm-menubar` in `~/.local/bin`; adjust that path if your
+`uv` tool directory is elsewhere.
 
 ## Which account a session uses
 
@@ -70,12 +111,12 @@ A **profile** is a named list of repositories that share a subscription, so
 ccm profiles                      # every rule, least specific first
 ccm profile new work
 ccm profile add work              # put this repository in it
-ccm use account-b --profile work  # move the whole group
+ccm use acme --profile work       # move the whole group
 ccm where                         # what this directory resolves to, and why
 ```
 
-Account names take any unique prefix or substring, so `ccm use rr` finds
-`account-c`.
+Account names take any unique prefix or substring, so `ccm use wo` finds
+`work`.
 
 Everything is in the menu bar too. Each session row offers the same three
 scopes, and a PROFILES section shows which account each group uses.
@@ -244,6 +285,14 @@ dominate the total.
 - Nothing here mints a credential. The only ones that exist are what Claude
   Code wrote at login, which is why a session started this way keeps its real
   `subscriptionType`, scopes and rate-limit tier.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and pull requests.
+
+## Security
+
+Report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
 
 ## Prior art
 
