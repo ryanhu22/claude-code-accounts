@@ -38,6 +38,30 @@ def test_has_reading():
     assert core.has_reading([core.Limit("session", "5h", 0, None)])
 
 
+def test_forget_usage_preserves_cached_payload_and_retry(payload):
+    entry = {"data": payload, "at": 1.0, "tried_at": 5.0,
+             "retry_after": 99.0, "who": "x"}
+    core._cache_write({"work": entry})
+
+    core.forget_usage("work")
+
+    assert core._cache_read() == {"work": {**entry, "tried_at": 0}}
+
+
+def test_forget_usage_unknown_name_is_noop(monkeypatch, payload):
+    store = {"work": {"data": payload, "at": 1.0, "tried_at": 5.0,
+                      "retry_after": 99.0, "who": "x"}}
+    core._cache_write(store)
+
+    def unexpected_write(*args):
+        pytest.fail("forget_usage must not write the cache for an unknown name")
+
+    monkeypatch.setattr(core, "_cache_write", unexpected_write)
+    core.forget_usage("missing")
+
+    assert core._cache_read() == store
+
+
 @pytest.mark.parametrize(("minutes", "expected"), [
     (-1, "now"), (0, "now"), (15, "15m"), (185, "3h 5m"), (4380, "3d 1h"),
 ])

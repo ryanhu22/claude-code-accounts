@@ -752,6 +752,19 @@ def _usage(name: str, fetch, force: bool = False,
     return parse(data), now, None
 
 
+def forget_usage(name: str) -> None:
+    """Clear the attempt floor so the refresh after a poke can fetch usage.
+
+    A poke's own pre-check stamps the floor that the refresh after it then
+    trips over, so the row stayed "unused" until the next poll. Preserve the
+    cached payload and any retry deadline while allowing another attempt.
+    """
+    store = _cache_read()
+    if name in store:
+        store[name]["tried_at"] = 0
+        _cache_write(store)
+
+
 # --------------------------------------------------------------------------- accounts
 
 def slot_dir(name: str) -> str:
@@ -1274,6 +1287,8 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
             failed.append(f"{model}: {detail or f'HTTP {e.code}'}")
         except Exception as e:
             failed.append(f"{model}: {str(e)[:60]}")
+    if started:
+        forget_usage(name)
     if failed and not started:
         return False, "; ".join(failed)
     if failed:

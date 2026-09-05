@@ -2327,7 +2327,7 @@ class ManagerApp(rumps.App):
             # 45 seconds, so say the click landed before anything is waited on.
             # Without this the only sign of a running request was a row in a
             # menu that was no longer on screen.
-            self._report(True, f"{account}: starting the 5h window…")
+            self._report(True, f"{account}: starting its windows…")
             # Up to a 45 second request. Never on the drawing thread.
             threading.Thread(target=self._poke, args=(account,), daemon=True).start()
         return handler
@@ -2344,12 +2344,22 @@ class ManagerApp(rumps.App):
             # a rate limit, which would leave the row reading "idle" with no
             # way to tell that from a click that did nothing.
             self._on_refresh_tick(None, force=True)
+            # The request that opens a window returns before the usage endpoint
+            # reports it, so one check a few seconds later catches what the
+            # first one missed.
+            threading.Timer(12.0, lambda: self._later(lambda: self._poke_again(account))).start()
         else:
             # A failure has to interrupt. The menu closed on the click, and the
             # flash row above lives 30 seconds in a menu nobody is looking at,
             # so a poke that failed was indistinguishable from one that was
             # never wired up.
             self._notify(f"Could not start the 5h window for {account}.\n\n{message}")
+
+    def _poke_again(self, account: str) -> None:
+        acct = next((a for a in self._snapshot.accounts if a.name == account), None)
+        if acct and acct.reading and any(not lim.resets_at for lim in acct.limits):
+            core.forget_usage(account)
+            self._on_refresh_tick(None, force=True)
 
     def _make_rename(self, account: str):
         def handler(_sender):
