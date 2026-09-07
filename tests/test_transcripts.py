@@ -39,3 +39,58 @@ def test_lifetime_waits_for_complete_line(tmp_path):
     with path.open("a") as f:
         f.write("\n")
     assert transcripts.lifetime(str(path)) == transcripts.Totals(40, 60, 300, 20, 2)
+
+
+def test_live_saves_all_grown_transcripts_once(monkeypatch, tmp_path):
+    from claude_code_manager import sessions
+
+    config = tmp_path / "config"
+    registry = config / "sessions"
+    registry.mkdir(parents=True)
+    paths = {}
+    for pid in (1, 2, 3):
+        (registry / f"{pid}.json").write_text(json.dumps({"pid": pid, "sessionId": str(pid)}))
+        if pid < 3:
+            path = tmp_path / f"{pid}.jsonl"
+            path.write_text(record(10, 20, 100, 5))
+            paths[str(pid)] = str(path)
+    monkeypatch.setattr(sessions, "alive", lambda pid: True)
+    monkeypatch.setattr(transcripts, "find", lambda session_id, roots: paths.get(session_id, ""))
+    saves = []
+    monkeypatch.setattr(transcripts, "_tokens_save", lambda: saves.append(True))
+    for turns in (1, 2):
+        saves.clear()
+        live = sessions.live([str(config)], with_env=False, with_transcript=True)
+        assert len(saves) == 1
+        assert [s.spent.turns for s in sorted(live, key=lambda s: s.pid)] == [turns, turns, 0]
+        assert not transcripts._dirty
+        saves.clear()
+        sessions.live([str(config)], with_env=False, with_transcript=True)
+        assert saves == []
+        for path in paths.values():
+            with Path(path).open("a") as stream:
+                stream.write(record(10, 20, 100, 5))
+
+
+def test_lifetime_alone_saves_immediately(monkeypatch, tmp_path):
+    path = tmp_path / "session.jsonl"
+    path.write_text(record(10, 20, 100, 5))
+    saves = []
+    monkeypatch.setattr(transcripts, "_tokens_save", lambda: saves.append(True))
+    assert transcripts.lifetime(str(path)).turns == 1
+    assert saves == [True]
+    assert not transcripts._dirty
+
+
+def test_live_flushes_pending_tokens_with_empty_transcript(monkeypatch, tmp_path):
+    from claude_code_manager import sessions
+
+    path = tmp_path / "session.jsonl"
+    path.write_text(record(10, 20, 100, 5))
+    saves = []
+    monkeypatch.setattr(transcripts, "_tokens_save", lambda: saves.append(True))
+    transcripts.lifetime(str(path), save=False)
+    assert not saves and transcripts._dirty
+    sessions.live([], with_env=False, with_transcript=True)
+    assert saves == [True]
+    assert not transcripts._dirty

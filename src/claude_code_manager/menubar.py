@@ -1039,6 +1039,7 @@ class ManagerApp(rumps.App):
         # Per config dir, the fingerprint of the credential it held last time
         # it was looked at. What tells a cached owner from a stale one.
         self._owner_prints: dict[str, str | None] = {}
+        self._rules_stamp = 0.0
         self._again = False
         self._polling = False
         self._fresh_sessions: tuple | None = None
@@ -1221,29 +1222,25 @@ class ManagerApp(rumps.App):
             try:
                 live = sessions.live(core.credential_dirs(), with_git=True,
                                      with_transcript=True)
-                # Which account a directory holds changes whenever something
-                # writes one, and this app is not the only thing that does.
-                # Caching the answer until a directory was new meant a session
-                # moved to another subscription kept its old chip until the
-                # next full refresh, three minutes later, even though the
-                # switch itself had already landed.
-                #
-                # A credential's fingerprint says whether it is still the same
-                # credential, and reading ten of them costs 0.19 seconds on a
-                # background thread. So the cache is kept, and dropped for any
-                # directory whose fingerprint moved. Naming the account behind
-                # a changed directory is a fingerprint match against the
-                # accounts already loaded, and only falls back to the network
-                # for a credential belonging to no account at all.
+                # This app is not the only process that switches credentials.
+                # Keep names until their fingerprints move, with reads memoized
+                # for keychain.RECENT seconds. A rule change in another process
+                # forces fresh reads so a switched session gets its new chip.
+                # Naming a changed dir matches the loaded account fingerprints
+                # and only falls back to the API for an unmatched credential.
                 known = self._snapshot.running_on
                 dirs = {s.env_config_dir for s in live if s.env_config_dir}
-                prints = {d: core.fingerprint(keychain.read_credentials(d))
-                          for d in dirs}
-                stale = {d for d in dirs
-                         if d not in known or self._owner_prints.get(d) != prints[d]}
-                owners = {d: known[d] for d in dirs if d in known}
-                if stale:
-                    owners.update(core.dirs_to_accounts(stale, self._snapshot.accounts))
+                try:
+                    stamp = os.path.getmtime(core.profiles.CONFIG)
+                except OSError:
+                    stamp = 0.0
+                fresh = stamp != self._rules_stamp
+                self._rules_stamp = stamp
+                if fresh:
+                    # A peer may have changed account slots as well as copies.
+                    keychain.forget()
+                owners, prints = core.owners_now(
+                    dirs, known, self._owner_prints, self._snapshot.accounts, fresh=fresh)
                 self._owner_prints = prints
                 with self._lock:
                     self._fresh_sessions = (live, owners)

@@ -80,3 +80,30 @@ def test_security_counter_refuses_mutations(bench, fake_keychain, monkeypatch):
         with pytest.raises(AssertionError):
             counter.run(args, stdin)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("label", "reads"), [
+    ("poll owners cold", 5), ("poll owners warm", 0), ("full refresh", 5),
+])
+def test_fake_poll_and_refresh_budgets(
+        bench, fake_keychain, fake_api, no_git, monkeypatch, label, reads):
+    from claude_code_manager import profiles
+    from fakes import session
+    from test_moves import budget
+
+    names = ["a", "b"]
+    blobs = {}
+    for name in names:
+        slot = sign_in(name, f"{name}@example.com", fake_api)
+        blobs[name] = keychain.read_credentials(slot)
+    core.save_rules(profiles.Rules(default_account="a"))
+    live = [session(f"term{i}", "/repo", "a") for i in range(3)]
+    accts = core.all_accounts(with_usage=True)
+    monkeypatch.setattr(bench, "seed", lambda *args, **kwargs: (
+        fake_keychain, fake_api, names, blobs, live, accts))
+    move, _, _ = bench.fake_move(label, core.HOME, 2, 3)
+    # A cold pass reads 2 slots + 3 copies once. A warm poll reads nothing.
+    with budget(fake_keychain, reads):
+        result = move()
+    owners = result[0] if label.startswith("poll") else result
+    assert owners == {s.config_dir: "a" for s in live}

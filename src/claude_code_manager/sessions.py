@@ -163,9 +163,9 @@ def _environ(pid: int, proc_start: str = "") -> tuple[dict[str, str], str]:
             tty = cols[1] if cols[1].startswith("tty") else "tty" + cols[1]
     env = {}
     for word in out.split():
-        key, sep, val = word.partition("=")
-        if sep and key.isupper() and key.replace("_", "").isalnum():
-            env[key] = val
+        name, sep, val = word.partition("=")
+        if sep and name.isupper() and name.replace("_", "").isalnum():
+            env[name] = val
     if len(_ENV_CACHE) > 256:
         _ENV_CACHE.clear()
     _ENV_CACHE[key] = (env, tty)
@@ -280,7 +280,8 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
             g = transcripts.digest(path)
             s.title, s.context_tokens = g.title, g.context_tokens
             s.model, s.context_pct = g.model, g.context_pct
-            s.spent = transcripts.lifetime(path)
+            s.spent = transcripts.lifetime(path, save=False)
+        transcripts.flush()
     return sorted(out, key=lambda s: s.updated_at, reverse=True)
 
 

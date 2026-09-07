@@ -46,7 +46,7 @@ def test_assign_project_then_apply(fake_keychain, fake_api):
     with budget(fake_keychain, 0):
         assert core.assign("project", "/repo", "b", live=[])[0]
     assert f"path:/repo={target}" in Path(profiles.ROUTES).read_text()
-    # 1 slot read + 1 session read + 1 session write.
+    # 1 fresh slot + 1 locked session read + 1 write; the pre-read hits the memo.
     with budget(fake_keychain, 2, 1):
         moved, applied = core.apply_now([live])
     assert moved == [live.label]
@@ -104,10 +104,11 @@ def test_apply_reads_each_account_once(fake_keychain, fake_api, monkeypatch):
         return original()
 
     monkeypatch.setattr(core, "rules", rules)
-    # 1 slot read + 3 session reads + 3 session writes, then no writes when current.
+    # 1 slot read + 3 locked session reads and writes. The second pass
+    # reads only the slot because the session pre-reads now hit the memo.
     for writes in (3, 0):
         loads.clear()
-        with budget(fake_keychain, 4, writes):
+        with budget(fake_keychain, 1 + writes, writes):
             moved, applied = core.apply_now(live)
         assert len(loads) == 1
         assert len(moved) == writes
@@ -123,7 +124,8 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
     newer = fake_api.blob("a@example.com", gen=2, expires_in=7200)
     keychain.write_credentials(live.config_dir, newer)
     fake_api.reset()
-    # 1 slot read + 1 session read; the session owns the live generation.
+    # 1 slot + 1 locked session read; the pre-read hits the memo.
+    # The fresh check keeps the session's live generation in both calls.
     with budget(fake_keychain, 2):
         assert core.apply_now([live]) == ([], {})
     with budget(fake_keychain, 2):
@@ -140,8 +142,8 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
         assert core.assign("default", "", "a", live=[])[0]
     # Restore the saved live copy to model a peer that still holds it.
     keychain.write_credentials(live.config_dir, newer)
-    # 1 slot read + 1 session read + 1 promotion write.
-    with budget(fake_keychain, 2, 1):
+    # The comparisons hit the memo. Promotion costs 1 locked slot read + 1 write.
+    with budget(fake_keychain, 1, 1):
         assert core.sync_credentials([live]) == [slot]
     assert stored(fake_keychain, slot) == newer
 
@@ -150,18 +152,18 @@ def test_sync_reads_each_copy_once(fake_keychain, fake_api):
     slots = {n: known(n, f"{n}@example.com", fake_api, fake_keychain) for n in ("a", "b")}
     core.save_rules(profiles.Rules(projects={"/a": "a", "/b": "b"}))
     live = [session(f"{n}{i}", f"/{n}", n) for n in slots for i in range(2)]
-    # 2 slot reads + 4 session reads, with no writes for current copies.
-    with budget(fake_keychain, 6):
+    # Setup warmed both slots and all four copies, so comparisons are free.
+    with budget(fake_keychain, 0):
         assert core.sync_credentials(live) == []
     keychain.write_credentials(
         live[0].config_dir, fake_api.blob("a@example.com", gen=0, expires_in=1800))
-    # The same 6 reads + 1 write for the single copy behind.
-    with budget(fake_keychain, 6, 1):
+    # Memo hits make the second comparison free; 1 locked read + 1 write.
+    with budget(fake_keychain, 1, 1):
         assert core.sync_credentials(live) == [live[0].config_dir]
     newer = fake_api.blob("a@example.com", gen=2, expires_in=7200)
     keychain.write_credentials(slots["a"], newer)
-    # The same 6 reads + 2 writes for the rotated master's sessions.
-    with budget(fake_keychain, 6, 2):
+    # Comparisons still hit the memo; 2 locked reads + 2 writes for the peers.
+    with budget(fake_keychain, 2, 2):
         assert core.sync_credentials(live) == [s.config_dir for s in live[:2]]
     assert all(stored(fake_keychain, s.config_dir) == newer for s in live[:2])
 
@@ -174,8 +176,9 @@ def test_live_blob_refresh_and_failures(fake_keychain, fake_api, monkeypatch):
     keychain.write_credentials(path, old)
     monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [path])
     fake_api.reset()
-    # 2 slot reads + 2 default fallbacks + 2 peer reads, with 2 rotation writes.
-    with budget(fake_keychain, 6, 2):
+    # 2 slot reads + 2 default fallbacks + 1 locked peer read, with 2 writes.
+    # The peer pre-check hits the memo populated by setup.
+    with budget(fake_keychain, 5, 2):
         rotated = core.live_blob(slot)
     assert fake_api.refresh_calls == 1
     assert rotated["refreshToken"] != old["refreshToken"]
@@ -211,8 +214,9 @@ def test_load_account_heals_rejected_slot(fake_keychain, fake_api, monkeypatch):
     newer = fake_api.blob("a@example.com", gen=2, expires_in=7200)
     keychain.write_credentials(path, newer)
     monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [path])
-    # 1 initial slot + 1 candidate slot + 2 default fallbacks + 1 peer read; 1 heal.
-    with budget(fake_keychain, 5, 1):
+    # 1 initial slot + 1 candidate slot + 2 default fallbacks; 1 heal.
+    # The peer read hits the memo populated by setup.
+    with budget(fake_keychain, 4, 1):
         acct = core.load_account("a", with_usage=False)
     assert acct.email == "a@example.com"
     assert stored(fake_keychain, slot) == newer
@@ -428,15 +432,15 @@ def test_resolve_dir_seeds_config(fake_keychain, fake_api):
     with budget(fake_keychain, 0):
         assert core.resolve_dir("/repo") == slot
     assert not Path(core.SESSION_DIRS).exists()
-    # 1 slot read + 1 session read + 1 initial write.
-    with budget(fake_keychain, 2, 1):
+    # 1 slot + 1 session pre-read + 1 locked session read + 1 initial write.
+    with budget(fake_keychain, 3, 1):
         path = core.resolve_dir("/repo", "term")
     assert path == core.session_dir("term")
     assert stored(fake_keychain, path) == stored(fake_keychain, slot)
     assert json.loads(Path(path, ".claude.json").read_text()) == {
         k: v for k, v in data.items() if k not in core._CONFIG_SKIP}
-    # A warm launch still reads the slot and session but writes neither.
-    with budget(fake_keychain, 2):
+    # The second launch reads only the slot; the session read hits the memo.
+    with budget(fake_keychain, 1):
         assert core.resolve_dir("/repo", "term") == path
 
 
@@ -499,8 +503,8 @@ def test_cli_round_trip(fake_keychain, fake_api, monkeypatch, capsys, tmp_path):
     assert core.slot_dir("new") in capsys.readouterr().out
     live = session("term", str(repo), "a")
     monkeypatch.setattr(sessions, "live", lambda *args, **kwargs: [live])
-    # 1 account load + 1 slot fingerprint + 1 session fingerprint.
-    with budget(fake_keychain, 3):
+    # 1 account load; slot and session fingerprint reads hit the memo.
+    with budget(fake_keychain, 1):
         assert cli.main(["sessions"]) == 0
     output = capsys.readouterr().out
     assert live.label in output and "idle" in output and "a" in output
@@ -519,8 +523,8 @@ def test_all_accounts_and_directory_mapping(fake_keychain, fake_api, with_usage)
     assert [a.email for a in accts] == ["a@example.com", "b@example.com"]
     assert all(bool(a.limits) == with_usage for a in accts)
     assert fake_api.profile_calls == fake_api.usage_calls == 0
-    # 2 slot reads + 3 session reads match each copy once.
-    with budget(fake_keychain, 5):
+    # The account load and session setup warmed all five fingerprint reads.
+    with budget(fake_keychain, 0):
         owners = core.dirs_to_accounts([s.config_dir for s in live], accts)
     assert owners == {s.config_dir: name for s, name in zip(live, ("a", "a", "b"), strict=True)}
 
@@ -539,7 +543,120 @@ def test_hand_out_requires_known_same_account(fake_keychain, fake_api, cached, e
     want = fake_api.blob("a@example.com", gen=1)
     keychain.write_credentials(path, have)
     core._cache_write({path: {"email": cached}}, core.IDENTITY_CACHE)
-    # 1 session read, plus a write unless a known matching account is ahead.
-    with budget(fake_keychain, 1, writes):
+    # The pre-read hits the memo. An email adds 1 fresh read under the lock;
+    # write unless a known matching account is ahead.
+    with budget(fake_keychain, int(bool(email)), writes):
         assert core.hand_out(path, want, email) is bool(writes)
     assert stored(fake_keychain, path) == (want if writes else have)
+
+
+def test_owners_now_reuses_fingerprints(fake_keychain, fake_api, monkeypatch):
+    slots = {n: known(n, f"{n}@example.com", fake_api, fake_keychain) for n in ("a", "b")}
+    live = [session(f"term{i}", "/repo", name) for i, name in enumerate(("a", "a", "b"))]
+    paths = [s.config_dir for s in live] + [core.DEFAULT_CONFIG]
+    keychain.write_credentials(core.DEFAULT_CONFIG, stored(fake_keychain, slots["b"]))
+    accts = core.all_accounts(with_usage=False)
+    for path in paths:
+        keychain.forget(path)
+    dirs = paths + [slots["a"]]
+    expected = dict(zip(dirs, ("a", "a", "b", "b", "a"), strict=True))
+    renamed = []
+    original = core.dirs_to_accounts
+
+    def name_dirs(dirs, accts):
+        renamed.append(set(dirs))
+        return original(dirs, accts)
+
+    monkeypatch.setattr(core, "dirs_to_accounts", name_dirs)
+    # 4 non-account dirs; the loaded slots and repeated mapping reads hit the memo.
+    with budget(fake_keychain, 4):
+        owners, prints = core.owners_now(dirs, {}, {}, accts)
+    assert owners == expected and prints[slots["a"]] is None
+    assert renamed == [set(paths)]
+    assert {service for _, service in fake_keychain.log} == {
+        keychain.service_for(path) for path in paths}
+    renamed.clear()
+    with budget(fake_keychain, 0):
+        assert core.owners_now(dirs, owners, prints, accts) == (owners, prints)
+    assert renamed == []
+    keychain.forget()
+    # Unchanged fingerprints cost 4 reads after expiry, without any slot reads.
+    with budget(fake_keychain, 4):
+        assert core.owners_now(dirs, owners, prints, accts) == (owners, prints)
+    assert renamed == []
+    keychain.write_credentials(paths[0], stored(fake_keychain, slots["b"]))
+    keychain.forget(paths[0])
+    # 1 switched dir + 2 cold slots for naming; the other session reads hit the memo.
+    with budget(fake_keychain, 3):
+        owners, prints = core.owners_now(dirs, owners, prints, accts)
+    expected[paths[0]] = "b"
+    assert owners == expected and renamed == [{paths[0]}]
+    renamed.clear()
+    # Model another process switching a copy while our memo still holds its old login.
+    fake_keychain.store[keychain.service_for(paths[1])] = fake_keychain.store[
+        keychain.service_for(slots["b"])]
+    with budget(fake_keychain, 0):
+        assert core.owners_now(dirs, owners, prints, accts) == (owners, prints)
+    with budget(fake_keychain, 4):
+        owners, prints = core.owners_now(dirs, owners, prints, accts, fresh=True)
+    expected[paths[1]] = "b"
+    assert owners == expected and renamed == [{paths[1]}]
+
+
+def test_owners_now_never_reads_account_dirs(fake_keychain, fake_api):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    accts = core.all_accounts(with_usage=False)
+    missing = core.slot_dir("removed")
+    keychain.forget()
+    with budget(fake_keychain, 0):
+        owners, prints = core.owners_now([slot, missing], {}, {}, iter(accts), fresh=True)
+    assert owners == {slot: "a", missing: ""}
+    assert prints == {slot: None, missing: None}
+
+
+@pytest.mark.parametrize("current", [False, True])
+def test_hand_out_rechecks_after_lock(fake_keychain, fake_api, monkeypatch, current):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    want = fake_api.blob("a@example.com", gen=2, expires_in=7200)
+    newer = want if current else fake_api.blob("a@example.com", gen=3, expires_in=10800)
+    original = locks.credentials
+
+    @contextmanager
+    def rotate_before_lock(path, **kwargs):
+        # Another process rotates after the memoized pre-read, before we own the lock.
+        fake_keychain.store[keychain.service_for(path)] = json.dumps({"claudeAiOauth": newer})
+        with original(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(locks, "credentials", rotate_before_lock)
+    # The pre-read hits the memo; the fresh locked read prevents a stale write.
+    with budget(fake_keychain, 1):
+        assert not core.hand_out(live.config_dir, want, "a@example.com")
+    assert stored(fake_keychain, live.config_dir) == newer
+
+
+@pytest.mark.parametrize("promotion", [False, True])
+def test_sync_rechecks_rotations_under_lock(fake_keychain, fake_api, monkeypatch, promotion):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a"))
+    live = session("term", "/repo", "a")
+    candidate = fake_api.blob("a@example.com", gen=2, expires_in=7200)
+    newer = fake_api.blob("a@example.com", gen=3, expires_in=10800)
+    keychain.write_credentials(live.config_dir if promotion else slot, candidate)
+    destination = slot if promotion else live.config_dir
+    original = locks.credentials
+
+    @contextmanager
+    def rotate_before_lock(path, **kwargs):
+        if path == destination:
+            fake_keychain.store[keychain.service_for(path)] = json.dumps({"claudeAiOauth": newer})
+        with original(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(locks, "credentials", rotate_before_lock)
+    # Promotion checks the slot, then the newer peer; hand-out checks only the peer.
+    with budget(fake_keychain, 2 if promotion else 1):
+        assert core.sync_credentials([live]) == []
+    assert stored(fake_keychain, destination) == newer
+    assert stored(fake_keychain, live.config_dir if promotion else slot) == candidate

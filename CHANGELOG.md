@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The menu bar app reads each credential at most once every twenty seconds across its polls, instead of once per poll.
+- The session poll no longer runs `ps` for every session on every pass.
+- Launching `claude` through the shell wrapper imports less.
+
 - A sign-in asks the profile endpoint once instead of twice.
 - A rule change reads each account's credential once rather than once per running session.
 - The credential sync reads each session copy once per pass.

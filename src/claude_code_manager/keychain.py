@@ -12,11 +12,18 @@ import json
 import os
 import pwd
 import subprocess
+import threading
+import time
 
 LEGACY_SERVICE = "Claude Code-credentials"
 _NOT_FOUND_RC = 44
 # `security` reads a whole line from stdin; keep a margin under its limit.
 _STDIN_LIMIT = 4096 - 64
+# Display and comparison reads may be this stale. Changes in another process
+# show within this many seconds.
+RECENT = 20.0
+_memo: dict[str, tuple[float, dict | None]] = {}
+_memo_lock = threading.Lock()
 
 
 def account_name() -> str:
@@ -68,18 +75,62 @@ def delete(service: str) -> bool:
     return r.returncode in (0, _NOT_FOUND_RC)
 
 
-def read_credentials(config_dir: str) -> dict | None:
-    """The claudeAiOauth blob a config dir is logged in with."""
-    raw = read_raw(service_for(config_dir))
+def _remember(service: str, blob: dict | None, started: float | None = None) -> None:
+    """Store a result while the caller holds the memo lock."""
+    _memo[service] = (time.monotonic() if started is None else started, blob)
+    if len(_memo) > 512:
+        _memo.clear()
+
+
+def read_credentials(config_dir: str, max_age: float = 0.0) -> dict | None:
+    """The claudeAiOauth blob, read fresh unless the caller allows a memo hit.
+
+    Reads under credential locks must use the fresh default. Release the memo
+    lock around I/O so a slow Keychain call cannot block other credential calls.
+    Keep newer memo entries when a slow read finishes.
+    """
+    service = service_for(config_dir)
+    with _memo_lock:
+        hit = _memo.get(service)
+        if max_age > 0 and hit is not None and time.monotonic() - hit[0] < max_age:
+            return hit[1]
+    started = time.monotonic()
+    raw = read_raw(service)
     if raw is None and os.path.abspath(config_dir) == os.path.expanduser("~/.claude"):
         raw = read_raw(LEGACY_SERVICE)
-    if not raw:
-        return None
-    try:
-        return json.loads(raw).get("claudeAiOauth") or None
-    except ValueError:
-        return None
+    blob = None
+    if raw:
+        try:
+            blob = json.loads(raw).get("claudeAiOauth") or None
+        except ValueError:
+            pass
+    with _memo_lock:
+        hit = _memo.get(service)
+        if hit is None or hit[0] <= started:
+            _remember(service, blob, started)
+    return blob
 
 
 def write_credentials(config_dir: str, blob: dict) -> None:
-    write_raw(service_for(config_dir), json.dumps({"claudeAiOauth": blob}))
+    service = service_for(config_dir)
+    write_raw(service, json.dumps({"claudeAiOauth": blob}))
+    with _memo_lock:
+        _remember(service, blob)
+
+
+def delete_credentials(config_dir: str) -> bool:
+    service = service_for(config_dir)
+    deleted = delete(service)
+    with _memo_lock:
+        # A tombstone keeps older in-flight reads from restoring deleted credentials.
+        _remember(service, None)
+    return deleted
+
+
+def forget(config_dir: str | None = None) -> None:
+    """Drop one memo entry, or all entries for a new test or scan."""
+    with _memo_lock:
+        if config_dir is None:
+            _memo.clear()
+        else:
+            _memo.pop(service_for(config_dir), None)

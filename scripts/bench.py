@@ -106,7 +106,8 @@ FAKE_MOVES = (
     "assign profile", "assign session", "clear session", "apply_now behind",
     "apply_now current", "sync_credentials current", "sync_credentials rotated",
     "prepare_session warm", "all_accounts no usage", "all_accounts cached usage",
-    "dirs_to_accounts", "remove_account", "rename_account",
+    "dirs_to_accounts", "poll owners cold", "poll owners warm", "full refresh",
+    "remove_account", "rename_account",
 )
 
 
@@ -152,12 +153,24 @@ def fake_move(label, home, accounts, count):
         move = partial(core.all_accounts, with_usage="cached" in label)
     elif label == "dirs_to_accounts":
         move = partial(core.dirs_to_accounts, [s.config_dir for s in live], accts)
+    elif label.startswith("poll owners"):
+        paths = [s.config_dir for s in live]
+        move = partial(core.owners_now, paths, {}, {}, accts)
+    elif label == "full refresh":
+        def move():
+            accounts_now = core.all_accounts(with_usage=True)
+            core.sync_credentials(live)
+            return core.dirs_to_accounts([s.config_dir for s in live], accounts_now)
     elif label == "remove_account":
         move = partial(core.remove_account, names[0])
     elif label == "rename_account":
         move = partial(core.rename_account, names[0], "renamed")
     else:
         raise ValueError(label)
+    keychain.forget()
+    if label == "poll owners warm":
+        owners, prints = move()
+        move = partial(core.owners_now, paths, owners, prints, accts)
     return move, fake, api
 
 
@@ -168,7 +181,8 @@ def run_fake(args):
             times, budgets = [], []
             for _ in range(args.runs):
                 # Setup stays outside the timer so each sample measures a real move.
-                with tempfile.TemporaryDirectory(prefix="ccm-bench-") as home:
+                with tempfile.TemporaryDirectory(
+                        prefix="ccm-bench-", dir=Path(__file__).resolve().parents[1]) as home:
                     with patch.dict(os.environ, {"HOME": home}):
                         move, fake, api = fake_move(label, home, args.accounts, args.sessions)
                         ms, calls = measure(move, fake, api, 1)

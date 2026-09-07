@@ -67,6 +67,7 @@ class Totals:
 
 TOKEN_CACHE = os.path.join(os.path.expanduser("~"), ".claude-accts", ".tokens.json")
 _tokens: dict | None = None
+_dirty = False
 
 
 def _tokens_load() -> dict:
@@ -91,7 +92,15 @@ def _tokens_save() -> None:
         pass
 
 
-def lifetime(path: str) -> Totals:
+def flush() -> None:
+    """Save once after a scan, if any transcript changed."""
+    global _dirty
+    if _dirty:
+        _tokens_save()
+        _dirty = False
+
+
+def lifetime(path: str, save: bool = True) -> Totals:
     """Every token this session has spent, counted once.
 
     A transcript is append only, so the count is resumed from where the last
@@ -99,6 +108,7 @@ def lifetime(path: str) -> Totals:
     read. The offset is kept on disk, so this survives a restart too, and the
     first pass over a large transcript happens once ever.
     """
+    global _dirty
     if not path:
         return Totals()
     try:
@@ -143,7 +153,9 @@ def lifetime(path: str) -> Totals:
     if len(store) > 500:
         for gone in [k for k in store if not os.path.exists(k)]:
             del store[gone]
-    _tokens_save()
+    _dirty = True
+    if save:
+        flush()
     return t
 
 

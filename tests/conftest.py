@@ -11,6 +11,8 @@ import pytest
 from claude_code_manager import core, locks, profiles
 from fakes import FakeApi, FakeKeychain, redirect_home
 
+ORIGINAL_POPEN = subprocess.Popen
+
 
 @pytest.fixture(autouse=True)
 def isolated_home(monkeypatch, tmp_path):
@@ -28,7 +30,6 @@ def isolated_home(monkeypatch, tmp_path):
     monkeypatch.setattr(socket, "create_connection", blocked)
     monkeypatch.setattr(socket.socket, "connect", blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
-    original_popen = subprocess.Popen
 
     def resolver_only(args, *positional, **kwargs):
         # The one shell test needs only zsh builtins, with no tools on PATH.
@@ -37,7 +38,7 @@ def isolated_home(monkeypatch, tmp_path):
                 and Path(args[0]).name == "zsh" and args[1] == profiles.RESOLVER
                 and env.get("PATH") == str(tmp_path / "empty-bin")
                 and not env.get("TERM_SESSION_ID")):
-            return original_popen(args, *positional, **kwargs)
+            return ORIGINAL_POPEN(args, *positional, **kwargs)
         blocked()
 
     monkeypatch.setattr(subprocess, "Popen", resolver_only)

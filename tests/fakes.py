@@ -146,6 +146,7 @@ def session(term_id, cwd, account, api=None):
 
 def redirect_home(home: str, setattr):
     """Keep the bench and tests on the same throwaway paths."""
+    keychain.forget()
     home = Path(home)
     for module in (core, codex, profiles):
         setattr(module, "HOME", str(home))
@@ -177,5 +178,6 @@ def redirect_home(home: str, setattr):
             setattr(module, name, str(path))
     setattr(core, "_CHIPS", (-1.0, {}))
     setattr(transcripts, "_tokens", None)
+    setattr(transcripts, "_dirty", False)
     setattr(transcripts, "_paths", {})
     setattr(transcripts, "_digests", {})

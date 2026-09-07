@@ -23,8 +23,6 @@ import shutil
 import subprocess
 import time
 import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 
 HOME = os.path.expanduser("~")
@@ -227,6 +225,9 @@ def running_homes() -> set[str]:
 
 
 def _post(body: dict, form: bool = False) -> dict:
+    import urllib.parse
+    import urllib.request
+
     data = urllib.parse.urlencode(body) if form else json.dumps(body)
     content_type = "application/x-www-form-urlencoded" if form else "application/json"
     req = urllib.request.Request(TOKEN_URL, data=data.encode(),
@@ -317,6 +318,8 @@ def live_auth(home: str) -> dict | None:
 
 
 def fetch_usage(auth: dict) -> dict:
+    import urllib.request
+
     tokens = auth["tokens"]
     req = urllib.request.Request(USAGE_URL, headers={
         "Authorization": f"Bearer {tokens['access_token']}",
@@ -404,6 +407,8 @@ class Attempt:
 
     @property
     def url(self) -> str:
+        import urllib.parse
+
         challenge = base64.urlsafe_b64encode(
             hashlib.sha256(self.verifier.encode()).digest()).decode().rstrip("=")
         query = urllib.parse.urlencode({

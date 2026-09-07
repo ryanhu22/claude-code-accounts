@@ -21,11 +21,14 @@ import re
 import subprocess
 import time
 import urllib.error
-import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from . import codex, keychain, locks, oauth, profiles, sessions
+from . import codex, keychain, locks, profiles, sessions
+
+if TYPE_CHECKING:
+    from . import oauth
 
 HOME = os.path.expanduser("~")
 ACCOUNTS_DIR = os.environ.get("CCM_ACCOUNTS_DIR", os.path.join(HOME, ".claude-accts"))
@@ -107,6 +110,8 @@ def oauth_headers() -> dict:
 
 def _post(url: str, body: dict, token: str | None = None, timeout: int = 30,
           extra_headers: dict | None = None) -> dict:
+    import urllib.request
+
     headers = {"Content-Type": "application/json", **oauth_headers(), **(extra_headers or {})}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -116,6 +121,8 @@ def _post(url: str, body: dict, token: str | None = None, timeout: int = 30,
 
 
 def _get(path: str, token: str, timeout: int = 20) -> dict:
+    import urllib.request
+
     req = urllib.request.Request(API + path, headers={
         "Authorization": f"Bearer {token}", **oauth_headers()})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -256,7 +263,7 @@ def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
     for d in credential_dirs():
         if os.path.abspath(d) == skip_abs:
             continue
-        if fingerprint(keychain.read_credentials(d)) != spent:
+        if fingerprint(keychain.read_credentials(d, max_age=keychain.RECENT)) != spent:
             continue          # cheap check first: most dirs are a different login
         try:
             with locks.credentials(d, timeout=3.0):
@@ -843,7 +850,7 @@ def find_live_blob(email: str, prefer: str | None = None) -> dict | None:
     for cand in dict.fromkeys(c for c in candidates if c):
         # never refresh a context: a session may be running there
         blob = (live_blob(cand) if os.path.abspath(cand) in slots
-                else keychain.read_credentials(cand))
+                else keychain.read_credentials(cand, max_age=keychain.RECENT))
         if blob and (identity(cand, blob)[0].get("email") or "").lower() == email.lower():
             return blob
     return None
@@ -859,14 +866,16 @@ def is_account_dir(config_dir: str) -> bool:
     return os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR
 
 
-def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) -> bool:
+def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
+          keep_newer: bool = False) -> bool:
     """Write a credential into a config dir under Claude Code's locks.
 
     Putting a credential in a dir can change whose dir it is, so the cached
     identity for it is dropped unless the caller can name the account. Trusting
     a stale entry here is how one account's dir comes to be described as
     another's, which then spreads: the answer is used to decide what to copy
-    where.
+    where. With keep_newer and a known email, re-read under the lock so a
+    session rotation cannot be replaced by an older copy of the same account.
     """
     # An account's own directory may only ever hold that account's login. It is
     # named for one subscription and everything else treats it as the truth
@@ -881,6 +890,13 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) ->
             return False
     try:
         with locks.credentials(config_dir):
+            if keep_newer and email:
+                have = keychain.read_credentials(config_dir, max_age=0)
+                if fingerprint(have) == fingerprint(blob):
+                    return False
+                if (have and _cached_email(config_dir) == email.lower()
+                        and (have.get("expiresAt") or 0) > (blob.get("expiresAt") or 0)):
+                    return False
             keychain.write_credentials(config_dir, blob)
     except (locks.LockBusy, RuntimeError):
         return False
@@ -898,18 +914,17 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) ->
 def hand_out(path: str, want: dict, email: str = "") -> bool:
     """Give a session an account's credential unless its copy is ahead.
 
-    Refresh tokens are single use. Claude Code rotates a session copy on its
-    own, so a copy of the same account with a later expiresAt is the live
-    generation. Leave it for the sync pass to promote. A different account
-    means the dir has not caught up with a rule change; replace it at any age.
+    The memoized pre-read avoids taking Claude Code's locks for every session
+    that is already current. Adopt checks again under the lock because a
+    rotation can land between the pre-read and the write. Refresh tokens are
+    single use, so the write must never clobber a newer same-account copy.
+    Leave that copy for sync to promote. A different account means the dir
+    has not caught up with a rule change; replace it at any age.
     """
-    have = keychain.read_credentials(path)
+    have = keychain.read_credentials(path, max_age=keychain.RECENT)
     if fingerprint(have) == fingerprint(want):
         return False
-    if (have and email and _cached_email(path) == email.lower()
-            and (have.get("expiresAt") or 0) > (want.get("expiresAt") or 0)):
-        return False
-    return adopt(path, want, email=email)
+    return adopt(path, want, email=email, keep_newer=True)
 
 
 # Verdicts that mean the login itself is gone, rather than unreachable. Claude
@@ -1113,7 +1128,7 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
             keychain.write_credentials(new_slot, blob)
         except RuntimeError as e:
             return False, str(e)
-        keychain.delete(keychain.service_for(old_slot))
+        keychain.delete_credentials(old_slot)
         shutil.rmtree(old_slot, ignore_errors=True)
         store = _cache_read(IDENTITY_CACHE)
         if os.path.abspath(old_slot) in store:
@@ -1146,6 +1161,8 @@ def sign_in_begin(name: str, redirect_uri: str = "") -> oauth.Attempt:
     browser lands on the right one instead of whichever it is already signed
     into. Switching accounts part way through is what loses the code.
     """
+    from . import oauth
+
     hint = recorded_email(slot_dir(name)) or _cached_email(slot_dir(name))
     return oauth.begin(name, redirect_uri or oauth.CALLBACK_URL, login_hint=hint)
 
@@ -1158,6 +1175,8 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
     so it is refused rather than saved: a login that half works is harder to
     diagnose than one that never happened.
     """
+    from . import oauth
+
     def post(body: dict) -> dict:
         last: Exception = RuntimeError("no token endpoint answered")
         for url in TOKEN_URLS:
@@ -1239,7 +1258,7 @@ def remove_account(name: str) -> bool:
     else:
         import shutil
         slot = slot_dir(name)
-        ok = keychain.delete(keychain.service_for(slot))
+        ok = keychain.delete_credentials(slot)
         shutil.rmtree(slot, ignore_errors=True)
         _replace_account_rules(name, "")
         store = _cache_read(IDENTITY_CACHE)
@@ -1362,12 +1381,12 @@ def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, 
     accts = [a for a in accts if a.provider == "claude"]
     by_fp: dict[str, str] = {}
     for a in accts:
-        fp = fingerprint(keychain.read_credentials(a.slot))
+        fp = fingerprint(keychain.read_credentials(a.slot, max_age=keychain.RECENT))
         if fp and a.email:
             by_fp[fp] = a.email
     out: dict[str, str] = {}
     for path in paths:
-        blob = keychain.read_credentials(path)
+        blob = keychain.read_credentials(path, max_age=keychain.RECENT)
         if not blob:
             out[path] = ""
             continue
@@ -1595,7 +1614,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         if not session_paths:
             continue
         home = account_dir(account)
-        master = keychain.read_credentials(home)
+        master = keychain.read_credentials(home, max_age=keychain.RECENT)
         if not master or not master.get("refreshToken"):
             continue
         # Promote a session copy only if it is newer and provably this account.
@@ -1606,7 +1625,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         ahead: dict[str, str] = {}          # path -> mine | theirs | unknown
         copies: dict[str, dict | None] = {}
         for path in session_paths:
-            b = keychain.read_credentials(path)
+            b = keychain.read_credentials(path, max_age=keychain.RECENT)
             copies[path] = b
             if not b or not b.get("refreshToken"):
                 continue
@@ -1615,7 +1634,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
             email = (identity(path, b)[0].get("email") or "").lower()
             ahead[path] = ("unknown" if not email or not owner else
                            "mine" if email == owner else "theirs")
-            if ahead[path] == "mine" and adopt(home, b, email=owner):
+            if ahead[path] == "mine" and adopt(home, b, email=owner, keep_newer=True):
                 master = b
                 healed.append(home)
         want = (identity(home, master)[0].get("email") or "")
@@ -1633,7 +1652,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
             # dir that has not caught up with a rule change, and is replaced.
             if ahead.get(path) == "unknown":
                 continue
-            if adopt(path, master, email=want):
+            if adopt(path, master, email=want, keep_newer=True):
                 healed.append(path)
     return healed
 
@@ -1655,7 +1674,7 @@ def gc_session_dirs(live_terms: Iterable[str], max_age: float = 7 * 24 * 3600) -
                 continue
         except OSError:
             continue
-        keychain.delete(keychain.service_for(path))
+        keychain.delete_credentials(path)
         import shutil
         shutil.rmtree(path, ignore_errors=True)
         gone.append(path)
@@ -1756,7 +1775,7 @@ def account_for_email(email: str) -> str:
     if not email:
         return ""
     for name in account_names():
-        blob = keychain.read_credentials(slot_dir(name))
+        blob = keychain.read_credentials(slot_dir(name), max_age=keychain.RECENT)
         if blob and (identity(slot_dir(name), blob)[0].get("email") or "").lower() == email:
             return name
     return ""
@@ -1776,15 +1795,47 @@ def account_of_dir(config_dir: str, accts: Iterable[Account]) -> str:
     if os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR:
         if any(a.name == base for a in accts):
             return base
-    blob = keychain.read_credentials(config_dir)
+    blob = keychain.read_credentials(config_dir, max_age=keychain.RECENT)
     if not blob:
         return ""
     fp = fingerprint(blob)
     for a in accts:
-        if fp and fingerprint(keychain.read_credentials(a.slot)) == fp:
+        if fp and fingerprint(keychain.read_credentials(a.slot, max_age=keychain.RECENT)) == fp:
             return a.name
     email = identity(config_dir, blob)[0].get("email") or recorded_email(config_dir)
     return next((a.name for a in accts if (a.email or "").lower() == email.lower()), email)
+
+
+def owners_now(dirs: Iterable[str], known: dict[str, str], prints: dict[str, str | None],
+               accts: Iterable[Account], fresh: bool = False
+               ) -> tuple[dict[str, str], dict[str, str | None]]:
+    """Name the account behind each running session's config dir, cheaply.
+
+    Fingerprints reveal a changed credential without looking up its identity
+    on every poll. Account dirs already name their owner, so skip their reads.
+    A rule change written by another process forces a fresh pass because that
+    process may have switched a session while its old copy is still memoized.
+    """
+    accts = [a for a in accts if a.provider == "claude"]
+    names = {a.name for a in accts}
+    owners: dict[str, str] = {}
+    current: dict[str, str | None] = {}
+    stale = set()
+    for path in dirs:
+        if is_account_dir(path):
+            name = os.path.basename(os.path.abspath(path).rstrip("/"))
+            owners[path] = name if name in names else ""
+            current[path] = None
+            continue
+        current[path] = fingerprint(keychain.read_credentials(
+            path, max_age=0 if fresh else keychain.RECENT))
+        if path not in known or current[path] != prints.get(path):
+            stale.add(path)
+        else:
+            owners[path] = known[path]
+    if stale:
+        owners.update(dirs_to_accounts(stale, accts))
+    return owners, current
 
 
 def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
@@ -1798,7 +1849,7 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str,
     accts = [a for a in accts if a.provider == "claude"]
     by_fp: dict[str, str] = {}
     for a in accts:
-        fp = fingerprint(keychain.read_credentials(a.slot))
+        fp = fingerprint(keychain.read_credentials(a.slot, max_age=keychain.RECENT))
         if fp:
             by_fp[fp] = a.name
     out: dict[str, str] = {}
@@ -1809,7 +1860,7 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str,
         if is_account_dir(d) and any(a.name == base for a in accts):
             out[d] = base
             continue
-        blob = keychain.read_credentials(d)
+        blob = keychain.read_credentials(d, max_age=keychain.RECENT)
         if not blob:
             out[d] = ""
             continue

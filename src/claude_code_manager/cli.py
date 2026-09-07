@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from . import __version__, codex, core, oauth, sessions, shell
+from . import __version__, codex, core, sessions, shell
 
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
@@ -229,6 +229,8 @@ def cmd_login(args) -> int:
     The browser returns the code to a local port, so there is nothing to copy.
     If nothing can listen, or the wait times out, fall back to pasting it.
     """
+    from . import oauth
+
     if args.codex:
         if args.paste:
             print("Codex sign-in has no paste flow", file=sys.stderr)
