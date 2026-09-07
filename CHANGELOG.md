@@ -7,7 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Removing an account no longer leaves rules that named it, which recreated it as an empty slot on the next change.
+- Renaming an account carries its rules with it, so launches stop routing to the old directory.
+- A rule change no longer overwrites a session's newer credential with the account's spent one.
 - A poke now shows its started windows within seconds instead of after the next poll.
+
+### Changed
+
+- A sign-in asks the profile endpoint once instead of twice.
+- A rule change reads each account's credential once rather than once per running session.
+- The credential sync reads each session copy once per pass.
 
 ## [0.1.0] - 2026-09-05
 

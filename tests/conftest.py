@@ -1,5 +1,6 @@
 """Keep tests away from the user's accounts, processes and network."""
 
+import os
 import socket
 import subprocess
 import urllib.request
@@ -7,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_manager import codex, core, profiles, transcripts
+from claude_code_manager import core, locks, profiles
+from fakes import FakeApi, FakeKeychain, redirect_home
 
 
 @pytest.fixture(autouse=True)
@@ -17,38 +19,7 @@ def isolated_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
     for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "TERM_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
-    for module in (core, codex, profiles):
-        monkeypatch.setattr(module, "HOME", str(home))
-    paths = {
-        core: {
-            "ACCOUNTS_DIR": home / ".claude-accts",
-            "DEFAULT_CONFIG": home / ".claude",
-            "USAGE_CACHE": home / ".claude-accts/.usage-cache.json",
-            "IDENTITY_CACHE": home / ".claude-accts/.identity.json",
-            "CHIP_FILE": home / ".claude-accts/.chips.json",
-            "PREFS_FILE": home / ".claude-manager/prefs.json",
-            "STASH_DIR": home / ".claude-manager/pending",
-            "SESSION_DIRS": home / ".claude-ctx",
-        },
-        codex: {
-            "ACCOUNTS_DIR": home / ".codex-accts",
-            "DEFAULT_HOME": home / ".codex",
-        },
-        profiles: {
-            "CCM_HOME": home / ".claude-manager",
-            "CONFIG": home / ".claude-manager/config.json",
-            "ROUTES": home / ".claude-manager/routes.conf",
-            "RESOLVER": home / ".claude-manager/resolve.zsh",
-        },
-        transcripts: {"TOKEN_CACHE": home / ".claude-accts/.tokens.json"},
-    }
-    for module, constants in paths.items():
-        for name, path in constants.items():
-            monkeypatch.setattr(module, name, str(path))
-    monkeypatch.setattr(core, "_CHIPS", (-1.0, {}))
-    monkeypatch.setattr(transcripts, "_tokens", None)
-    monkeypatch.setattr(transcripts, "_paths", {})
-    monkeypatch.setattr(transcripts, "_digests", {})
+    redirect_home(str(home), monkeypatch.setattr)
 
     def blocked(*args, **kwargs):
         pytest.fail("Tests must not contact the network or launch external tools")
@@ -70,3 +41,29 @@ def isolated_home(monkeypatch, tmp_path):
         blocked()
 
     monkeypatch.setattr(subprocess, "Popen", resolver_only)
+
+
+@pytest.fixture
+def fake_keychain(monkeypatch):
+    fake = FakeKeychain()
+    fake.install(monkeypatch)
+    return fake
+
+
+@pytest.fixture
+def fake_api(monkeypatch):
+    fake = FakeApi()
+    fake.install(monkeypatch)
+    return fake
+
+
+@pytest.fixture
+def no_git(monkeypatch):
+    monkeypatch.setattr(core, "project_root", lambda cwd: os.path.abspath(cwd))
+    monkeypatch.setattr(core, "_ROOTS", {})
+
+
+@pytest.fixture
+def fast_locks(monkeypatch):
+    monkeypatch.setattr(locks, "TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(locks, "TOUCH_SECONDS", 0.05)

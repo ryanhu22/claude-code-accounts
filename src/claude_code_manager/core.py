@@ -370,6 +370,16 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
     return rotated
 
 
+def plan_label(tier: str, account: dict | None = None) -> str:
+    label = " ".join(w.title() if w.isalpha() else w
+                     for w in tier.replace("default_claude_", "").split("_") if w)
+    if not label:
+        account = account or {}
+        label = ("Max" if account.get("has_claude_max")
+                 else "Pro" if account.get("has_claude_pro") else "")
+    return label
+
+
 def profile_result(token: str | None) -> tuple[dict, str | None]:
     """Account facts for a token, and why the lookup failed when it did.
 
@@ -389,11 +399,7 @@ def profile_result(token: str | None) -> tuple[dict, str | None]:
     account = data.get("account") or {}
     org = data.get("organization") or {}
     tier = org.get("rate_limit_tier") or ""
-    label = " ".join(w.title() if w.isalpha() else w
-                     for w in tier.replace("default_claude_", "").split("_") if w)
-    if not label:
-        label = ("Max" if account.get("has_claude_max")
-                 else "Pro" if account.get("has_claude_pro") else "")
+    label = plan_label(tier, account)
     return {"email": account.get("email"), "plan": label or None,
             "tier": tier or None,          # raw, for writing a credential
             "extra_usage": org.get("has_extra_usage_enabled")}, None
@@ -889,6 +895,23 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False) ->
     return True
 
 
+def hand_out(path: str, want: dict, email: str = "") -> bool:
+    """Give a session an account's credential unless its copy is ahead.
+
+    Refresh tokens are single use. Claude Code rotates a session copy on its
+    own, so a copy of the same account with a later expiresAt is the live
+    generation. Leave it for the sync pass to promote. A different account
+    means the dir has not caught up with a rule change; replace it at any age.
+    """
+    have = keychain.read_credentials(path)
+    if fingerprint(have) == fingerprint(want):
+        return False
+    if (have and email and _cached_email(path) == email.lower()
+            and (have.get("expiresAt") or 0) > (want.get("expiresAt") or 0)):
+        return False
+    return adopt(path, want, email=email)
+
+
 # Verdicts that mean the login itself is gone, rather than unreachable. Claude
 # Code empties the token fields in place when it finds a login it cannot use,
 # so a credential record can still exist with nothing usable inside it.
@@ -1061,6 +1084,7 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     old item. The credentials are read first, and nothing is deleted until the
     new copy is in place.
     """
+    global _CHIPS
     import shutil
     new = "".join(c for c in new.strip() if c.isalnum() or c in "-_")
     if not new:
@@ -1069,7 +1093,8 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
         return True, "unchanged"
     if new in account_names() or new in codex_account_names():
         return False, f"{new} already exists"
-    if old in codex_account_names():
+    is_codex = old in codex_account_names()
+    if is_codex:
         ok, msg = codex.rename_account(old, new)
         if not ok:
             return ok, msg
@@ -1090,6 +1115,17 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
             return False, str(e)
         keychain.delete(keychain.service_for(old_slot))
         shutil.rmtree(old_slot, ignore_errors=True)
+        store = _cache_read(IDENTITY_CACHE)
+        if os.path.abspath(old_slot) in store:
+            store[os.path.abspath(new_slot)] = store.pop(os.path.abspath(old_slot))
+            _cache_write(store, IDENTITY_CACHE)
+        # Saving rules creates Claude slots, so rewrite only after their move lands.
+        _replace_account_rules(old, new)
+    store = _cache_read()
+    old_key, new_key = (f"codex:{old}", f"codex:{new}") if is_codex else (old, new)
+    if old_key in store:
+        store[new_key] = store.pop(old_key)
+        _cache_write(store)
     try:                                     # keep its colour through the rename
         with open(CHIP_FILE) as f:
             table = json.load(f)
@@ -1099,6 +1135,7 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
                 json.dump(table, f, indent=2)
     except (OSError, ValueError):
         pass
+    _CHIPS = (-1.0, {})
     return True, f"{old} is now {new}"
 
 
@@ -1146,8 +1183,8 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
         return False, "signed in, but the keychain refused to store it"
     _cache_write({**_cache_read(IDENTITY_CACHE),
                   os.path.abspath(slot): {"fp": fingerprint(blob), "email": email,
-                                          "plan": profile_result(
-                                              blob["accessToken"])[0].get("plan"),
+                                          "plan": plan_label(blob.get("rateLimitTier") or "")
+                                          or blob.get("subscriptionType"),
                                           "at": time.time()}}, IDENTITY_CACHE)
     if before and before.lower() != email.lower():
         # The browser signs in as whoever it was already logged into, which is
@@ -1195,15 +1232,31 @@ def add_account_command(name: str) -> str:
 
 
 def remove_account(name: str) -> bool:
+    global _CHIPS
     if name in codex_account_names():
-        return codex.remove_account(name)
-    slot = slot_dir(name)
-    ok = keychain.delete(keychain.service_for(slot))
-    try:
+        ok = codex.remove_account(name)
+        cache_key = f"codex:{name}"
+    else:
         import shutil
+        slot = slot_dir(name)
+        ok = keychain.delete(keychain.service_for(slot))
         shutil.rmtree(slot, ignore_errors=True)
-    except Exception:
-        pass
+        _replace_account_rules(name, "")
+        store = _cache_read(IDENTITY_CACHE)
+        if os.path.abspath(slot) in store:
+            store.pop(os.path.abspath(slot))
+            _cache_write(store, IDENTITY_CACHE)
+        _drop_stash(slot)
+        cache_key = name
+    store = _cache_read()
+    if cache_key in store:
+        store.pop(cache_key)
+        _cache_write(store)
+    table = dict(_chip_table())
+    if name in table:
+        table.pop(name)
+        _cache_write(table, CHIP_FILE)
+    _CHIPS = (-1.0, {})
     return ok
 
 
@@ -1478,8 +1531,8 @@ def prepare_session(term_id: str, account: str) -> str:
     _seed_dir(path)
     _seed_config(path, account)
     want = live_blob(account_dir(account)) if account else None
-    if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
-        adopt(path, want)
+    if want:
+        hand_out(path, want, email=_cached_email(account_dir(account)))
     return path
 
 
@@ -1551,8 +1604,10 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         # worked out once here and kept for the pass below.
         owner = (identity(home, master)[0].get("email") or "").lower()
         ahead: dict[str, str] = {}          # path -> mine | theirs | unknown
+        copies: dict[str, dict | None] = {}
         for path in session_paths:
             b = keychain.read_credentials(path)
+            copies[path] = b
             if not b or not b.get("refreshToken"):
                 continue
             if (b.get("expiresAt") or 0) <= (master.get("expiresAt") or 0):
@@ -1566,7 +1621,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         want = (identity(home, master)[0].get("email") or "")
         best = fingerprint(master)
         for path in session_paths:
-            if fingerprint(keychain.read_credentials(path)) == best:
+            if fingerprint(copies[path]) == best:
                 continue
             # Never write an older token over a newer one that could not be
             # identified. The promotion above passed on it because the endpoint
@@ -1619,13 +1674,35 @@ def save_rules(r: profiles.Rules) -> None:
     profiles.save(r, account_dir)
 
 
-def resolve(cwd: str, term_id: str = "") -> tuple[str, str]:
+def _replace_account_rules(old: str, new: str) -> None:
+    """Carry rules with a renamed account, or clear them when it is removed."""
+    r = rules()
+    before = r.to_dict()
+    if r.default_account == old:
+        r.default_account = new
+    for prof in r.profiles:
+        if prof.account == old:
+            prof.account = new
+    for entries in (r.projects, r.sessions):
+        for key, account in list(entries.items()):
+            if account == old:
+                if new:
+                    entries[key] = new
+                else:
+                    entries.pop(key)
+    if r.to_dict() != before:
+        save_rules(r)
+
+
+def resolve(cwd: str, term_id: str = "", r: profiles.Rules | None = None
+            ) -> tuple[str, str]:
     """Which account a session in `cwd` should bill to, and why.
 
     A worktree resolves to its parent checkout first, so it inherits whatever
     rule covers the repository even when it lives outside the repo directory.
     """
-    return rules().account_for((os.path.abspath(cwd), project_root(cwd)), term_id)
+    r = r if r is not None else rules()
+    return r.account_for((os.path.abspath(cwd), project_root(cwd)), term_id)
 
 
 def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
@@ -1891,18 +1968,24 @@ def apply_now(live: Iterable[sessions.Session] | None = None
     """
     moved: list[str] = []
     applied: dict[str, str] = {}
+    r = rules()
+    credentials: dict[str, tuple[dict | None, str]] = {}
     for sess in (live if live is not None else sessions.live(credential_dirs())):
         if not sess.term_id:
             continue
         path = session_dir(sess.term_id)
         if os.path.abspath(path) != os.path.abspath(sess.env_config_dir):
             continue                 # it is not reading this dir
-        account, _ = resolve(sess.cwd, sess.term_id)
-        want = live_blob(account_dir(account)) if account else None
-        if want and fingerprint(keychain.read_credentials(path)) != fingerprint(want):
-            if adopt(path, want):
-                moved.append(sess.label)
-                applied[path] = account
+        account, _ = resolve(sess.cwd, sess.term_id, r)
+        if not account:
+            continue
+        if account not in credentials:
+            home = account_dir(account)
+            credentials[account] = live_blob(home), _cached_email(home)
+        want, email = credentials[account]
+        if want and hand_out(path, want, email=email):
+            moved.append(sess.label)
+            applied[path] = account
     return moved, applied
 
 
@@ -2003,4 +2086,3 @@ def profile_remove_repo(name: str, path: str,
 
 
 # --------------------------------------------------------------------------- session pins
-

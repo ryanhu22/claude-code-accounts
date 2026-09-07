@@ -60,6 +60,34 @@ transcript token cache. The throwaway `HOME` covers those paths. Clear inherited
 Changing `HOME` does not isolate the macOS login keychain. Use the test suite
 for credential work, or a separate macOS user for manual sign-in tests.
 
+## Measuring latency
+
+Run the fake bench with a throwaway home and no external tools or network:
+
+```sh
+.venv/bin/python scripts/bench.py
+.venv/bin/python scripts/bench.py --accounts 5 --sessions 14 --runs 20 --security-ms 15
+```
+
+The table reports median wall time and keychain calls for each move. Each read
+is one `security` subprocess, about 15 ms on this machine. Fake calls cost
+almost nothing, so the estimate adds `(reads + writes) * security_ms` to the
+wall time. Deletes are counted but excluded from that estimate.
+`tests/test_moves.py` pins the exact keychain-call count of every move so a
+regression fails CI.
+
+To measure read-only operations against local accounts and running sessions:
+
+```sh
+.venv/bin/python scripts/bench.py --real
+```
+
+Real mode reads the login keychain and blocks network access. It disables
+refresh, healing, adoption and cache writes. It times each `security` call and
+prints their median. Its wall times already include keychain latency. Profile
+counts are blocked lookup attempts, and session metadata caches stay warm.
+Account names and credentials are never printed.
+
 ## Code conventions
 
 This project targets macOS. Keep runtime code in the standard library, except

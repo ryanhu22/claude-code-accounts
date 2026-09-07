@@ -91,3 +91,21 @@ def test_resolver_path_fallback(tmp_path):
     result = subprocess.run([zsh, profiles.RESOLVER], cwd=cwd, env=env,
                             capture_output=True, text=True, check=True, timeout=3)
     assert result.stdout.strip() == table["work"]
+
+
+def test_add_repo_makes_membership_exclusive(tmp_path):
+    repo = str(tmp_path / "repo")
+    rules = profiles.Rules(profiles=[profiles.Profile("one", repos=[repo]),
+                                    profiles.Profile("two")])
+    rules.add_repo("two", repo)
+    assert rules.profile("one").repos == []
+    assert rules.profile("two").paths == [repo]
+    rules.add_repo("two", repo)
+    assert rules.profile("two").paths == [repo]
+
+
+def test_deeper_project_rule_wins(tmp_path):
+    root = str(tmp_path)
+    deep = str(tmp_path / "repo")
+    rules = profiles.Rules(projects={root: "shallow", deep: "deep"})
+    assert rules.account_for(deep + "/src") == ("deep", "project")
