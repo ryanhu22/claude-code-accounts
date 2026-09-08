@@ -51,6 +51,8 @@ ANTHROPIC_VERSION = "2023-06-01"
 # to that model and only starts on a request to it.
 POKE_MODEL = "claude-haiku-4-5-20251001"
 POKE_MODEL_SCOPED = {"fable": "claude-fable-5-1"}
+AUTO_START_PREF = "auto_start_weekly"
+AUTO_START_RETRY = 3600.0
 
 _UA: str | None = None
 
@@ -761,6 +763,9 @@ def _usage(name: str, fetch, force: bool = False,
         return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
     store[name] = {"data": data, "at": now, "retry_after": 0,
                    "who": who, "tried_at": now}
+    # A usage refresh must not make automatic start due again.
+    if "auto_start_at" in entry:
+        store[name]["auto_start_at"] = entry["auto_start_at"]
     _cache_write(store)
     return parse(data), now, None
 
@@ -1293,7 +1298,7 @@ def _one_poke(blob: dict, model: str) -> None:
         extra_headers={"anthropic-version": ANTHROPIC_VERSION})
 
 
-def poke(name: str) -> tuple[bool, str]:  # noqa: D401
+def poke(name: str, *, weekly_only: bool = False) -> tuple[bool, str]:  # noqa: D401
     """Spend a few tokens on an account to start every window that has no clock.
 
     A freshly reset account sits at 0% with no window running, so a countdown
@@ -1331,8 +1336,11 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     # with any request, so the general model is only sent when it is the only
     # thing that would start a window.
     limits, _, _ = _usage(name, lambda: _get("/api/oauth/usage", blob["accessToken"]), force=True)
-    stopped = [lim for lim in limits if not lim.resets_at]
+    stopped = [lim for lim in limits if not lim.resets_at
+               and (not weekly_only or lim.span == 604800)]
     if limits and not stopped:
+        if weekly_only:
+            return True, "every weekly window is already running"
         return True, "every window is already running"
     # A request to a scoped model starts that window AND the general ones, so
     # when a scoped window is stopped its own model is the whole job. The
@@ -1366,6 +1374,58 @@ def poke(name: str) -> tuple[bool, str]:  # noqa: D401
     if failed:
         return False, f"started {len(started)} of {len(models)}. {'; '.join(failed)}"
     return True, f"{len(started)} window group(s) started"
+
+
+def stopped_weekly(acct: Account) -> list[Limit]:
+    """Find weekly windows that can start on this signed-in Claude account."""
+    if acct.is_codex or not acct.signed_in or not acct.reading:
+        return []
+    return [lim for lim in acct.limits if lim.span == 604800 and not lim.resets_at]
+
+
+def auto_start_due(accts: Iterable[Account], now: float,
+                   attempts: dict[str, float]) -> list[str]:
+    return [acct.name for acct in accts if stopped_weekly(acct)
+            and now - attempts.get(acct.name, 0) >= AUTO_START_RETRY]
+
+
+def auto_start_attempts() -> dict[str, float]:
+    return {name: entry["auto_start_at"] for name, entry in _cache_read().items()
+            if "auto_start_at" in entry}
+
+
+def note_auto_start(name: str, now: float) -> None:
+    store = _cache_read()
+    store.setdefault(name, {})["auto_start_at"] = now
+    _cache_write(store)
+
+
+def auto_start(accts: Iterable[Account]) -> list[tuple[str, bool, str]]:
+    """Start weekly windows before idle time pushes their next reset later.
+
+    Starting a 5-hour window while idle gains nothing, so only stopped weekly
+    windows count. The request starts the 5-hour window too. Attempts stay an
+    hour apart per account so a failure does not send a request every refresh.
+    This sends real requests on the user's behalf. Automatic start stays off
+    unless they turn it on.
+    """
+    results: list[tuple[str, bool, str]] = []
+    try:
+        if not pref(AUTO_START_PREF, False):
+            return results
+        now = time.time()
+        names = auto_start_due(accts, now, auto_start_attempts())
+        for name in names:
+            try:
+                # Count the attempt even if the process stops during the request.
+                note_auto_start(name, time.time())
+                ok, msg = poke(name, weekly_only=True)
+            except Exception as e:
+                ok, msg = False, str(e)
+            results.append((name, ok, msg))
+    except Exception:
+        pass          # a broken preference or cache is not a failed start
+    return results
 
 
 # --------------------------------------------------------------------------- contexts

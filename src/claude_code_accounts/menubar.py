@@ -1041,6 +1041,7 @@ class ManagerApp(rumps.App):
         self._owner_prints: dict[str, str | None] = {}
         self._rules_stamp = 0.0
         self._again = False
+        self._again_force = False
         self._polling = False
         self._fresh_sessions: tuple | None = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
@@ -1139,17 +1140,33 @@ class ManagerApp(rumps.App):
     def _worker(self, force: bool = False) -> None:
         try:
             snap = self._collect(force)
+            try:
+                results = core.auto_start(snap.accounts)
+                for name, ok, msg in results:
+                    message = (f"{name}: weekly windows started automatically" if ok else
+                               f"{name}: could not start the weekly window. {msg}")
+                    self._later(lambda ok=ok, message=message: self._report(ok, message))
+                    if ok:
+                        self._again = True
+                        self._again_force = True
+                        threading.Timer(12.0, lambda name=name: self._later(
+                            lambda: self._poke_again(name))).start()
+            except Exception:
+                pass          # automatic start must not hide a usage reading
             with self._lock:
                 self._pending = snap
         finally:
             self._busy = False
         if self._again:
+            force = self._again_force
             self._again = False
-            self._on_refresh_tick(None)
+            self._again_force = False
+            self._on_refresh_tick(None, force=force)
 
     def _on_refresh_tick(self, _timer, force: bool = False) -> None:
         if self._busy:
             self._again = True     # asked for mid-flight: run again after, not never
+            self._again_force = self._again_force or force
             return
         self._busy = True
         threading.Thread(target=self._worker, args=(force,), daemon=True).start()
@@ -1376,6 +1393,11 @@ class ManagerApp(rumps.App):
         # every other tick in every other menu.
         follow._menuitem.setState_(1 if self._tracker.enabled else 0)
         self.menu.add(follow)
+        automatic = rumps.MenuItem("Start weekly windows automatically",
+                                   callback=self._toggle_auto_start)
+        _set_icon(automatic, "clock.arrow.circlepath")
+        automatic._menuitem.setState_(1 if core.pref(core.AUTO_START_PREF, False) else 0)
+        self.menu.add(automatic)
 
         self._refresh_item = rumps.MenuItem("Refresh now", callback=self.refresh_now)
         _set_icon(self._refresh_item, "arrow.clockwise")
@@ -1477,6 +1499,13 @@ class ManagerApp(rumps.App):
         if self._tracker.enabled:
             core.set_pref("bar_account", "")
         self._rebuild()
+
+    def _toggle_auto_start(self, _sender) -> None:
+        enabled = not core.pref(core.AUTO_START_PREF, False)
+        core.set_pref(core.AUTO_START_PREF, enabled)
+        self._rebuild()
+        if enabled:
+            self._on_refresh_tick(None, force=True)
 
     def _make_show_bar(self, name: str):
         def handler(_sender):

@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Automatic start of weekly usage windows, off by default: a menu bar toggle and `ccm auto-start on`.
+
 ### Fixed
 
 - The menu bar no longer sticks on "?" when the first session poll runs before the first refresh has loaded the accounts.

@@ -33,8 +33,8 @@ Know what you are running:
   collect, store or intermediate Claude.ai credentials or session tokens, and
   that requests may not be routed through Free, Pro or Max plan credentials.
   Three parts of this tool do that with your own accounts: `ccm login`,
-  `ccm poke`, and the credential copying that lets a running session change
-  account without a restart. Anthropic says it may enforce these restrictions
+  `ccm poke` and its automatic mode, and the credential copying that lets a
+  running session change account without a restart. Anthropic says it may enforce these restrictions
   without notice. Using those parts can put your Claude account at risk. Read
   the terms yourself: https://code.claude.com/docs/en/legal-and-compliance
 - The Codex CLI is open source, and OpenAI maintainers have said that forks
@@ -254,6 +254,15 @@ A weekly reset leaves an account at 0% with no window running, because the
 about 22 input tokens, so the window lines up with when you want it. A
 model-scoped window only starts on a request to that model, so a poke sends
 one request per window that has no clock.
+
+The menu bar app can do this for you. Turn on **Start weekly windows
+automatically** in its menu, or run `ccm auto-start on`. Every time usage is
+refreshed, an account whose 7-day window or model-scoped weekly window has no
+clock gets one request, at most once an hour per account. It is off by
+default, because it sends requests on your behalf, and it runs only while the
+menu bar app is running. The request that starts a weekly window starts the
+5-hour window too. Codex accounts are not started automatically yet: that
+needs a request to the Codex backend, which this tool does not send.
 
 ## Codex accounts
 

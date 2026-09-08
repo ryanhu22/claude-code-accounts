@@ -59,9 +59,22 @@ def cmd_list(_args) -> int:
 
 
 def cmd_poke(args) -> int:
-    ok, msg = core.poke(args.account)
+    ok, msg = core.poke(args.account, weekly_only=args.weekly)
     print(f"{args.account}: {msg}")
     return 0 if ok else 1
+
+
+def cmd_auto_start(args) -> int:
+    if args.state is not None:
+        core.set_pref(core.AUTO_START_PREF, args.state == "on")
+    state = "on" if core.pref(core.AUTO_START_PREF, False) else "off"
+    print(f"automatic start of weekly windows is {state}")
+    if args.state is None:
+        print("It runs from the menu bar app; the CLI only sets the preference.")
+    elif args.state == "on":
+        print("This sends about 22 input tokens per stopped window, "
+              "at most once an hour per account.")
+    return 0
 
 
 _WHY = {"session": "pinned to this terminal", "project": "a rule for this project",
@@ -333,7 +346,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_profile)
     p = sub.add_parser("poke", help="spend one token to start an account's 5h window")
     p.add_argument("account")
+    p.add_argument("--weekly", action="store_true", help="start only stopped weekly windows")
     p.set_defaults(func=cmd_poke)
+    p = sub.add_parser("auto-start", help="set automatic start of weekly windows")
+    p.add_argument("state", nargs="?", choices=("on", "off"))
+    p.set_defaults(func=cmd_auto_start)
     sub.add_parser("where", help="which context and account this directory uses").set_defaults(
         func=cmd_where)
     sub.add_parser("sessions", help="every running Claude Code session").set_defaults(
