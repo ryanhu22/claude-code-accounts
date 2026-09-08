@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The menu bar no longer sticks on "?" when the first session poll runs before the first refresh has loaded the accounts.
+
 - Removing an account no longer leaves rules that named it, which recreated it as an empty slot on the next change.
 - Renaming an account carries its rules with it, so launches stop routing to the old directory.
 - A rule change no longer overwrites a session's newer credential with the account's spent one.

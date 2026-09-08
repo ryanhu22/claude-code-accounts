@@ -1829,7 +1829,12 @@ def owners_now(dirs: Iterable[str], known: dict[str, str], prints: dict[str, str
             continue
         current[path] = fingerprint(keychain.read_credentials(
             path, max_age=0 if fresh else keychain.RECENT))
-        if path not in known or current[path] != prints.get(path):
+        # A remembered owner that is not a loaded account is no answer. The
+        # first poll can run before the first refresh has loaded any
+        # accounts, and naming a dir then yields its email; trusting that
+        # afterwards kept the menu bar reading "?" for good.
+        if (path not in known or known[path] not in names
+                or current[path] != prints.get(path)):
             stale.add(path)
         else:
             owners[path] = known[path]

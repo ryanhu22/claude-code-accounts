@@ -660,3 +660,17 @@ def test_sync_rechecks_rotations_under_lock(fake_keychain, fake_api, monkeypatch
         assert core.sync_credentials([live]) == []
     assert stored(fake_keychain, destination) == newer
     assert stored(fake_keychain, live.config_dir if promotion else slot) == candidate
+
+
+def test_owners_now_retries_owner_named_before_accounts_loaded(fake_keychain, fake_api):
+    known_slot = known("a", "a@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a"))
+    live = session("term", "/repo", "a")
+    accts = core.all_accounts(with_usage=False)
+    # The first poll ran with no accounts loaded and named the dir by email.
+    early, prints = core.owners_now([live.config_dir], {}, {}, [])
+    assert early == {live.config_dir: "a@example.com"}
+    # Once accounts exist, that answer is re-derived rather than trusted.
+    owners, _ = core.owners_now([live.config_dir], early, prints, accts)
+    assert owners == {live.config_dir: "a"}
+    assert core.fingerprint(stored(fake_keychain, known_slot))
