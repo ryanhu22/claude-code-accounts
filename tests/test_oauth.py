@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from claude_code_manager import oauth
+from claude_code_accounts import oauth
 
 
 @pytest.mark.parametrize(("pasted", "expected"), [

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claude_code_manager import __version__, cli, codex, core
+from claude_code_accounts import __version__, cli, codex, core
 
 
 @pytest.fixture

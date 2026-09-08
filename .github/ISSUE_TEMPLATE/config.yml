@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Report a vulnerability
-    url: https://github.com/ryanhu22/claude-code-manager/blob/main/SECURITY.md
+    url: https://github.com/ryanhu22/claude-code-accounts/blob/main/SECURITY.md
     about: Read the security policy and report vulnerabilities privately.

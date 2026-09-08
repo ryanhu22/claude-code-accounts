@@ -1,4 +1,4 @@
-# claude-code-manager
+# claude-code-accounts
 
 Track several Claude Code subscriptions, and optional Codex subscriptions, on
 one Mac. See what is left on each and decide which Claude account pays for each
@@ -6,7 +6,7 @@ project or session. Use the CLI (`ccm`) or the macOS menu bar app.
 
 Status: early, macOS only, used daily by its author. Expect rough edges.
 
-[![CI](https://github.com/ryanhu22/claude-code-manager/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanhu22/claude-code-manager/actions/workflows/ci.yml)
+[![CI](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml)
 
 <!-- screenshot goes here -->
 
@@ -42,13 +42,13 @@ which one, or how to move a project off an exhausted account. This does.
 Installs come from GitHub. There is no PyPI release yet.
 
 ```sh
-uv tool install "claude-code-manager[menubar] @ git+https://github.com/ryanhu22/claude-code-manager"
+uv tool install "claude-code-accounts[menubar] @ git+https://github.com/ryanhu22/claude-code-accounts"
 ```
 
 For the CLI alone:
 
 ```sh
-uv tool install "claude-code-manager @ git+https://github.com/ryanhu22/claude-code-manager"
+uv tool install "claude-code-accounts @ git+https://github.com/ryanhu22/claude-code-accounts"
 ```
 
 Sign each subscription in once, through the browser:
@@ -80,12 +80,12 @@ before launching. To start the menu bar app at login, get the LaunchAgent
 from a checkout of this repository:
 
 ```sh
-git clone https://github.com/ryanhu22/claude-code-manager
-cd claude-code-manager
+git clone https://github.com/ryanhu22/claude-code-accounts
+cd claude-code-accounts
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-cp packaging/com.claude-code-manager.plist "$HOME/Library/LaunchAgents/"
-sed -i '' "s|\$HOME|$HOME|g" "$HOME/Library/LaunchAgents/com.claude-code-manager.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.claude-code-manager.plist"
+cp packaging/com.claude-code-accounts.plist "$HOME/Library/LaunchAgents/"
+sed -i '' "s|\$HOME|$HOME|g" "$HOME/Library/LaunchAgents/com.claude-code-accounts.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.claude-code-accounts.plist"
 ```
 
 launchd does not expand `$HOME` in `ProgramArguments` or the other plist values.

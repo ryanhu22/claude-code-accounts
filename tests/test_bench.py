@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claude_code_manager import codex, core, keychain, sessions, transcripts
+from claude_code_accounts import codex, core, keychain, sessions, transcripts
 from fakes import sign_in
 
 
@@ -87,7 +87,7 @@ def test_security_counter_refuses_mutations(bench, fake_keychain, monkeypatch):
 ])
 def test_fake_poll_and_refresh_budgets(
         bench, fake_keychain, fake_api, no_git, monkeypatch, label, reads):
-    from claude_code_manager import profiles
+    from claude_code_accounts import profiles
     from fakes import session
     from test_moves import budget
 

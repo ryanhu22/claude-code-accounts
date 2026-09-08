@@ -7,7 +7,7 @@ import time
 import urllib.error
 from pathlib import Path
 
-from claude_code_manager import codex, core, keychain, profiles, sessions, transcripts
+from claude_code_accounts import codex, core, keychain, profiles, sessions, transcripts
 
 
 class FakeKeychain:

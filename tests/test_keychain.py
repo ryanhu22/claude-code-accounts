@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from claude_code_manager import core, keychain
+from claude_code_accounts import core, keychain
 from test_moves import budget
 
 

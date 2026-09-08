@@ -2,7 +2,7 @@
 
 import subprocess
 
-from claude_code_manager import sessions
+from claude_code_accounts import sessions
 
 
 def test_environ_cache_uses_pid_and_start(monkeypatch):

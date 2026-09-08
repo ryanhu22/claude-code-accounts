@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from claude_code_manager import transcripts
+from claude_code_accounts import transcripts
 
 
 def record(input_tokens, cache_write, cache_read, output):
@@ -42,7 +42,7 @@ def test_lifetime_waits_for_complete_line(tmp_path):
 
 
 def test_live_saves_all_grown_transcripts_once(monkeypatch, tmp_path):
-    from claude_code_manager import sessions
+    from claude_code_accounts import sessions
 
     config = tmp_path / "config"
     registry = config / "sessions"
@@ -83,7 +83,7 @@ def test_lifetime_alone_saves_immediately(monkeypatch, tmp_path):
 
 
 def test_live_flushes_pending_tokens_with_empty_transcript(monkeypatch, tmp_path):
-    from claude_code_manager import sessions
+    from claude_code_accounts import sessions
 
     path = tmp_path / "session.jsonl"
     path.write_text(record(10, 20, 100, 5))

@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from claude_code_manager import codex
+from claude_code_accounts import codex
 
 
 @pytest.fixture

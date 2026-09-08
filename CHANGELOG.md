@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Renamed the project to claude-code-accounts. The `ccm` command, the config directories and existing rules are unchanged.
+
 - The menu bar app reads each credential at most once every twenty seconds across its polls, instead of once per poll.
 - The session poll no longer runs `ps` for every session on every pass.
 - Launching `claude` through the shell wrapper imports less.
@@ -35,5 +37,5 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A single pinned account in the menu bar.
 - `ccm --version` to print the installed version.
 
-[Unreleased]: https://github.com/ryanhu22/claude-code-manager/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ryanhu22/claude-code-manager/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ryanhu22/claude-code-accounts/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/ryanhu22/claude-code-accounts/releases/tag/v0.1.0

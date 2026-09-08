@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claude-code-manager</string>
+    <string>com.claude-code-accounts</string>
     <key>ProgramArguments</key>
     <array>
         <string>$HOME/.local/bin/ccm-menubar</string>
@@ -25,8 +25,8 @@
         <string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>$HOME/Library/Logs/claude-code-manager.log</string>
+    <string>$HOME/Library/Logs/claude-code-accounts.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/Library/Logs/claude-code-manager.log</string>
+    <string>$HOME/Library/Logs/claude-code-accounts.log</string>
 </dict>
 </plist>

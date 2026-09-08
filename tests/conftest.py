@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_manager import core, locks, profiles
+from claude_code_accounts import core, locks, profiles
 from fakes import FakeApi, FakeKeychain, redirect_home
 
 ORIGINAL_POPEN = subprocess.Popen

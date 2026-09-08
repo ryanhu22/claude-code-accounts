@@ -24,7 +24,7 @@ credentials. The tool does not send them to the maintainer.
 ## Report a vulnerability
 
 Use GitHub private vulnerability reporting on the repository's
-[Security tab](https://github.com/ryanhu22/claude-code-manager/security).
+[Security tab](https://github.com/ryanhu22/claude-code-accounts/security).
 Do not post credentials or vulnerability details in a public issue.
 
 Describe the affected version, the steps to reproduce, and the impact.

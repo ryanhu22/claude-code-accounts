@@ -10,9 +10,9 @@ def test_cli_import_leaves_network_and_oauth_unloaded(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", conftest.ORIGINAL_POPEN)
     result = subprocess.run([sys.executable, "-c", """
 import sys
-import claude_code_manager.core
-import claude_code_manager.cli
+import claude_code_accounts.core
+import claude_code_accounts.cli
 assert 'urllib.request' not in sys.modules
-assert 'claude_code_manager.oauth' not in sys.modules
+assert 'claude_code_accounts.oauth' not in sys.modules
 """], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr

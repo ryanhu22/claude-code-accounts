@@ -2314,7 +2314,7 @@ class ManagerApp(rumps.App):
         return handler
 
     def _notify(self, message: str) -> None:
-        rumps.alert(title="Claude Code Manager", message=message, ok="OK")
+        rumps.alert(title="Claude Code Accounts", message=message, ok="OK")
 
     # ------------------------------------------------------------------ actions
 
@@ -2369,7 +2369,7 @@ class ManagerApp(rumps.App):
             if resp.clicked != 1:
                 return
             ok, msg = core.rename_account(account, resp.text)
-            rumps.notification("Claude Code Manager", "Renamed" if ok else "Rename failed", msg)
+            rumps.notification("Claude Code Accounts", "Renamed" if ok else "Rename failed", msg)
             self.refresh_now(None)
         return handler
 

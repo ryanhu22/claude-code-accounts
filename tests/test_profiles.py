@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_manager import profiles
+from claude_code_accounts import profiles
 
 
 def test_rule_precedence(tmp_path):

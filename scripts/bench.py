@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from claude_code_manager import codex, core, keychain, profiles, sessions, transcripts  # noqa: E402
+from claude_code_accounts import codex, core, keychain, profiles, sessions, transcripts  # noqa: E402
 from fakes import FakeApi, FakeKeychain, redirect_home, session, sign_in  # noqa: E402
 
 

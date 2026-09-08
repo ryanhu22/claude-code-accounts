@@ -30,5 +30,5 @@ jobs:
       - run: uv pip install -e ".[menubar]" pytest ruff
       - run: uv run --no-sync ruff check src tests
       - run: uv run --no-sync python -m compileall -q src
-      - run: uv run --no-sync python -c "import claude_code_manager.menubar, claude_code_manager.gauge, claude_code_manager.glyphs"
+      - run: uv run --no-sync python -c "import claude_code_accounts.menubar, claude_code_accounts.gauge, claude_code_accounts.glyphs"
       - run: uv run --no-sync pytest

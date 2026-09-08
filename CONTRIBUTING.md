@@ -8,8 +8,8 @@ Code and Codex CLI versions when relevant.
 ## Development setup
 
 ```sh
-git clone https://github.com/ryanhu22/claude-code-manager
-cd claude-code-manager
+git clone https://github.com/ryanhu22/claude-code-accounts
+cd claude-code-accounts
 uv venv
 uv pip install -e ".[menubar]" pytest ruff
 uv run pytest

@@ -1,6 +1,6 @@
 import pytest
 
-from claude_code_manager import core, profiles, shell
+from claude_code_accounts import core, profiles, shell
 
 
 def test_zsh_init():

@@ -1,5 +1,5 @@
 [project]
-name = "claude-code-manager"
+name = "claude-code-accounts"
 version = "0.1.0"
 description = "Several Claude Code and Codex subscriptions on one Mac: usage in the menu bar, and which account each project uses"
 readme = "README.md"
@@ -24,26 +24,26 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/ryanhu22/claude-code-manager"
-Repository = "https://github.com/ryanhu22/claude-code-manager"
-Issues = "https://github.com/ryanhu22/claude-code-manager/issues"
-Changelog = "https://github.com/ryanhu22/claude-code-manager/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ryanhu22/claude-code-accounts"
+Repository = "https://github.com/ryanhu22/claude-code-accounts"
+Issues = "https://github.com/ryanhu22/claude-code-accounts/issues"
+Changelog = "https://github.com/ryanhu22/claude-code-accounts/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 menubar = ["rumps>=0.4.0"]
 
 [project.scripts]
-ccm = "claude_code_manager.cli:main"
+ccm = "claude_code_accounts.cli:main"
 
 [project.gui-scripts]
-ccm-menubar = "claude_code_manager.menubar:main"
+ccm-menubar = "claude_code_accounts.menubar:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claude_code_manager"]
+packages = ["src/claude_code_accounts"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
@@ -57,7 +57,7 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["claude_code_manager"]
+known-first-party = ["claude_code_accounts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

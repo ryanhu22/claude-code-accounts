@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_manager import cli, codex, core, keychain, locks, oauth, profiles, sessions
+from claude_code_accounts import cli, codex, core, keychain, locks, oauth, profiles, sessions
 from fakes import session, sign_in
 
 pytestmark = pytest.mark.usefixtures("fake_keychain", "fake_api", "no_git", "fast_locks")

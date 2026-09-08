@@ -6,7 +6,7 @@ import urllib.error
 
 import pytest
 
-from claude_code_manager import core, keychain
+from claude_code_accounts import core, keychain
 
 
 def test_keychain_counts_calls_and_preserves_store_on_reset(fake_keychain):
