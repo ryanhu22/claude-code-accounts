@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The menu now updates while it is open. Usage, countdowns and session rows repaint in place; rows are added or removed once it closes.
 - The menu bar no longer sticks on "?" when the first session poll runs before the first refresh has loaded the accounts.
 
 - Removing an account no longer leaves rules that named it, which recreated it as an empty slot on the next change.

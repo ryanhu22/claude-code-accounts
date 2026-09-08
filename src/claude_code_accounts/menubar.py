@@ -983,6 +983,23 @@ def _forget(stale: list) -> None:
         reg.pop(key, None)
 
 
+def _start_timer(callback, seconds: float) -> rumps.Timer:
+    """A rumps timer that also runs while a menu is open.
+
+    rumps registers the NSTimer in the default run loop mode only. A menu
+    switches the loop into event-tracking mode, where those timers sleep.
+    Register the same NSTimer in the common modes, which cover both.
+    """
+    timer = rumps.Timer(callback, seconds)
+    timer.start()
+    try:
+        from Foundation import NSRunLoop, NSRunLoopCommonModes
+        NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
+    except (AttributeError, ImportError):
+        pass      # older rumps still works, without live menu updates
+    return timer
+
+
 _WATCHER: type | None = None
 
 
@@ -1010,7 +1027,11 @@ def _watcher_class() -> type:
                 except Exception:
                     pass      # a failed redraw must not stop the menu opening
 
-
+            def menuDidClose_(self, _menu):
+                try:
+                    self.owner._on_menu_close()
+                except Exception:
+                    pass      # a failed update must not stop the menu closing
 
         _WATCHER = CCMMenuWatcher
     return _WATCHER
@@ -1050,14 +1071,17 @@ class ManagerApp(rumps.App):
         self._refresh_item: rumps.MenuItem | None = None
         self._flash: tuple[str, str, float] = ("", "", 0.0)
         self._done: list = []
+        self._menu_open = False
+        self._rebuild_pending = False
+        self._alerts: list[str] = []
         self._drawn_at = 0.0
         self._hide_from_dock()
         self.refresh_now(None)
         self._watch_menu()
-        rumps.Timer(self._on_refresh_tick, REFRESH_SECONDS).start()
-        rumps.Timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS).start()
-        rumps.Timer(self._on_sessions_tick, SESSION_POLL_SECONDS).start()
-        rumps.Timer(self._on_sync_tick, 1).start()
+        _start_timer(self._on_refresh_tick, REFRESH_SECONDS)
+        _start_timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS)
+        _start_timer(self._on_sessions_tick, SESSION_POLL_SECONDS)
+        _start_timer(self._on_sync_tick, 1)
 
     # ------------------------------------------------------------------ plumbing
 
@@ -1111,7 +1135,18 @@ class ManagerApp(rumps.App):
         stall between the click and the menu. Session rows are left alone
         because the five-second poll already repaints them in place.
         """
+        self._menu_open = True
         self._repaint()
+
+    def _on_menu_close(self) -> None:
+        self._menu_open = False
+        if self._rebuild_pending:
+            self._rebuild_pending = False
+            self._rebuild()
+        # Clear first so a modal alert cannot show the queue twice on re-entry.
+        alerts, self._alerts = self._alerts, []
+        for message in alerts:
+            self._notify(message)
 
     @staticmethod
     def _hide_from_dock() -> None:
@@ -1312,6 +1347,15 @@ class ManagerApp(rumps.App):
         self.menu.add(head)
 
     def _rebuild(self) -> None:
+        if self._menu_open:
+            # Rows are added and removed here, and a menu redrawn from scratch
+            # under the pointer loses the hover and closes any open submenu.
+            # Paint what can change in place now; rebuild once it closes.
+            # A row click closes the menu before its callback runs, so only
+            # timer-driven rebuilds wait. Rule, toggle and colour clicks do not.
+            self._rebuild_pending = True
+            self._repaint()
+            return
         global _CODEX_NAMES
         snap = self._snapshot
         _CODEX_NAMES = {a.name for a in snap.accounts if a.is_codex}
@@ -2343,6 +2387,9 @@ class ManagerApp(rumps.App):
         return handler
 
     def _notify(self, message: str) -> None:
+        if self._menu_open:
+            self._alerts.append(message)
+            return
         rumps.alert(title="Claude Code Accounts", message=message, ok="OK")
 
     # ------------------------------------------------------------------ actions
