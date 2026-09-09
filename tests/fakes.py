@@ -56,6 +56,7 @@ class FakeApi:
     def __init__(self):
         self.login_email: str = ""
         self.emails: dict[str, str] = {}
+        self.profiles: dict[str, dict] = {}
         self.usage: dict[str, dict] = {}
         self.rejected: set[str] = set()
         self.fail_next_usage: Exception | None = None
@@ -78,8 +79,10 @@ class FakeApi:
             raise urllib.error.HTTPError(core.API + path, 401, "Unauthorized", {}, None)
         email = self.emails[token]
         if path == "/api/oauth/profile":
-            return {"account": {"email": email},
-                    "organization": {"rate_limit_tier": "default_claude_max_5x"}}
+            return self.profiles.get(email, {
+                "account": {"uuid": f"uuid-{email}", "email": email},
+                "organization": {"rate_limit_tier": "default_claude_max_5x"},
+            })
         if self.fail_next_usage is not None:
             error, self.fail_next_usage = self.fail_next_usage, None
             raise error

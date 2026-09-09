@@ -916,7 +916,7 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
     return True
 
 
-def hand_out(path: str, want: dict, email: str = "") -> bool:
+def hand_out(path: str, want: dict, email: str = "", *, account: str = "") -> bool:
     """Give a session an account's credential unless its copy is ahead.
 
     The memoized pre-read avoids taking Claude Code's locks for every session
@@ -925,11 +925,19 @@ def hand_out(path: str, want: dict, email: str = "") -> bool:
     single use, so the write must never clobber a newer same-account copy.
     Leave that copy for sync to promote. A different account means the dir
     has not caught up with a rule change; replace it at any age.
+
+    Check the identity on every pass when the dir is known to hold this account's
+    login, so a stale oauthAccount heals without waiting for a move.
     """
     have = keychain.read_credentials(path, max_age=keychain.RECENT)
-    if fingerprint(have) == fingerprint(want):
-        return False
-    return adopt(path, want, email=email, keep_newer=True)
+    same = fingerprint(have) == fingerprint(want)
+    wrote = False
+    if not same:
+        wrote = adopt(path, want, email=email, keep_newer=True)
+        same = wrote or bool(email and _cached_email(path) == email.lower())
+    if account and same:
+        _sync_identity(path, account)
+    return wrote
 
 
 # Verdicts that mean the login itself is gone, rather than unreachable. Claude
@@ -1210,6 +1218,10 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
                                           "plan": plan_label(blob.get("rateLimitTier") or "")
                                           or blob.get("subscriptionType"),
                                           "at": time.time()}}, IDENTITY_CACHE)
+    try:
+        _account_identity(attempt.account)
+    except Exception:
+        pass
     if before and before.lower() != email.lower():
         # The browser signs in as whoever it was already logged into, which is
         # how an account once ended up holding another one's token.
@@ -1570,8 +1582,8 @@ def _seed_config(path: str, account: str) -> None:
     ran onboarding and asked for a sign in on every new terminal, even with a
     good credential waiting in the keychain.
 
-    Copied once, when the dir is made. After that the session owns the file and
-    nothing here touches it again.
+    Copied once, when the dir is made. After that _sync_identity keeps the
+    identity in step on every hand-out. Everything else is left to the session.
     """
     dst = _config_json(path)
     if os.path.exists(dst):
@@ -1604,6 +1616,107 @@ def _seed_config(path: str, account: str) -> None:
             pass
 
 
+def _account_identity(account: str) -> dict | None:
+    """Keep a profile identity for accounts signed in through ccm too."""
+    path = account_dir(account)
+    dst = _config_json(path)
+    try:
+        with open(dst) as f:
+            data = json.load(f)
+        identity = data.get("oauthAccount") if isinstance(data, dict) else None
+        if isinstance(identity, dict) and identity:
+            return identity
+    except (OSError, ValueError):
+        pass
+    try:
+        blob = live_blob(path)
+        if not blob or not blob.get("accessToken"):
+            return None
+        profile = _get("/api/oauth/profile", blob["accessToken"])
+        identity = {}
+        for section, fields in (
+            ("account", {
+                "uuid": "accountUuid", "email": "emailAddress",
+                "display_name": "displayName", "full_name": "fullName",
+                "created_at": "accountCreatedAt",
+            }),
+            ("organization", {
+                "uuid": "organizationUuid", "name": "organizationName",
+                "organization_type": "organizationType", "billing_type": "billingType",
+                "has_extra_usage_enabled": "hasExtraUsageEnabled",
+                "subscription_created_at": "subscriptionCreatedAt",
+                "rate_limit_tier": "organizationRateLimitTier", "seat_tier": "seatTier",
+            }),
+        ):
+            source = profile.get(section) or {}
+            for key, target in fields.items():
+                if source.get(key) is not None:
+                    identity[target] = source[key]
+        if not identity.get("accountUuid") or not identity.get("emailAddress"):
+            return None
+    except Exception:
+        return None
+    try:
+        with locks.config(path):
+            # Re-read under the lock to keep changes made during the request.
+            try:
+                with open(dst) as f:
+                    data = json.load(f)
+            except FileNotFoundError:
+                data = {}
+            if not isinstance(data, dict):
+                return identity
+            current = data.get("oauthAccount")
+            if isinstance(current, dict) and current:
+                return current
+            data["oauthAccount"] = identity
+            tmp = dst + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(data, f)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, dst)
+            finally:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+    except (locks.LockBusy, OSError, ValueError):
+        pass
+    return identity
+
+
+def _sync_identity(path: str, account: str) -> bool:
+    """Make a session dir's .claude.json name the account it now holds.
+
+    The account's own file or profile supplies its identity. The default dir
+    may name somebody else. Drop cached usage when the identity changes because
+    those numbers belong to the previous account. Leave a busy file alone;
+    a later hand-out can try again.
+    """
+    try:
+        identity = _account_identity(account)
+        if not identity:
+            return False
+        dst = _config_json(path)
+        with locks.config(path):
+            with open(dst) as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or data.get("oauthAccount") == identity:
+                return False
+            data["oauthAccount"] = identity
+            for key in _CONFIG_SKIP:
+                data.pop(key, None)
+            tmp = dst + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, dst)
+    except (locks.LockBusy, OSError, ValueError):
+        return False
+    return True
+
+
 def prepare_session(term_id: str, account: str) -> str:
     """The dir a terminal should launch in, holding `account`'s credential."""
     path = session_dir(term_id)
@@ -1611,7 +1724,7 @@ def prepare_session(term_id: str, account: str) -> str:
     _seed_config(path, account)
     want = live_blob(account_dir(account)) if account else None
     if want:
-        hand_out(path, want, email=_cached_email(account_dir(account)))
+        hand_out(path, want, email=_cached_email(account_dir(account)), account=account)
     return path
 
 
@@ -2099,7 +2212,7 @@ def apply_now(live: Iterable[sessions.Session] | None = None
             home = account_dir(account)
             credentials[account] = live_blob(home), _cached_email(home)
         want, email = credentials[account]
-        if want and hand_out(path, want, email=email):
+        if want and hand_out(path, want, email=email, account=account):
             moved.append(sess.label)
             applied[path] = account
     return moved, applied

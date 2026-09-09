@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Moving a session to another account updates its recorded identity and drops stale
+  cached usage, so `/status` names the account whose credential it holds.
 - `ccm list` aligns the bars of model-scoped windows with the others, `ccm where` shortens
   your home to `~`, and a countdown over an hour reads `1h 47m` rather than `107m`.
 - The hint after `ccm use` no longer says running sessions keep their account; they switch

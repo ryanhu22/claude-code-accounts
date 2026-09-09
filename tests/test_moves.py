@@ -46,8 +46,8 @@ def test_assign_project_then_apply(fake_keychain, fake_api):
     with budget(fake_keychain, 0):
         assert core.assign("project", "/repo", "b", live=[])[0]
     assert f"path:/repo={target}" in Path(profiles.ROUTES).read_text()
-    # 1 fresh slot + 1 locked session read + 1 write; the pre-read hits the memo.
-    with budget(fake_keychain, 2, 1):
+    # 1 fresh slot + 1 locked session read + 1 profile token read + 1 write.
+    with budget(fake_keychain, 3, 1):
         moved, applied = core.apply_now([live])
     assert moved == [live.label]
     assert applied == {live.config_dir: "b"}
@@ -135,7 +135,8 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
     with budget(fake_keychain, 0):
         assert core.assign("default", "", "b", live=[])[0]
     # A different account replaces the session even when its expiry is earlier.
-    with budget(fake_keychain, 2, 1):
+    # Its first identity sync also reads the live token for the profile.
+    with budget(fake_keychain, 3, 1):
         assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"})
     assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, other)
     with budget(fake_keychain, 0):
@@ -373,8 +374,8 @@ def test_sign_in_finish(fake_keychain, fake_api, monkeypatch, previous_email):
             "oauthAccount": {"emailAddress": previous_email}}))
     email = fake_api.login_email = "next@example.com"
     fake_api.reset()
-    # 0 reads + 1 adopt write: rebind skips identity; recorded_email reads only JSON.
-    with budget(fake_keychain, 0, 1):
+    # 1 adopt write, plus a profile token read when the identity file is missing.
+    with budget(fake_keychain, int(not previous_email), 1):
         ok, message = core.sign_in_finish(attempt, "code#state")
     assert ok and email in message
     if previous_email:
@@ -391,7 +392,14 @@ def test_sign_in_finish(fake_keychain, fake_api, monkeypatch, previous_email):
     entry = core._cache_read(core.IDENTITY_CACHE)[slot]
     assert entry["email"] == email and entry["plan"] == "Max 5x"
     assert entry["fp"] == core.fingerprint(blob)
-    assert fake_api.profile_calls == 1
+    assert fake_api.profile_calls == (1 if previous_email else 2)
+    identity = json.loads(Path(slot, ".claude.json").read_text())["oauthAccount"]
+    if not previous_email:
+        assert identity == {
+            "accountUuid": f"uuid-{email}", "emailAddress": email,
+            "organizationRateLimitTier": "default_claude_max_5x",
+        }
+        assert Path(slot, ".claude.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_registry_live_and_prune(fake_keychain, tmp_path, monkeypatch):
@@ -548,6 +556,164 @@ def test_hand_out_requires_known_same_account(fake_keychain, fake_api, cached, e
     with budget(fake_keychain, int(bool(email)), writes):
         assert core.hand_out(path, want, email) is bool(writes)
     assert stored(fake_keychain, path) == (want if writes else have)
+
+
+@pytest.mark.parametrize("via", ["hand_out", "prepare_session", "apply_now"])
+def test_hand_out_syncs_identity(fake_keychain, fake_api, via):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    target = known("b", "b@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    identity = {"accountUuid": "uuid-b", "emailAddress": "b@example.com"}
+    Path(target, ".claude.json").write_text(json.dumps({"oauthAccount": identity}))
+    config = Path(live.config_dir, ".claude.json")
+    kept = {"projects": {"/repo": {"hasTrustDialogAccepted": True}}, "numStartups": 7}
+    config.write_text(json.dumps({
+        **kept, "oauthAccount": {"accountUuid": "uuid-a"},
+        "cachedUsageUtilization": {"accountUuid": "uuid-a", "fiveHour": 80},
+        "cachedExtraUsageDisabledReason": "disabled",
+    }))
+    want = stored(fake_keychain, target)
+    if via == "hand_out":
+        assert core.hand_out(live.config_dir, want, "b@example.com", account="b")
+    elif via == "prepare_session":
+        assert core.prepare_session("term", "b") == live.config_dir
+    else:
+        core.save_rules(profiles.Rules(default_account="b"))
+        assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"})
+    assert stored(fake_keychain, live.config_dir) == want
+    assert json.loads(config.read_text()) == {**kept, "oauthAccount": identity}
+    assert config.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("newer", [False, True])
+def test_hand_out_without_write_syncs_identity(fake_keychain, fake_api, newer):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    identity = {"accountUuid": "a", "emailAddress": "a@example.com"}
+    Path(slot, ".claude.json").write_text(json.dumps({"oauthAccount": identity}))
+    config = Path(live.config_dir, ".claude.json")
+    config.write_text(json.dumps({
+        "oauthAccount": {"accountUuid": "old"},
+        "cachedUsageUtilization": {"used": 80},
+        "cachedExtraUsageDisabledReason": "disabled",
+    }))
+    if newer:
+        keychain.write_credentials(
+            live.config_dir, fake_api.blob("a@example.com", gen=2, expires_in=7200))
+    have = stored(fake_keychain, live.config_dir)
+    with budget(fake_keychain, int(newer)):
+        assert not core.hand_out(live.config_dir, stored(fake_keychain, slot),
+                                 "a@example.com", account="a")
+    assert stored(fake_keychain, live.config_dir) == have
+    assert json.loads(config.read_text()) == {"oauthAccount": identity}
+
+
+@pytest.mark.parametrize(("cached", "email"), [
+    ("b@example.com", "a@example.com"),
+    ("", "a@example.com"),
+    ("", ""),
+])
+def test_hand_out_refused_leaves_identity(fake_keychain, fake_api, monkeypatch, cached, email):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    known("b", "b@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "b")
+    Path(slot, ".claude.json").write_text('{"oauthAccount": {"accountUuid": "a"}}')
+    core._cache_write({live.config_dir: {"email": cached}}, core.IDENTITY_CACHE)
+    config = Path(live.config_dir, ".claude.json")
+    before = '{"oauthAccount": {"accountUuid": "b"}, "cachedUsageUtilization": {"used": 80}}'
+    config.write_text(before)
+    os.utime(config, ns=(1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(core, "adopt", lambda *args, **kwargs: False)
+    have = stored(fake_keychain, live.config_dir)
+    assert not core.hand_out(live.config_dir, stored(fake_keychain, slot), email, account="a")
+    assert stored(fake_keychain, live.config_dir) == have
+    assert config.read_text() == before
+    assert config.stat().st_mtime_ns == 1_000_000_000
+
+
+@pytest.mark.parametrize("source", [None, "directory", "{}", "{", "[]", '{"oauthAccount": null}'])
+def test_hand_out_without_account_identity(fake_keychain, fake_api, source):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    fake_api.profiles["a@example.com"] = {"account": {"email": "a@example.com"}}
+    live = session("term", "/repo", "")
+    if source == "directory":
+        Path(slot, ".claude.json").mkdir()
+    elif source is not None:
+        Path(slot, ".claude.json").write_text(source)
+    # A signed-in default must never supply another account's identity.
+    Path(core._config_json(core.DEFAULT_CONFIG)).write_text(
+        '{"oauthAccount": {"accountUuid": "default"}}')
+    config = Path(live.config_dir, ".claude.json")
+    before = '{"oauthAccount": {"accountUuid": "old"}, "cachedUsageUtilization": {"used": 80}}'
+    config.write_text(before)
+    os.utime(config, ns=(1_000_000_000, 1_000_000_000))
+    assert core.hand_out(live.config_dir, stored(fake_keychain, slot),
+                         "a@example.com", account="a")
+    assert config.read_text() == before
+    assert config.stat().st_mtime_ns == 1_000_000_000
+
+
+def test_hand_out_without_account_skips_identity(fake_keychain, fake_api, monkeypatch):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "")
+
+    def unexpected_sync(*args):
+        pytest.fail("An email alone cannot select the source identity file")
+
+    monkeypatch.setattr(core, "_sync_identity", unexpected_sync)
+    want = stored(fake_keychain, slot)
+    assert core.hand_out(live.config_dir, want, "a@example.com")
+    assert stored(fake_keychain, live.config_dir) == want
+
+
+def test_sync_identity_busy_lock(fake_keychain, fake_api, monkeypatch):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    Path(slot, ".claude.json").write_text('{"oauthAccount": {"accountUuid": "a"}}')
+    live = session("term", "/repo", "a")
+    config = Path(live.config_dir, ".claude.json")
+    before = '{"oauthAccount": {"accountUuid": "old"}, "cachedUsageUtilization": {"used": 80}}'
+    config.write_text(before)
+    os.utime(config, ns=(1_000_000_000, 1_000_000_000))
+
+    @contextmanager
+    def busy(path):
+        assert path == live.config_dir
+        raise locks.LockBusy("held by Claude Code")
+        yield
+
+    monkeypatch.setattr(locks, "config", busy)
+    assert not core._sync_identity(live.config_dir, "a")
+    assert config.read_text() == before
+    assert config.stat().st_mtime_ns == 1_000_000_000
+
+
+def test_sync_identity_unchanged(fake_keychain, fake_api):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    Path(slot, ".claude.json").write_text('{"oauthAccount": {"accountUuid": "a"}}')
+    live = session("term", "/repo", "a")
+    config = Path(live.config_dir, ".claude.json")
+    before = '{"cachedUsageUtilization": {"used": 80}, "oauthAccount": {"accountUuid": "a"}}'
+    config.write_text(before)
+    os.utime(config, ns=(1_000_000_000, 1_000_000_000))
+    assert not core._sync_identity(live.config_dir, "a")
+    assert config.read_text() == before
+    assert config.stat().st_mtime_ns == 1_000_000_000
+
+
+@pytest.mark.parametrize("content", [None, "{", "[]"])
+def test_sync_identity_requires_session_config(fake_keychain, fake_api, content):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    Path(slot, ".claude.json").write_text('{"oauthAccount": {"accountUuid": "a"}}')
+    path = core.session_dir("term")
+    Path(path).mkdir(parents=True)
+    config = Path(path, ".claude.json")
+    if content is not None:
+        config.write_text(content)
+    assert not core._sync_identity(path, "a")
+    if content is None:
+        assert not config.exists()
+    else:
+        assert config.read_text() == content
 
 
 def test_owners_now_reuses_fingerprints(fake_keychain, fake_api, monkeypatch):

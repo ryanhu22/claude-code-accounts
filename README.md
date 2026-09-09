@@ -221,6 +221,15 @@ nothing else. Sessions started before they had one are the exception. There
 is nowhere to write that only they would see, so those still need a restart.
 Their row says so and offers to bring that terminal tab to the front.
 
+The `/usage` panel can show the previous account for a few minutes after a
+move. Claude Code's usage endpoint limits requests per account. When it refuses
+a request, Claude Code shows the last numbers from the previous account with
+a small "rate limited" note. The first message the session sends on the new
+account corrects the panel because Claude Code rebuilds it from that response.
+ccm keeps the session's recorded identity (`oauthAccount` in its `.claude.json`)
+in step with its credential. This makes `/status` name the right account and
+drops stale cached usage.
+
 Switching accounts invalidates the prompt cache, which is keyed per account
 and per model, so the first turn after a move re-sends the conversation. That
 is once per move, not per turn, and cheapest right after `/clear` or
