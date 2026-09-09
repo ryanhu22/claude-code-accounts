@@ -249,6 +249,33 @@ def test_sync_reads_each_copy_once(fake_keychain, fake_api):
     assert all(stored(fake_keychain, s.config_dir) == newer for s in live[:2])
 
 
+def test_refresh_leads_claude_code(fake_keychain, fake_api, monkeypatch):
+    monkeypatch.setattr(core.time, "time", lambda: 2000000000.0)
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [live.config_dir])
+    old = fake_api.blob("a@example.com", gen=1, expires_in=20 * 60)
+    keychain.write_credentials(slot, old)
+    keychain.write_credentials(live.config_dir, old)
+    fake_api.reset()
+    # The peer pre-check hits setup's memo; only its locked read costs a call.
+    with budget(fake_keychain, 5, 2):
+        rotated = core.live_blob(slot)
+    assert fake_api.refresh_calls == 1
+    assert rotated["refreshToken"] == "a@example.com-refresh2"
+    assert rotated["expiresAt"] > old["expiresAt"]
+    assert stored(fake_keychain, slot) == rotated
+    assert stored(fake_keychain, live.config_dir) == rotated
+
+    fresh = fake_api.blob("a@example.com", gen=3, expires_in=2 * 3600)
+    keychain.write_credentials(slot, fresh)
+    fake_api.reset()
+    with budget(fake_keychain, 1):
+        assert core.live_blob(slot) == fresh
+    assert fake_api.refresh_calls == 0
+    assert stored(fake_keychain, slot) == fresh
+
+
 def test_live_blob_refresh_and_failures(fake_keychain, fake_api, monkeypatch):
     slot = known("a", "a@example.com", fake_api, fake_keychain, fresh=False)
     old = stored(fake_keychain, slot)

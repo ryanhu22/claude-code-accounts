@@ -143,7 +143,15 @@ def fingerprint(blob: dict | None) -> str | None:
     return hashlib.sha256(token.encode()).hexdigest()[:16] if token else None
 
 
-def expiring(blob: dict | None, margin: float = 120) -> bool:
+# Claude Code refreshes about five minutes before expiry, or a tool run's
+# timeout plus five minutes before a long run. Our usage poll runs every three
+# minutes, so we must rotate first and hand the successor to every copy:
+# copies that refresh on their own strand each other. Half an hour costs
+# little on an eight hour token.
+REFRESH_AHEAD = 30 * 60
+
+
+def expiring(blob: dict | None, margin: float = REFRESH_AHEAD) -> bool:
     exp = (blob or {}).get("expiresAt")
     return bool(exp) and exp / 1000 < time.time() + margin
 

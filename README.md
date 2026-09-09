@@ -239,8 +239,11 @@ is once per move, not per turn, and cheapest right after `/clear` or
 
 Several directories holding one account means several copies of one refresh
 token, and a refresh token is single use: whichever session refreshes first
-spends it for the rest. Racing Claude Code for it is not winnable, so the app
-does not try. Every 45 seconds it takes the newest credential of each
+spends it for the rest. The app's three-minute usage poll refreshes tokens
+with less than thirty minutes left and hands the successor to every copy in
+one pass. This gives it a head start on Claude Code, which refreshes about
+five minutes before expiry, or a tool run's timeout plus five minutes before
+a long run. Every 45 seconds the app also takes the newest credential of each
 lineage, whoever produced it, and hands it to the copies that are behind. A
 session left holding a spent token recovers on its own, because of that same
 thirty-second re-read.
