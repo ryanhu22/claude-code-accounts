@@ -81,6 +81,22 @@ def test_project_rule_retires_pins_under_it(fake_keychain, fake_api, monkeypatch
     assert len(discovered) == int(live_source == "discovery")
 
 
+def test_known_sessions_retire_pins_without_applying(fake_keychain, fake_api):
+    for name in ("a", "b"):
+        known(name, f"{name}@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a", sessions={"t1": "a"}))
+    live = [session(term, cwd, "a") for term, cwd in
+            (("t1", "/repo"), ("t2", "/other"))]
+    applied = {}
+    with budget(fake_keychain, 0):
+        ok, message = core.assign("project", "/repo", "b", live=[], known=live,
+                                  applied_out=applied)
+    assert ok and "releasing 1 pinned session" in message
+    assert "running session" not in message
+    assert core.rules().sessions == {}
+    assert applied == {}
+
+
 def test_profile_rule_retires_pins_but_keeps_project_rule(fake_keychain, fake_api):
     for name in ("a", "b"):
         known(name, f"{name}@example.com", fake_api, fake_keychain)

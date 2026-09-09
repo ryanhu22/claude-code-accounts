@@ -2287,7 +2287,7 @@ class ManagerApp(rumps.App):
             # from what is already known first, then go and check usage.
             applied: dict[str, str] = {}
             ok, msg = core.assign(scope, key, account, cwd=cwd,
-                                  live=[], applied_out=applied)
+                                  live=[], applied_out=applied, known=self._snapshot.sessions)
             self._did(ok, msg, applied)
         return handler
 

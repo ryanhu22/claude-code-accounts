@@ -2144,11 +2144,15 @@ def _retire_pins_under(r: profiles.Rules, scope: str, key: str,
 
 def assign(scope: str, key: str, account: str, cwd: str = "",
            live: Iterable[sessions.Session] | None = None,
-           applied_out: dict | None = None) -> tuple[bool, str]:
+           applied_out: dict | None = None, *,
+           known: Iterable[sessions.Session] | None = None) -> tuple[bool, str]:
     """Point one scope at an account. The scope decides how far it reaches.
 
     Broader choices retire older live session pins so the saved rules and
     running sessions both follow the account the user just chose.
+    `known` is every session running now, used only to decide whose pins the
+    new rule retires; defaults to `live`, or to a fresh listing when neither
+    is given. This lets callers retire pins while deferring credential writes.
     Project settings follow the project so a move does not re-ask for trust.
     """
     try:
@@ -2207,8 +2211,10 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
         return False, f"unknown scope {scope}"
     where = f"{where} now uses {account}"
     if scope != "session":
-        live = list(live if live is not None else sessions.live(credential_dirs()))
-        retired = _retire_pins_under(r, scope, key, live)
+        if known is None:
+            live = list(live if live is not None else sessions.live(credential_dirs()))
+            known = live
+        retired = _retire_pins_under(r, scope, key, known)
         if retired:
             n = len(retired)
             where += f", releasing {n} pinned session{'s' if n != 1 else ''}"
