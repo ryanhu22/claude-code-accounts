@@ -54,6 +54,68 @@ def test_assign_project_then_apply(fake_keychain, fake_api):
     assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, target)
 
 
+@pytest.mark.parametrize("live_source", ["list", "iterator", "discovery"])
+def test_project_rule_retires_pins_under_it(fake_keychain, fake_api, monkeypatch,
+                                          live_source):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    target = known("b", "b@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a", sessions={"t1": "a", "t3": "a"}))
+    live = [session(term, cwd, "a") for term, cwd in
+            (("t1", "/repo"), ("t2", "/repo"), ("t3", "/other"))]
+    discovered = []
+
+    def discover(dirs):
+        discovered.append(dirs)
+        return live
+
+    monkeypatch.setattr(sessions, "live", discover)
+    supplied = {"list": live, "iterator": iter(live), "discovery": None}[live_source]
+    applied = {}
+    ok, message = core.assign("project", "/repo", "b", live=supplied, applied_out=applied)
+    assert ok and "releasing 1 pinned session" in message
+    assert "2 running sessions switch within about 30 seconds" in message
+    assert core.rules().sessions == {"t3": "a"}
+    assert applied == {s.config_dir: "b" for s in live[:2]}
+    assert all(stored(fake_keychain, s.config_dir) == stored(fake_keychain, target)
+               for s in live[:2])
+    assert len(discovered) == int(live_source == "discovery")
+
+
+def test_profile_rule_retires_pins_but_keeps_project_rule(fake_keychain, fake_api):
+    for name in ("a", "b"):
+        known(name, f"{name}@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(
+        default_account="a", profiles=[profiles.Profile("work", "a", ["/repo", "/pinned"])],
+        projects={"/pinned": "a"}, sessions={"t1": "a", "t2": "a", "t3": "a"}))
+    live = [session(term, cwd, "a") for term, cwd in
+            (("t1", "/repo"), ("t2", "/pinned"), ("t3", "/elsewhere"))]
+    applied = {}
+    ok, message = core.assign("profile", "work", "b", live=live, applied_out=applied)
+    assert ok and "releasing 1 pinned session" in message
+    r = core.rules()
+    assert r.sessions == {"t2": "a", "t3": "a"}
+    assert r.projects == {"/pinned": "a"}
+    assert r.profile("work").account == "b"
+    assert applied == {live[0].config_dir: "b"}
+
+
+def test_default_rule_retires_only_unruled_pins(fake_keychain, fake_api):
+    for name in ("a", "b"):
+        known(name, f"{name}@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(
+        default_account="a", profiles=[profiles.Profile("work", "a", ["/repo"])],
+        projects={"/pinned": "a"}, sessions={"t1": "a", "t2": "a", "t3": "a", "t4": "a"}))
+    live = [session(term, cwd, "a") for term, cwd in
+            (("t1", "/elsewhere"), ("t2", "/repo"), ("t3", "/pinned"), ("t4", "/other"))]
+    applied = {}
+    ok, message = core.assign("default", "", "b", live=live, applied_out=applied)
+    assert ok and "releasing 2 pinned sessions" in message
+    r = core.rules()
+    assert r.default_account == "b"
+    assert r.sessions == {"t2": "a", "t3": "a"}
+    assert applied == {s.config_dir: "b" for s in (live[0], live[3])}
+
+
 def test_assign_and_clear_scopes(fake_keychain, fake_api):
     sign_in("a", "a@example.com", fake_api)
     codex.ensure_account_dir("cx")
@@ -72,6 +134,8 @@ def test_assign_and_clear_scopes(fake_keychain, fake_api):
     with budget(fake_keychain, 0):
         assert core.assign("session", "term", "a", live=[])[0]
     assert core.rules().sessions == {"term": "a"}
+    # The pin has a dir from the start, so pruning cannot mistake it for dead.
+    assert core.prune_session_rules([]) == []
     assert "1 session rule" in core.rules_using("a")
     with budget(fake_keychain, 0):
         assert core.clear("session", "term", live=[])[0]
@@ -463,6 +527,24 @@ def test_gc_session_dirs(fake_keychain, fake_api):
     assert not Path(old.config_dir).exists()
     assert keychain.service_for(old.config_dir) not in fake_keychain.store
     assert all(Path(s.config_dir).exists() for s in (live, young))
+
+
+def test_prune_session_rules(fake_keychain, fake_api, monkeypatch):
+    sign_in("a", "a@example.com", fake_api)
+    session("live", "/repo", "a")
+    session("quiet", "/repo", "a")
+    core.save_rules(profiles.Rules(sessions={"live": "a", "dead": "a", "quiet": "a"}))
+    assert not Path(core.session_dir("dead")).exists()
+    with budget(fake_keychain, 0):
+        assert core.prune_session_rules(["live"]) == ["dead"]
+    assert core.rules().sessions == {"live": "a", "quiet": "a"}
+
+    def unexpected_save(r):
+        pytest.fail("Pruning unchanged rules must not rewrite the file")
+
+    monkeypatch.setattr(core, "save_rules", unexpected_save)
+    with budget(fake_keychain, 0):
+        assert core.prune_session_rules(["live"]) == []
 
 
 def test_credential_locks(fake_keychain, tmp_path):

@@ -1198,6 +1198,7 @@ class ManagerApp(rumps.App):
         terms = [s.term_id for s in snap.sessions if s.term_id]
         core.sync_credentials(snap.sessions)
         core.gc_session_dirs(terms)
+        core.prune_session_rules(terms)
         snap.running_on = core.dirs_to_accounts(
             {s.env_config_dir for s in snap.sessions}, snap.accounts)
         snap.taken_at = time.time()

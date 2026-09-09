@@ -209,6 +209,7 @@ def _term_or_die() -> str:
 def cmd_sessions(_args) -> int:
     r = core.bootstrap()
     live = sessions.live(core.credential_dirs())
+    core.prune_session_rules(s.term_id for s in live)
     accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
     if not live:
         print("no Claude Code sessions running")

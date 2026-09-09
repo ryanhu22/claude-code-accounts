@@ -1886,6 +1886,20 @@ def _replace_account_rules(old: str, new: str) -> None:
         save_rules(r)
 
 
+def prune_session_rules(live_terms: Iterable[str]) -> list[str]:
+    """Keep quiet terminals pinned until directory cleanup declares them dead."""
+    keep = set(live_terms)
+    r = rules()
+    before = r.to_dict()
+    gone = [term for term in r.sessions
+            if term not in keep and not os.path.exists(session_dir(term))]
+    for term in gone:
+        r.sessions.pop(term)
+    if r.to_dict() != before:
+        save_rules(r)
+    return gone
+
+
 def resolve(cwd: str, term_id: str = "", r: profiles.Rules | None = None
             ) -> tuple[str, str]:
     """Which account a session in `cwd` should bill to, and why.
@@ -2099,13 +2113,42 @@ def bootstrap() -> profiles.Rules:
     return r
 
 
+def _retire_pins_under(r: profiles.Rules, scope: str, key: str,
+                       live: Iterable[sessions.Session]) -> list[str]:
+    """Specificity alone is the wrong order when the broader rule is newer
+    and is the one the user just chose on purpose. Retire older pins under it.
+    """
+    gone = []
+    for sess in live:
+        if sess.term_id not in r.sessions:
+            continue
+        paths = (project_root(sess.cwd), os.path.abspath(sess.cwd))
+        projects = [r.project_rule_for(path) for path in paths]
+        if scope == "project":
+            covered = key in projects
+        elif scope in ("profile", "default"):
+            if any(project is not None for project in projects):
+                continue
+            profs = [r.profile_for(path) for path in paths]
+            if scope == "profile":
+                covered = any(prof is not None and prof.name == key for prof in profs)
+            else:
+                covered = all(prof is None for prof in profs)
+        else:
+            continue
+        if covered:
+            r.sessions.pop(sess.term_id)
+            gone.append(sess.term_id)
+    return gone
+
+
 def assign(scope: str, key: str, account: str, cwd: str = "",
            live: Iterable[sessions.Session] | None = None,
            applied_out: dict | None = None) -> tuple[bool, str]:
     """Point one scope at an account. The scope decides how far it reaches.
 
-    Nothing is copied and no session is disturbed: this rewrites the rules and
-    the table the shell reads, and takes effect the next time a session starts.
+    Broader choices retire older live session pins so the saved rules and
+    running sessions both follow the account the user just chose.
     Project settings follow the project so a move does not re-ask for trust.
     """
     try:
@@ -2136,12 +2179,17 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
         # out of whichever dir the project rule named instead.
         before = account_dir(r.account_for(project_root(cwd or HOME), key)[0] or account)
         r.set_session(key, account)
+        # A pin outlives the tab only until its dir is gone, so a tab pinned
+        # before Claude Code ever ran in it needs the dir now, or the next
+        # poll reads the missing dir as a dead terminal and drops the pin.
+        _seed_dir(session_dir(key))
         moved = [project_root(cwd)] if cwd else []
         where = "this session"
     elif scope == "project":
         root = project_root(key or cwd)
         before = account_dir(r.account_for(root)[0] or account)
         r.set_project(root, account)
+        key = profiles.tilde(root)
         moved, where = [root], f"“{os.path.basename(root)}”"
     elif scope == "profile":
         prof = r.profile(key)
@@ -2157,10 +2205,17 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
         where = "everything with no rule"
     else:
         return False, f"unknown scope {scope}"
+    where = f"{where} now uses {account}"
+    if scope != "session":
+        live = list(live if live is not None else sessions.live(credential_dirs()))
+        retired = _retire_pins_under(r, scope, key, live)
+        if retired:
+            n = len(retired)
+            where += f", releasing {n} pinned session{'s' if n != 1 else ''}"
     save_rules(r)
     for root in moved:
         carry_project_state(root, before, account_dir(account))
-    return True, landed(f"{where} now uses {account}", live, applied_out)
+    return True, landed(where, live, applied_out)
 
 
 def landed(where: str, live: Iterable[sessions.Session] | None = None,
