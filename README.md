@@ -12,7 +12,17 @@ Status: early, macOS only, used daily by its author. Expect rough edges.
 
 [![CI](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml)
 
-<!-- screenshot goes here -->
+<p align="center">
+  <img src="docs/images/menu.png" width="900"
+       alt="The menu: every subscription with its usage windows, every running session and what it spends, and the rules that decide which account each project uses">
+</p>
+<p align="center">
+  <img src="docs/images/menubar.png" width="360"
+       alt="The menu bar item: the chosen account's 5-hour, 7-day and model windows, with the time until each resets">
+</p>
+
+The screenshots come from `scripts/demo.py`, which runs the app on made-up
+accounts. Nothing in them is a real account, email address or path.
 
 ## Read this first
 
@@ -87,6 +97,11 @@ ccm use acme --session            # this terminal only
 ccm where                         # what this directory resolves to, and why
 ```
 
+<p align="center">
+  <img src="docs/images/cli-list.png" width="900"
+       alt="ccm list: one block per subscription with a bar and a countdown for each usage window">
+</p>
+
 ## Install
 
 Requirements:
@@ -146,20 +161,15 @@ more than one line behind.
 
 ### Start the menu bar app at login
 
-From a checkout of this repository:
-
 ```sh
-git clone https://github.com/ryanhu22/claude-code-accounts
-cd claude-code-accounts
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-cp packaging/com.claude-code-accounts.plist "$HOME/Library/LaunchAgents/"
-sed -i '' "s|\$HOME|$HOME|g" "$HOME/Library/LaunchAgents/com.claude-code-accounts.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.claude-code-accounts.plist"
+ccm menubar install
 ```
 
-launchd does not expand `$HOME` in a plist, so the `sed` line writes your home
-path into the installed copy. The plist expects `ccm-menubar` in `~/.local/bin`.
-Adjust that path if your `uv` tool directory is elsewhere.
+This writes a launch agent for `ccm-menubar` into `~/Library/LaunchAgents`,
+starts it now, and starts it at every login. `ccm menubar uninstall` removes
+it. To run the app once without installing anything, run `ccm-menubar`. The
+plist it writes is `packaging/com.claude-code-accounts.plist` with your paths
+filled in, if you would rather install it by hand.
 
 ## Which account a session uses
 
@@ -241,6 +251,7 @@ ccm sessions              # every running session and what pays for it
 ccm poke <account>        # spend one token to start that account's 5h window
 ccm unpin                 # drop this terminal's rule
 ccm add <name>            # print the command that signs an account in
+ccm menubar install       # start the menu bar app at every login
 ```
 
 `ccm shell-init` also defines short aliases: `subs`, `ccwhoami`, `ccsessions`,
@@ -407,7 +418,9 @@ credential, so every session keeps its real plan and rate-limit tier.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, the latency bench
 and pull requests. Tests run against a fake keychain and a fake API, so they
-never touch your accounts or the network.
+never touch your accounts or the network. `scripts/demo.py menubar` runs the
+app on made-up accounts, so you can see every screen without signing anything
+in. `scripts/demo.py shots` regenerates the images above from the same data.
 
 ## Security
 

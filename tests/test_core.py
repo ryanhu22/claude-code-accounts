@@ -63,7 +63,8 @@ def test_forget_usage_unknown_name_is_noop(monkeypatch, payload):
 
 
 @pytest.mark.parametrize(("minutes", "expected"), [
-    (-1, "now"), (0, "now"), (15, "15m"), (185, "3h 5m"), (4380, "3d 1h"),
+    (-1, "now"), (0, "now"), (15, "15m"), (59, "59m"), (60, "1h 0m"),
+    (107, "1h 47m"), (185, "3h 5m"), (4380, "3d 1h"),
 ])
 def test_human_delta(monkeypatch, minutes, expected):
     now = dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)

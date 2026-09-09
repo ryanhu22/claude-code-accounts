@@ -7,11 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `ccm menubar install` and `ccm menubar uninstall` to start the menu bar app at login
+  without editing a plist by hand.
 - A fake-data demo for the CLI, menu bar and README screenshots in a throwaway home.
 - Automatic start of weekly usage windows, off by default: a menu bar toggle and `ccm auto-start on`.
 
 ### Fixed
 
+- `ccm list` aligns the bars of model-scoped windows with the others, `ccm where` shortens
+  your home to `~`, and a countdown over an hour reads `1h 47m` rather than `107m`.
+- The hint after `ccm use` no longer says running sessions keep their account; they switch
+  within about thirty seconds, and only a session without a directory of its own waits for a restart.
 - The menu now updates while it is open. Usage, countdowns and session rows repaint in place; rows are added or removed once it closes.
 - The menu bar no longer sticks on "?" when the first session poll runs before the first refresh has loaded the accounts.
 

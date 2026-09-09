@@ -126,9 +126,9 @@ def seed(home) -> World:
     r.default_account = "personal"
     r.profiles = [profiles.Profile("work", "work", [str(home / "src" / repo)
                                                   for repo in ("acme-api", "acme-web")])]
-    r.set_project(str(home / "src/side-project"), "client")
+    r.set_project(str(home / "src/blog"), "client")
     r.set_session(world.pinned_term, "personal")
-    for directory in (*r.profiles[0].repos, str(home / "src/side-project")):
+    for directory in (*r.profiles[0].repos, str(home / "src/blog")):
         os.makedirs(directory, exist_ok=True)
     core.save_rules(r)
     digests, totals, environments, branches = {}, {}, {}, {}
@@ -139,7 +139,7 @@ def seed(home) -> World:
         ("web", "work", "acme-web/.claude/worktrees/checkout-flow", "acme-web-9c", "derived",
          "busy", "checkout-flow", "Rebuild the checkout form", 0.71,
          (9_800, 210_000, 6_120_000, 88_900, 131)),
-        ("side", "client", "side-project", "side-project-1e", "derived", "idle", "main",
+        ("side", "client", "blog", "blog-1e", "derived", "idle", "main",
          "Migrate the cron jobs to launchd", 0.18, (4_100, 32_000, 640_000, 12_300, 22)),
         ("notes", "personal", "notes", "weekly review", "user", "idle", "main", "", 0.06,
          (900, 8_000, 71_000, 3_400, 6)),
@@ -307,7 +307,7 @@ def load_menubar(home):
     return menubar
 
 
-def capture(path, window):
+def capture(path, window, quiet=False):
     """Save one window of this process by its id, without its shadow.
 
     A window capture does not care which display the window is on, or
@@ -317,12 +317,14 @@ def capture(path, window):
     path.unlink(missing_ok=True)
     try:
         result = subprocess.run(["screencapture", "-x", "-o", "-l", str(window), str(path)],
-                                timeout=60)
+                                capture_output=quiet, timeout=60)
         if result.returncode == 0 and path.is_file() and path.stat().st_size:
             return True
     except (OSError, subprocess.SubprocessError):
         pass
-    print(f"Could not write {path}; give the terminal Screen Recording permission.", flush=True)
+    if not quiet:
+        print(f"Could not write {path}; give the terminal Screen Recording permission.",
+              flush=True)
     return False
 
 
@@ -437,10 +439,17 @@ def menu_shots(app, out, chrome):
             if not menus:
                 raise RuntimeError("the demo menu did not open")
             time.sleep(1.0)          # let the rows finish drawing
-            biggest = max(menus, key=lambda w: w["kCGWindowBounds"]["Width"]
-                          * w["kCGWindowBounds"]["Height"])
-            if capture(out / "menu.png", biggest["kCGWindowNumber"]):
-                print(out / "menu.png", flush=True)
+            # The window server sometimes lists the menu a moment before it
+            # can be imaged, so a failed capture is tried again, not reported.
+            for attempt in range(5):
+                biggest = max(menus, key=lambda w: w["kCGWindowBounds"]["Width"]
+                              * w["kCGWindowBounds"]["Height"])
+                if capture(out / "menu.png", biggest["kCGWindowNumber"], quiet=attempt < 4):
+                    print(out / "menu.png", flush=True)
+                    break
+                time.sleep(1.0)
+                menus = [w for w in windows_of(os.getpid())
+                         if w.get("kCGWindowNumber") != found["item"]] or menus
             os._exit(0)
         except Exception as error:
             print(f"Demo screenshots failed: {error}", file=sys.stderr, flush=True)

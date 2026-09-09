@@ -8,6 +8,11 @@ import sys
 
 from . import __version__, codex, core, sessions, shell
 
+DESCRIPTION = (
+    "Several Claude Code and Codex subscriptions on one Mac: usage for each, "
+    "and which account each project uses."
+)
+
 G, Y, R, D, X = "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 
 
@@ -40,11 +45,15 @@ def cmd_list(_args) -> int:
             hint = f"ccm login {acct.name} --codex" if acct.is_codex else f"ccm add {acct.name}"
             print(f"  ({hint})\n")
             continue
+        labels = []
         for lim in acct.limits:
-            when = f"{D}resets {lim.resets_in}{X}" if lim.resets_at else f"{D}idle{X}"
             span = {18000: "5h", 604800: "7d"}.get(lim.span, "")
             label = f"{lim.scope} {span}".strip() if lim.scope else span or lim.label
-            print(f"  {label:>6}  {_bar(lim.percent)} {lim.percent:5.1f}%  {when}")
+            labels.append(label)
+        width = max(6, max(map(len, labels), default=0))
+        for lim, label in zip(acct.limits, labels, strict=True):
+            when = f"{D}resets {lim.resets_in}{X}" if lim.resets_at else f"{D}idle{X}"
+            print(f"  {label:>{width}}  {_bar(lim.percent)} {lim.percent:5.1f}%  {when}")
         if acct.extras:
             balance = acct.extras.get("credits_balance") or "none"
             if balance == "0":
@@ -77,6 +86,14 @@ def cmd_auto_start(args) -> int:
     return 0
 
 
+def cmd_menubar(args) -> int:
+    from . import launchd
+
+    ok, msg = launchd.install() if args.action == "install" else launchd.uninstall()
+    print(msg)
+    return 0 if ok else 1
+
+
 _WHY = {"session": "pinned to this terminal", "project": "a rule for this project",
         "default": "no rule covers it, so the default applies"}
 
@@ -88,7 +105,7 @@ def cmd_where(_args) -> int:
     account, reason = core.resolve(cwd, term)
     why = _WHY.get(reason) or f"the “{reason.split(':', 1)[-1]}” profile"
     acct = core.load_account(account, with_usage=False) if account else None
-    print(cwd)
+    print(cwd.replace(core.HOME, "~"))
     email = f"  {D}{acct.email}{X}" if acct and acct.email else ""
     print(f"  account : {G}{account or 'none'}{X}" + email)
     print(f"  because : {D}{why}{X}")
@@ -174,7 +191,8 @@ def cmd_use(args) -> int:
     ok, msg = core.assign(scope, key, args.account, cwd=cwd)
     print(msg)
     if ok:
-        print(f"{D}Running sessions keep their account until they restart: "
+        print(f"{D}A session started before it had a directory of its own keeps its account "
+              "until it restarts: "
               f"ctrl+C twice, then `claude -c`.{X}")
     return 0 if ok else 1
 
@@ -214,7 +232,8 @@ def cmd_pin(args) -> int:
     ok, msg = core.assign("session", _term_or_die(), args.account, cwd=os.getcwd())
     print(msg)
     if ok:
-        print(f"{D}This terminal only. Restart Claude Code here to pick it up: "
+        print(f"{D}A session started before it had a directory of its own keeps its account "
+              "until it restarts: "
               f"ctrl+C twice, then `claude -c`.{X}")
     return 0 if ok else 1
 
@@ -321,7 +340,7 @@ def cmd_add(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ccm", description="Several Claude Code and Codex subscriptions on one Mac: usage for each, and which account each project uses.")  # noqa: E501
+    parser = argparse.ArgumentParser(prog="ccm", description=DESCRIPTION)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="usage for every subscription").set_defaults(func=cmd_list)
@@ -351,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("auto-start", help="set automatic start of weekly windows")
     p.add_argument("state", nargs="?", choices=("on", "off"))
     p.set_defaults(func=cmd_auto_start)
+    p = sub.add_parser("menubar", help="start the menu bar app at login, or stop doing so")
+    p.add_argument("action", choices=("install", "uninstall"))
+    p.set_defaults(func=cmd_menubar)
     sub.add_parser("where", help="which context and account this directory uses").set_defaults(
         func=cmd_where)
     sub.add_parser("sessions", help="every running Claude Code session").set_defaults(

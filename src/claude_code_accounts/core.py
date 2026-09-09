@@ -576,7 +576,7 @@ def human_delta(iso: str | None) -> str:
     mins = int((dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds() // 60)
     if mins <= 0:
         return "now"
-    if mins < 120:
+    if mins < 60:
         return f"{mins}m"
     if mins < 48 * 60:
         return f"{mins // 60}h {mins % 60}m"
