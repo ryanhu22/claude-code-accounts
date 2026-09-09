@@ -12,6 +12,8 @@ touched off the main thread.
 from __future__ import annotations
 
 import datetime as _dt
+import glob
+import json
 import os
 import subprocess
 import threading
@@ -277,6 +279,7 @@ def _tab_style(tabs, indent: float = 16.0):
     para = AppKit.NSMutableParagraphStyle.alloc().init()
     para.setFirstLineHeadIndent_(indent)
     para.setHeadIndent_(indent)
+    para.setLineBreakMode_(AppKit.NSLineBreakByClipping)
     para.setTabStops_([
         AppKit.NSTextTab.alloc().initWithTextAlignment_location_options_(
             AppKit.NSTextAlignmentRight if how == "r" else AppKit.NSTextAlignmentLeft,
@@ -384,16 +387,36 @@ SPEC_NOTE_X = 180.0            # where anything after them starts
 
 SPEC_TABS = (("r", SPEC_FIGURE_X), ("l", SPEC_NOTE_X))
 # The account picker: a chip, then a label and a figure for each of the three
-# windows. Measured, not guessed: the widest chip is 81 points, a label runs to
-# 30 for "fable", and a figure to 37 for "100%".
-# Three groups of label, figure, countdown, laid out from the measured width
-# of the widest thing in each: chip 81 points, "fable" 30, "100%" 37,
+# windows. These base stops shift together when the measured chip width grows
+# past 81 points. Three groups of label, figure, countdown allow "fable" 30, "100%" 37,
 # "(unused)" 55. The figure stops used to sit where the label ended, leaving
 # about a point between "fable" and its number, which is why the pair read as
 # one word. Twelve points now, the same gap the subscriptions row leaves.
 PICK_TABS = (("l", 108.0), ("r", 172.0), ("l", 180.0),
              ("l", 244.0), ("r", 308.0), ("l", 316.0),
              ("l", 380.0), ("r", 460.0), ("l", 468.0))
+
+
+def _picker_tabs(chip_width: float) -> tuple[tuple[str, float], ...]:
+    """Keep the original gap after the chip without narrowing any column."""
+    shift = max(0.0, chip_width - 81.0)
+    return tuple((how, where + shift) for how, where in PICK_TABS)
+
+
+def _live_pids() -> set[int]:
+    """Check registry membership without reading environments or transcripts."""
+    pids = set()
+    for cfg in core.credential_dirs():
+        for path in glob.glob(os.path.join(cfg, "sessions", "*.json")):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            pid = data.get("pid") if isinstance(data, dict) else None
+            if isinstance(pid, int) and sessions.alive(pid):
+                pids.add(pid)
+    return pids
 
 
 def _spec_line(label: str, figure: str, tone: str = "text", after=()):
@@ -1064,9 +1087,12 @@ class ManagerApp(rumps.App):
         self._again = False
         self._again_force = False
         self._polling = False
+        self._session_poll_lock = threading.Lock()
         self._fresh_sessions: tuple | None = None
         self._tracker = focus.Tracker(on_change=self._on_focus_change)
         self._session_rows: dict[int, tuple[rumps.MenuItem, list]] = {}
+        self._sessions_heading = "RUNNING SESSIONS"
+        self._pick_tabs = PICK_TABS
         self._account_rows: dict[str, rumps.MenuItem] = {}
         self._refresh_item: rumps.MenuItem | None = None
         self._flash: tuple[str, str, float] = ("", "", 0.0)
@@ -1129,12 +1155,17 @@ class ManagerApp(rumps.App):
         Also the point where the meters start moving, since nothing needs to
         move while nobody is looking.
 
-        Only the text that counts against the clock is repainted: when each
-        window resets, how old the usage is. Rebuilding the whole menu here
-        would be correct too, and it measured about 0.4 s, which reads as a
-        stall between the click and the menu. Session rows are left alone
-        because the five-second poll already repaints them in place.
+        A full rebuild costs about 0.4 s, so unchanged registry membership
+        keeps the fast path. New or ended sessions need a poll before drawing.
         """
+        try:
+            if _live_pids() != {s.pid for s in self._snapshot.sessions}:
+                self._poll_sessions()
+                self._take_sessions()
+            if self._rebuild_pending:
+                self._rebuild()
+        except Exception:
+            pass          # a failed poll must still protect the open menu
         self._menu_open = True
         self._repaint()
 
@@ -1223,8 +1254,11 @@ class ManagerApp(rumps.App):
             snap, self._pending = self._pending, None
         if snap is not None:
             changed = _shape(snap) != _shape(self._snapshot)
+            added = {s.pid for s in snap.sessions} - {s.pid for s in self._snapshot.sessions}
             self._snapshot = snap
             self._tracker.update_sessions(snap.sessions)
+            if self._menu_open and added:
+                self._insert_sessions(added)
             # Usage numbers move on every refresh and are repainted in place,
             # so a tick that only brings new numbers does not need the menu
             # torn down and built again.
@@ -1272,36 +1306,35 @@ class ManagerApp(rumps.App):
 
         def work() -> None:
             try:
-                live = sessions.live(core.credential_dirs(), with_git=True,
-                                     with_transcript=True)
-                # This app is not the only process that switches credentials.
-                # Keep names until their fingerprints move, with reads memoized
-                # for keychain.RECENT seconds. A rule change in another process
-                # forces fresh reads so a switched session gets its new chip.
-                # Naming a changed dir matches the loaded account fingerprints
-                # and only falls back to the API for an unmatched credential.
-                known = self._snapshot.running_on
-                dirs = {s.env_config_dir for s in live if s.env_config_dir}
-                try:
-                    stamp = os.path.getmtime(core.profiles.CONFIG)
-                except OSError:
-                    stamp = 0.0
-                fresh = stamp != self._rules_stamp
-                self._rules_stamp = stamp
-                if fresh:
-                    # A peer may have changed account slots as well as copies.
-                    keychain.forget()
-                owners, prints = core.owners_now(
-                    dirs, known, self._owner_prints, self._snapshot.accounts, fresh=fresh)
-                self._owner_prints = prints
-                with self._lock:
-                    self._fresh_sessions = (live, owners)
+                self._poll_sessions()
             except Exception:
                 pass
             finally:
                 self._polling = False
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _poll_sessions(self) -> None:
+        # Serialize polls so an older worker cannot overwrite the opening poll.
+        with self._session_poll_lock:
+            live = sessions.live(core.credential_dirs(), with_git=True, with_transcript=True)
+            # A peer can switch credentials or rules. Keep cached owners only
+            # while their fingerprints and the rules file stay unchanged.
+            known = self._snapshot.running_on
+            dirs = {s.env_config_dir for s in live if s.env_config_dir}
+            try:
+                stamp = os.path.getmtime(core.profiles.CONFIG)
+            except OSError:
+                stamp = 0.0
+            fresh = stamp != self._rules_stamp
+            self._rules_stamp = stamp
+            if fresh:
+                keychain.forget()
+            owners, prints = core.owners_now(
+                dirs, known, self._owner_prints, self._snapshot.accounts, fresh=fresh)
+            self._owner_prints = prints
+            with self._lock:
+                self._fresh_sessions = (live, owners)
 
     def _take_sessions(self) -> None:
         """Apply a polled session list, rebuilding only if the set changed."""
@@ -1311,13 +1344,17 @@ class ManagerApp(rumps.App):
             return
         live, owners = fresh
         snap = self._snapshot
+        added = {s.pid for s in live} - {s.pid for s in snap.sessions}
         structural = ([s.pid for s in live] != [s.pid for s in snap.sessions]
                       or owners != snap.running_on)
         snap.sessions, snap.running_on = live, owners
         self._tracker.update_sessions(live)
         if structural:
+            if self._menu_open and added:
+                self._insert_sessions(added)
             self._rebuild()          # a session came or went: the list must change
-            return
+            if not self._menu_open:
+                return
         focused = self._tracker.focus.session
         front = focused.pid if focused else None
         for sess in live:            # same rows, fresher numbers: repaint in place
@@ -1334,6 +1371,23 @@ class ManagerApp(rumps.App):
         self._on_refresh_tick(None, force=_sender is not None)
 
     # ------------------------------------------------------------------ menu
+
+    def _insert_sessions(self, added: set[int]) -> None:
+        """Add rows without replacing the items under the pointer."""
+        snap = self._snapshot
+        # Keep existing rows until close, even if additions exceed the row cap.
+        previous = self._sessions_heading
+        for sess in snap.sessions:
+            if sess.pid in added and sess.pid not in self._session_rows:
+                item = self._session_item(sess, snap)
+                self.menu.insert_after(previous, item)
+            row = self._session_rows.get(sess.pid)
+            if row is not None:
+                previous = row[0].title
+        if "  none" in self.menu:
+            del self.menu["  none"]
+        title = f"RUNNING SESSIONS · {len(snap.sessions)}"
+        _apply_style(self.menu[self._sessions_heading], [(title, "head")])
 
     def _section(self, title: str) -> None:
         """A heading, in the same face as the rows under it.
@@ -1357,8 +1411,12 @@ class ManagerApp(rumps.App):
             self._repaint()
             return
         global _CODEX_NAMES
+        self._rebuild_pending = False
         snap = self._snapshot
         _CODEX_NAMES = {a.name for a in snap.accounts if a.is_codex}
+        chip_width = max((_styled(_chip(a.name), mono=False).size().width
+                          for a in snap.accounts if not a.is_codex and a.signed_in), default=0.0)
+        self._pick_tabs = _picker_tabs(chip_width)
         self._drawn_at = time.time()
         reg = _registry()
         stale = list(reg) if reg is not None else []
@@ -1383,7 +1441,8 @@ class ManagerApp(rumps.App):
         self.menu.add(rumps.separator)
 
         n = len(snap.sessions)
-        self._section(f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS")
+        self._sessions_heading = f"RUNNING SESSIONS · {n}" if n else "RUNNING SESSIONS"
+        self._section(self._sessions_heading)
         if not snap.sessions:
             self.menu.add(rumps.MenuItem("  none", callback=None))
         # Everything in this menu that is not a session, counted rather than
@@ -1749,7 +1808,8 @@ class ManagerApp(rumps.App):
             (os.path.abspath(sess.cwd), root), sess.term_id)
         ruled = bool(sess.term_id) and sess.term_id in r.sessions
         prof = r.profile_for(root)
-        head = f"  {sess.label} - {running_on or '?'} · {sess.status or sess.kind}"
+        # rumps keys rows by title, and two sessions can share a label and status.
+        head = f"  {sess.label} - {running_on or '?'} · {sess.status or sess.kind} · {sess.pid}"
         item = rumps.MenuItem(head)
         # Fixed columns: focus mark, rule mark, chip, repo, what the session
         # is, context bar, lifetime tokens, status, idle age. The repo repeats
@@ -2201,7 +2261,7 @@ class ManagerApp(rumps.App):
             # at 5% of its five hours can still be the wrong choice if its
             # week is nearly gone.
             _apply_style(entry, [*_chip(acct.name), *_windows(acct)],
-                         mono=False, tabs=PICK_TABS)
+                         mono=False, tabs=self._pick_tabs)
             # A real tick, in the gutter macOS ticks every other menu in. It
             # used to be a check character in front of the chip, which moved
             # the chip of the account already in use two columns right of
