@@ -1631,13 +1631,13 @@ class ManagerApp(rumps.App):
         the age of the usage are read from the clock at that moment rather
         than from whenever the menu was last built.
         """
-        # Lamps carry the live state, so the tail is left with the one kind of
-        # rule that is drawn nowhere else. A pinned session shows its account
-        # on its own row; a profile and the default are in the profiles
-        # section; a project rule has no home but this.
+        # Lamps carry the live state. Which rules point at the account is not
+        # repeated here: a pinned session shows its account on its own row, a
+        # profile and the default sit in the profiles section, and a project
+        # rule is listed under its profile or found through `ccm list`.
+        # Naming it on the row cost a column of width for one word.
         here = [s for s in snap.sessions
                 if snap.running_on.get(s.env_config_dir) == acct.name]
-        used_by = core.rules_using(acct.name, snap.rules, scopes=("project",))
         # Ahead of the mismatch and the error in the tail: both are what the
         # sign-in is there to fix, and while the browser tab is open the news
         # is that it is being fixed, not what was wrong.
@@ -1677,8 +1677,6 @@ class ManagerApp(rumps.App):
         # scanning a column of resets is easier when every window has one.
         if scoped:
             segments += _bucket(scoped.label, scoped)
-        if used_by:
-            segments.append((f"   {', '.join(used_by)}", "dim"))
         if pending:
             segments.append(SIGNING_TAIL)
         elif acct.mismatch:
