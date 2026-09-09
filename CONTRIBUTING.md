@@ -60,6 +60,22 @@ transcript token cache. The throwaway `HOME` covers those paths. Clear inherited
 Changing `HOME` does not isolate the macOS login keychain. Use the test suite
 for credential work, or a separate macOS user for manual sign-in tests.
 
+## Seeing the app without accounts
+
+Run the demo with fake accounts, rules and running sessions in a throwaway home:
+
+```sh
+.venv/bin/python scripts/demo.py cli list
+.venv/bin/python scripts/demo.py menubar
+.venv/bin/python scripts/demo.py shots
+```
+
+The last command regenerates the README images into `docs/images/` from fake
+data. It needs Google Chrome and Screen Recording permission for the terminal.
+It opens a second menu bar item briefly. The demo uses its own home, so the
+installed app can keep running. Use `--home PATH` before any CLI arguments to
+choose an empty throwaway directory. The demo prints its home when it starts.
+
 ## Measuring latency
 
 Run the fake bench with a throwaway home and no external tools or network:

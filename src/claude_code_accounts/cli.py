@@ -321,7 +321,7 @@ def cmd_add(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ccm", description=__doc__)
+    parser = argparse.ArgumentParser(prog="ccm", description="Several Claude Code and Codex subscriptions on one Mac: usage for each, and which account each project uses.")  # noqa: E501
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="usage for every subscription").set_defaults(func=cmd_list)

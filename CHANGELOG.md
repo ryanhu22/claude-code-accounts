@@ -7,6 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- A fake-data demo for the CLI, menu bar and README screenshots in a throwaway home.
 - Automatic start of weekly usage windows, off by default: a menu bar toggle and `ccm auto-start on`.
 
 ### Fixed
@@ -21,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- CLI help now describes account usage and project routing.
 - Renamed the project to claude-code-accounts. The `ccm` command, the config directories and existing rules are unchanged.
 
 - The menu bar app reads each credential at most once every twenty seconds across its polls, instead of once per poll.
