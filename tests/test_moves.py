@@ -671,7 +671,9 @@ def test_all_accounts_and_directory_mapping(fake_keychain, fake_api, with_usage)
     ("a@example.com", "a@example.com", 0),
     ("a@example.com", "A@EXAMPLE.COM", 0),
     ("b@example.com", "a@example.com", 1),
-    ("", "a@example.com", 1),
+    # An owner not yet known is not a licence to overwrite: the copy is ahead,
+    # and it was a fresh sign-in the one time this wrote over it.
+    ("", "a@example.com", 0),
     ("a@example.com", "", 1),
 ])
 def test_hand_out_requires_known_same_account(fake_keychain, fake_api, cached, email, writes):
@@ -682,7 +684,7 @@ def test_hand_out_requires_known_same_account(fake_keychain, fake_api, cached, e
     keychain.write_credentials(path, have)
     core._cache_write({path: {"email": cached}}, core.IDENTITY_CACHE)
     # The pre-read hits the memo. An email adds 1 fresh read under the lock;
-    # write unless a known matching account is ahead.
+    # write only when the copy ahead is known to be another account's.
     with budget(fake_keychain, int(bool(email)), writes):
         assert core.hand_out(path, want, email) is bool(writes)
     assert stored(fake_keychain, path) == (want if writes else have)

@@ -925,8 +925,15 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
                 have = keychain.read_credentials(config_dir, max_age=0)
                 if fingerprint(have) == fingerprint(blob):
                     return False
-                if (have and _cached_email(config_dir) == email.lower()
-                        and (have.get("expiresAt") or 0) > (blob.get("expiresAt") or 0)):
+                # A copy that is ahead of what we hold is a rotation or a fresh
+                # sign-in, and the blob in hand would strand it. Only a copy
+                # known to belong to ANOTHER account may be replaced at any
+                # age; a copy whose owner is not known yet is left alone, since
+                # "not known" once meant "overwrite", and that put an older
+                # token over a login the user had just completed.
+                known = _cached_email(config_dir)
+                if (have and (have.get("expiresAt") or 0) > (blob.get("expiresAt") or 0)
+                        and (not known or known == email.lower())):
                     return False
             keychain.write_credentials(config_dir, blob)
     except (locks.LockBusy, RuntimeError):
@@ -2062,7 +2069,13 @@ def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
 # Answers Claude Code asks for once and then remembers. Trust is per project;
 # the Claude in Chrome ones sit at the top level of the same file.
 _TRUST_KEY = "hasTrustDialogAccepted"
-_ONCE_ANSWERS = ("hasCompletedClaudeInChromeOnboarding", "cachedChromeExtensionInstalled")
+# hasCompletedOnboarding is the one that matters most: without it a new session
+# walks through first-run setup, and that setup ends on a sign-in screen even
+# when the dir already holds a working login. An account signed in through
+# this tool has never run Claude Code in its own dir, so its file lacks the
+# flag, and every session seeded from it asked the user to log in again.
+_ONCE_ANSWERS = ("hasCompletedOnboarding", "hasCompletedClaudeInChromeOnboarding",
+                 "cachedChromeExtensionInstalled")
 _TOGGLE_ANSWER = "claudeInChromeDefaultEnabled"
 
 

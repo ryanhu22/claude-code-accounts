@@ -9,7 +9,16 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_code_accounts import cli, codex, core, focus, keychain, sessions, transcripts
+from claude_code_accounts import (
+    cli,
+    codex,
+    codex_sessions,
+    core,
+    focus,
+    keychain,
+    sessions,
+    transcripts,
+)
 
 
 @pytest.fixture
@@ -23,6 +32,7 @@ def demo(monkeypatch):
         (core, ("project_root", "_ROOTS", "_CODEX_ADOPTED", "_get", "_post")),
         (keychain, ("read_raw", "write_raw", "delete")),
         (codex, ("fetch_usage", "running_homes")),
+        (codex_sessions, ("live",)),
         (sessions, ("alive", "_environ", "branch_of")),
         (transcripts, ("find", "digest", "lifetime", "flush")),
         (focus, ("frontmost_bundle_id", "selected_tty", "reveal_tab")),
@@ -82,8 +92,10 @@ def test_cli(world):
     with redirect_stdout(output):
         assert cli.main(["sessions"]) == 0
     rows, legend = output.getvalue().split("\n\n")
-    assert len(rows.splitlines()) == 4
+    # Four Claude sessions and the one Codex run, listed together.
+    assert len(rows.splitlines()) == 5
     assert all(s.name in rows for s in world.sessions)
+    assert "nightly fixtures" in rows and "codex" in rows
     assert "pins the terminal" in legend
 
 

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from claude_code_accounts import (  # noqa: E402
     cli,
     codex,
+    codex_sessions,
     core,
     focus,
     keychain,
@@ -168,6 +169,7 @@ def seed(home) -> World:
         digests[s.session_id] = transcripts.Digest(title, s.context_tokens, s.model)
         totals[s.session_id] = s.spent
         world.sessions.append(s)
+    seed_codex_session(home, now)
     original_alive = sessions.alive
     sessions.alive = lambda pid: pid in environments or original_alive(pid)
     sessions._environ = lambda pid, proc_start="": environments.get(pid, ({}, ""))
@@ -183,6 +185,26 @@ def seed(home) -> World:
     core.bootstrap()
     core.all_accounts(with_usage=True)
     return world
+
+
+def seed_codex_session(home, now) -> sessions.Session:
+    """One `codex exec` run, faked at the seam the Claude sessions use.
+
+    Codex keeps no session registry to write into, so the listing itself is
+    what gets replaced: `codex_sessions.live` is the one call the app makes for
+    the Codex side, and it answers off the account adopted from ~/.codex.
+    """
+    run = sessions.Session(
+        pid=40010, config_dir=codex.DEFAULT_HOME, env_config_dir=codex.DEFAULT_HOME,
+        provider="codex", session_id="demo-codex-thread", term_id="demo-term-codex",
+        cwd=str(home / "src/acme-api"), name="nightly fixtures", name_source="user",
+        kind="bg", status="busy", tty="ttys005", term_program="Apple_Terminal",
+        title="Regenerate the API fixtures", model="gpt-5.3-codex", branch="main",
+        context_tokens=71_000, context_window=272_000, context_pct=26.1,
+        started_at=now.timestamp() - 1500, updated_at=now.timestamp() - 20,
+        spent=transcripts.Totals(24_600, 0, 1_180_000, 33_500, 34))
+    codex_sessions.live = lambda with_git=False: [run]
+    return run
 
 
 @contextmanager

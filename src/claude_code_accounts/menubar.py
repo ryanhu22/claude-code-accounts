@@ -856,9 +856,14 @@ def _reason(snap: Snapshot, sess: sessions.Session) -> str:
 
     core.resolve reloads the rules from disk on every call, and the menu asks
     once per session while it draws. The snapshot already holds them.
+
+    The provider comes from the session, because the two sides are separate
+    tables: reading the Claude rules for a Codex row would report a rule that
+    has nothing to do with it, and call a routed session loose.
     """
     return snap.rules.account_for(
-        (os.path.abspath(sess.cwd), core.project_root(sess.cwd)), sess.term_id)[1]
+        (os.path.abspath(sess.cwd), core.project_root(sess.cwd)),
+        sess.term_id, sess.provider)[1]
 
 
 def _session_line(sess: sessions.Session, why: str = "") -> list[tuple[str, str]]:
@@ -979,10 +984,16 @@ def _shape(snap: Snapshot) -> tuple:
         tuple((a.name, a.signed_in, a.error, a.mismatch) for a in snap.accounts),
         tuple(s.pid for s in snap.sessions),
         tuple(sorted(snap.running_on.items())),
-        tuple((p.name, p.account, tuple(p.repos)) for p in r.profiles),
+        tuple((p.name, p.account, p.codex_account, tuple(p.repos)) for p in r.profiles),
         r.default_account,
         tuple(sorted(r.projects.items())),
         tuple(sorted(r.sessions.items())),
+        # Both sides, because a Codex rule moves the same rows a Claude one
+        # does. Leaving them out meant a rule written elsewhere changed
+        # nothing on screen until something else forced a rebuild.
+        r.codex_default_account,
+        tuple(sorted(r.codex_projects.items())),
+        tuple(sorted(r.codex_sessions.items())),
     )
 
 
@@ -1746,14 +1757,13 @@ class ManagerApp(rumps.App):
         self._usage_block(item, acct)
 
 
-        if acct.is_codex:
-            self._line(item, f"runhead:acct:{acct.name}",
-                       "No sessions are listed for Codex accounts yet", tone="dim")
-        else:
-            self._running_block(
-                item, [s for s in snap.sessions
-                       if snap.running_on.get(s.env_config_dir) == acct.name],
-                "No sessions are running on this account", f"acct:{acct.name}")
+        # One block for both tools. A session is listed under the account that
+        # pays for it, and which tool is running is a property of the row, not
+        # a reason to keep two lists.
+        self._running_block(
+            item, [s for s in snap.sessions
+                   if snap.running_on.get(s.env_config_dir) == acct.name],
+            "No sessions are running on this account", f"acct:{acct.name}")
         item.add(rumps.separator)
 
         # There is no "use this account for" block here. It listed the profiles
@@ -1854,11 +1864,17 @@ class ManagerApp(rumps.App):
         every repository grouped with it.
         """
         r = snap.rules
+        # Which tool this row is running decides which rules answer for it, and
+        # which accounts it can be moved to. Everything below reads that one
+        # side, so a Codex row can never be shown a Claude rule or offered a
+        # Claude account.
+        provider = sess.provider
+        projects, pins = r.side(provider)
         running_on = snap.running_on.get(sess.env_config_dir, "")
         root = core.project_root(sess.cwd)
         wanted, reason = r.account_for(
-            (os.path.abspath(sess.cwd), root), sess.term_id)
-        ruled = bool(sess.term_id) and sess.term_id in r.sessions
+            (os.path.abspath(sess.cwd), root), sess.term_id, provider)
+        ruled = bool(sess.term_id) and sess.term_id in pins
         prof = r.profile_for(root)
         # rumps keys rows by title, and two sessions can share a label and status.
         head = f"  {sess.label} - {running_on or '?'} · {sess.status or sess.kind} · {sess.pid}"
@@ -1882,10 +1898,18 @@ class ManagerApp(rumps.App):
         if wanted and wanted != running_on:
             # A running session holds its credentials in memory, so the rule
             # cannot reach it. Say what to do rather than only what will happen.
+            # Both tools read their account once and keep it, and each is left
+            # in a different way, so the two lines that say how are the row's
+            # own rather than one sentence that covers neither exactly.
+            why, how = (("Codex reads its login when it starts, "
+                         "so restart it in this tab:",
+                         "press ctrl+C, then run  codex resume --last")
+                        if sess.is_codex else
+                        ("It reads its account once at launch, so restart this tab:",
+                         "press ctrl+C twice, then run  claude -c"))
             for line, tone in (
                     (f"Spending {running_on}; {_why(reason)} says {wanted}", "warn"),
-                    ("It reads its account once at launch, so restart this tab:", "dim"),
-                    ("press ctrl+C twice, then run  claude -c", "dim")):
+                    (why, "dim"), (how, "dim")):
                 d = rumps.MenuItem(line, callback=None)
                 _apply_style(d, [("  ", "dim"), (line, tone)], mono=False)
                 item.add(d)
@@ -1922,22 +1946,27 @@ class ManagerApp(rumps.App):
 
         if sess.term_id:
             self._add_scope(item, "Use for this session", "session", sess.term_id,
-                            snap, current=r.sessions.get(sess.term_id, ""),
-                            cwd=sess.cwd, clearable=ruled)
+                            snap, current=pins.get(sess.term_id, ""),
+                            cwd=sess.cwd, clearable=ruled, provider=provider)
             item.add(rumps.separator)
         self._add_scope(item, f"Use for project “{os.path.basename(root)}”",
                         "project", root, snap,
-                        current=r.projects.get(core.profiles.tilde(root), ""),
-                        cwd=sess.cwd, clearable=bool(r.project_rule_for(root)))
+                        current=projects.get(core.profiles.tilde(root), ""),
+                        cwd=sess.cwd,
+                        clearable=bool(r.project_rule_for(root, provider)),
+                        provider=provider)
         join = None
         if prof:
             # One line, not another five. The profiles section edits profiles
             # and is one hover away, so repeating its account picker here cost
             # a third of the menu's height for the least likely action in it.
             n_proj = len(prof.repos)
+            # The account this profile pays THIS row's tool with. A profile can
+            # name one account per provider, and naming the Claude one under a
+            # Codex row said the wrong account with total confidence.
             note = (f"In profile “{prof.name}” ({n_proj} project"
                     f"{'s' if n_proj != 1 else ''}), which uses "
-                    f"{prof.account or 'no account'}")
+                    f"{prof.account_of(provider) or 'no account'}")
             row = rumps.MenuItem(f"prof:{sess.pid}", callback=None)
             _apply_style(row, [("  ", "dim"), (note, "dim")], mono=False)
             item.add(row)
@@ -1998,6 +2027,14 @@ class ManagerApp(rumps.App):
                 if prof.covers(core.project_root(s.cwd))]
         head = f"  {prof.name} - {prof.account or 'no account'} · {n} repos"
         item = rumps.MenuItem(head)
+        # The first column is one chip wide and belongs to whichever account
+        # this profile names, so a profile that pays for Codex alone shows the
+        # Codex account there rather than reading as unassigned.
+        lead = prof.account or prof.codex_account
+        # The second account, when there are two. It goes at the end of the row
+        # so the column every other section lines up on is left alone.
+        tail = ([("  ", "dim"), *_chip(prof.codex_account)]
+                if prof.account and prof.codex_account else [])
         # The account first, as in every other row in this menu. A subscription
         # row leads with the account it is, a session row with the account it
         # spends, and a profile row with the account it routes to. One column
@@ -2006,7 +2043,7 @@ class ManagerApp(rumps.App):
         # section alone, and it cost the menu its grid.
         _apply_style(item, [
             ("  ", "dim"),
-            *(_chip(prof.account, NAME_W) if prof.account
+            *(_chip(lead, NAME_W) if lead
               else [(f"{'unassigned':<{NAME_W + 2}}", "warn")]),
             # The same lamp a subscription row uses, but after the profile
             # name rather than after the account. These sessions are running
@@ -2017,9 +2054,12 @@ class ManagerApp(rumps.App):
             (_fit(prof.name, PROFILE_W), "text"),
             ("  ", "dim"), *_lamps(here),
             (f"  {str(n) + ' project' + ('s' if n != 1 else ''):<{PROJ_W}}", "dim"),
+            *tail,
         ])
         self._add_scope(item, f"Use for every project in “{prof.name}”",
-                        "profile", prof.name, snap, current=prof.account, cwd="")
+                        "profile", prof.name, snap,
+                        current={"claude": prof.account, "codex": prof.codex_account},
+                        cwd="")
         item.add(rumps.separator)
 
         self._running_block(
@@ -2070,11 +2110,17 @@ class ManagerApp(rumps.App):
     def _default_item(self, snap: Snapshot) -> rumps.MenuItem:
         """Where anything with no rule goes."""
         name = snap.rules.default_account
+        codex_name = snap.rules.codex_default_account
+        # The same two-account treatment the profile rows get, for the same
+        # reason: this rule can name one account per tool, and the first column
+        # holds one chip.
+        lead = name or codex_name
+        tail = ([("  ", "dim"), *_chip(codex_name)] if name and codex_name else [])
         loose = [s for s in snap.sessions if _reason(snap, s) == "default"]
         item = rumps.MenuItem(f"  everything else - {name or 'not set'}")
         _apply_style(item, [
             ("  ", "dim"),
-            *(_chip(name, NAME_W) if name else [(f"{'not set':<{NAME_W + 2}}", "hot")]),
+            *(_chip(lead, NAME_W) if lead else [(f"{'not set':<{NAME_W + 2}}", "hot")]),
             # Dashed, because this is not a profile anybody made. It is
             # what collects whatever the named ones did not.
             ("  ", "dim"), ("square.dashed", "icon"), (" ", "dim"),
@@ -2084,14 +2130,15 @@ class ManagerApp(rumps.App):
             # so it has nothing to count, and a number here would sit under
             # the row above meaning something else.
             (" " * (2 + PROJ_W), "dim"),
+            *tail,
         ])
         self._running_block(
-            item, [s for s in snap.sessions
-                   if _reason(snap, s) == "default"],
+            item, loose,
             "No sessions are running without a rule", "default")
         item.add(rumps.separator)
         self._add_scope(item, "Use for every project with no rule",
-                        "default", "", snap, current=name, cwd="")
+                        "default", "", snap,
+                        current={"claude": name, "codex": codex_name}, cwd="")
         return item
 
     @staticmethod
@@ -2278,7 +2325,8 @@ class ManagerApp(rumps.App):
             _set_icon(go, "arrow.up.forward.app")
 
     def _scope_rows(self, title: str, scope: str, key: str, snap: Snapshot,
-                    current: str, cwd: str, clearable: bool = False) -> list:
+                    current, cwd: str, clearable=False,
+                    provider: str | None = None) -> list:
         """An account picker for one scope, as rows to drop straight into a menu.
 
         These used to be a submenu each, which put the account list one hover
@@ -2287,44 +2335,84 @@ class ManagerApp(rumps.App):
         the constant sat at the end. Naming the scope in a heading and listing
         the accounts under it turns two hovers into one, and lets two scopes be
         read at the same time instead of one at a time.
+
+        `provider` names the tool this picker is about. A session row and the
+        project picker under it are about the tool that row runs, so they list
+        that provider's accounts alone. A profile and the default cover both
+        tools at once, so they pass None and get one list with the Codex
+        accounts under a heading of their own.
+
+        `current` is that provider's account, or a mapping from provider to
+        account when both are listed, so each side can tick the account it is
+        already on. `clearable` is the same shape: a bool for the picker's own
+        provider, or the set of providers whose rule can be dropped.
         """
         head = rumps.MenuItem(f"sc:{scope}:{key}", callback=None)
         _apply_style(head, [("  ", "dim"), (title, "head")], mono=False)
         rows = [head]
-        for acct in snap.accounts:
-            if acct.is_codex or not acct.signed_in:
+        on = current if isinstance(current, dict) else {provider or "claude": current}
+        # Claude first and Codex under a label, rather than one run of chips in
+        # whatever order the accounts loaded. The two are different
+        # subscriptions to different companies, and a picker that mixed them
+        # made a Codex account look like one more choice for a Claude session.
+        sides = [("claude", ""), ("codex", "Codex")] if provider is None else [(provider, "")]
+        for side, heading in sides:
+            picks = [a for a in snap.accounts if a.signed_in and a.provider == side]
+            if not picks:
                 continue
-            same = acct.name == current
-            # The plain title has to be unique inside one menu, and it is what
-            # macOS matches when you type. Scope first, so typing picks a row
-            # rather than the first account with that name under any heading.
-            # The row already in use gets a callback that does nothing rather
-            # than no callback at all. A menu item with no action is disabled,
-            # and macOS draws a disabled row's whole attributed title at
-            # reduced alpha, so the account you are actually on was the one
-            # row in the list whose figures were hard to read, and its green
-            # came out a pale green that looked like a third state.
-            entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
-                                   callback=_nothing if same else
-                                   self._make_assign(scope, key, acct.name, cwd))
-            # All three windows, not only the five hour one. Picking a
-            # subscription for a session is the decision this list exists to
-            # serve, and one number out of three cannot settle it: an account
-            # at 5% of its five hours can still be the wrong choice if its
-            # week is nearly gone.
-            _apply_style(entry, [*_chip(acct.name), *_windows(acct)],
-                         mono=False, tabs=self._pick_tabs)
-            # A real tick, in the gutter macOS ticks every other menu in. It
-            # used to be a check character in front of the chip, which moved
-            # the chip of the account already in use two columns right of
-            # every other chip in the list.
-            entry._menuitem.setState_(1 if same else 0)
-            rows.append(entry)
-        if clearable:
-            drop = rumps.MenuItem(f"clear:{scope}:{key}",
-                                  callback=self._make_clear(scope, key, cwd))
+            if heading:
+                label = rumps.MenuItem(f"sc:{scope}:{key}:{side}", callback=None)
+                _apply_style(label, [("    ", "dim"), (heading, "head")], mono=False)
+                rows.append(label)
+            for acct in picks:
+                same = acct.name == on.get(side, "")
+                # The plain title has to be unique inside one menu, and it is
+                # what macOS matches when you type. Scope first, so typing
+                # picks a row rather than the first account with that name
+                # under any heading.
+                # The row already in use gets a callback that does nothing
+                # rather than no callback at all. A menu item with no action is
+                # disabled, and macOS draws a disabled row's whole attributed
+                # title at reduced alpha, so the account you are actually on
+                # was the one row in the list whose figures were hard to read,
+                # and its green came out a pale green that looked like a third
+                # state.
+                # The callback is the same for both providers: core.assign
+                # reads the provider off the account named, so picking a Codex
+                # account writes the Codex rule and leaves the Claude one alone.
+                entry = rumps.MenuItem(f"{scope}:{key}:{acct.name}",
+                                       callback=_nothing if same else
+                                       self._make_assign(scope, key, acct.name, cwd))
+                # All three windows, not only the five hour one. Picking a
+                # subscription for a session is the decision this list exists to
+                # serve, and one number out of three cannot settle it: an account
+                # at 5% of its five hours can still be the wrong choice if its
+                # week is nearly gone.
+                _apply_style(entry, [*_chip(acct.name), *_windows(acct)],
+                             mono=False, tabs=self._pick_tabs)
+                # A real tick, in the gutter macOS ticks every other menu in. It
+                # used to be a check character in front of the chip, which moved
+                # the chip of the account already in use two columns right of
+                # every other chip in the list.
+                entry._menuitem.setState_(1 if same else 0)
+                rows.append(entry)
+        # A bool answers for the picker's own provider, which is the Claude
+        # rule wherever no provider was named. A set names the sides that have
+        # a rule to drop, and each gets a row: one rule per provider means one
+        # click per provider, since removing both at once was never asked for.
+        drops = ({provider or "claude"} if isinstance(clearable, bool) and clearable
+                 else set() if isinstance(clearable, bool) else set(clearable))
+        for side in ("claude", "codex"):
+            if side not in drops:
+                continue
+            # The provider is named only when both rows are there to be told
+            # apart. On its own the row is about the one rule in sight.
+            label = ("Remove the Codex rule" if side == "codex" and len(drops) > 1
+                     else "Remove this rule")
+            drop = rumps.MenuItem(f"clear:{scope}:{key}:{side}",
+                                  callback=self._make_clear(scope, key, cwd, side))
             _apply_style(drop, [("    ", "dim"), ("  ", "text"),
-                                ("Remove this rule", "text")], mono=False)
+                                (label, "text")], mono=False)
             rows.append(drop)
         return rows
 
@@ -2432,11 +2520,11 @@ class ManagerApp(rumps.App):
                 self._notify(f"Could not open that tab: {err}")
         return handler
 
-    def _make_clear(self, scope: str, key: str, cwd: str):
+    def _make_clear(self, scope: str, key: str, cwd: str, provider: str = "claude"):
         def handler(_sender):
             applied: dict[str, str] = {}
             ok, msg = core.clear(scope, key, cwd=cwd,
-                                 live=[], applied_out=applied)
+                                 live=[], applied_out=applied, provider=provider)
             self._did(ok, msg, applied)
         return handler
 

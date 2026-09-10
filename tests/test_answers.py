@@ -85,6 +85,7 @@ def test_new_session_starts_with_all_answers(fake_api):
     write(slot, {"projects": {"/repo": {"hasTrustDialogAccepted": True}}})
     write(session("t1", "/other", "a").config_dir, {
         "projects": {"/other": {"hasTrustDialogAccepted": True}},
+        "hasCompletedOnboarding": True,
         "hasCompletedClaudeInChromeOnboarding": True,
         "claudeInChromeDefaultEnabled": True,
         "cachedChromeExtensionInstalled": True,
@@ -94,6 +95,9 @@ def test_new_session_starts_with_all_answers(fake_api):
 
     assert trusts(fresh, "/repo", "/other")
     data = read(fresh)
+    # The first-run flag above all: without it the new session walks through
+    # setup and ends on a sign-in screen, login or no login.
+    assert data["hasCompletedOnboarding"] is True
     assert data["hasCompletedClaudeInChromeOnboarding"] is True
     assert data["claudeInChromeDefaultEnabled"] is True
     assert data["cachedChromeExtensionInstalled"] is True
