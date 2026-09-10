@@ -168,6 +168,7 @@ def redirect_home(home: str, setattr):
         codex: {
             "ACCOUNTS_DIR": home / ".codex-accts",
             "DEFAULT_HOME": home / ".codex",
+            "SESSION_DIRS": home / ".codex-ctx",
         },
         profiles: {
             "CCM_HOME": home / ".claude-manager",

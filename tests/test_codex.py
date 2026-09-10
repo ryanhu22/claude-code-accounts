@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import json
+import os
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -190,6 +192,69 @@ def test_remove_symlink_leaves_target():
     assert codex.remove_account("work") is True
     assert not slot.is_symlink()
     assert (target / "auth.json").read_text() == "keep"
+
+
+def _shared_home() -> Path:
+    """The home the Codex CLI uses by itself, with a setting and a login."""
+    home = Path(codex.DEFAULT_HOME)
+    home.mkdir(exist_ok=True)
+    (home / "auth.json").write_text(json.dumps({"tokens": {"refresh_token": "default"}}))
+    (home / "config.toml").write_text("model = 'gpt'")
+    (home / "sessions").mkdir(exist_ok=True)
+    return home
+
+
+def _account(name: str) -> Path:
+    slot = Path(codex.ensure_account_dir(name))
+    (slot / "auth.json").write_text(json.dumps({"tokens": {"refresh_token": name}}))
+    return slot
+
+
+def token(path) -> str:
+    return json.loads(Path(path).read_text())["tokens"]["refresh_token"]
+
+
+def test_prepare_session_links_the_login_and_never_copies_it():
+    shared = _shared_home()
+    one, two = _account("one"), _account("two")
+    home = Path(codex.prepare_session("ABCD-EF01-2345", "one"))
+    assert home == Path(codex.session_home("ABCD-EF01-2345"))
+    assert (home / "auth.json").is_symlink()
+    assert (home / "auth.json").resolve() == one / "auth.json"
+    for item in ("config.toml", "sessions"):
+        assert (home / item).is_symlink()
+        assert (home / item).resolve() == shared / item
+    # Repointing replaces the link, and neither account's own file is touched.
+    assert Path(codex.prepare_session("ABCD-EF01-2345", "two")) == home
+    assert (home / "auth.json").is_symlink()
+    assert (home / "auth.json").resolve() == two / "auth.json"
+    assert token(one / "auth.json") == "one" and token(two / "auth.json") == "two"
+    assert token(home / "auth.json") == "two"
+
+
+def test_home_account_answers_for_every_kind_of_home():
+    shared = _shared_home()
+    assert codex.adopt_default() == "codex"
+    work = _account("work")
+    home = Path(codex.prepare_session("term", "work"))
+    assert codex.home_account(str(work)) == "work"
+    assert codex.home_account(str(home)) == "work"
+    assert codex.home_account(str(shared)) == "codex"
+    assert codex.home_account(str(Path(codex.HOME) / "nowhere")) is None
+
+
+def test_gc_session_homes_keeps_the_live_and_the_recent():
+    _shared_home()
+    _account("work")
+    live, old, young = (Path(codex.prepare_session(term, "work"))
+                        for term in ("live", "old", "young"))
+    for path in (live, old):
+        os.utime(path, (time.time() - 8 * 86400,) * 2)
+    assert codex.gc_session_homes(["live"]) == [str(old)]
+    assert not old.exists()
+    assert live.is_dir() and young.is_dir()
+    # Only links were removed: the account still holds its own login.
+    assert token(Path(codex.slot_dir("work")) / "auth.json") == "work"
 
 
 def _credit(cid, expires, status="available", supported=True):

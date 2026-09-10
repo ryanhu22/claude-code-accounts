@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 HOME = os.path.expanduser("~")
 DEFAULT_HOME = os.path.join(HOME, ".codex")
 ACCOUNTS_DIR = os.environ.get("CCM_CODEX_ACCOUNTS_DIR", os.path.join(HOME, ".codex-accts"))
+SESSION_DIRS = os.path.join(HOME, ".codex-ctx")
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
@@ -103,6 +104,96 @@ def ensure_account_dir(name: str) -> str:
             except FileExistsError:
                 pass                 # another load linked it while we were looking
     return path
+
+
+def session_home(term_id: str) -> str:
+    """The CODEX_HOME belonging to one terminal.
+
+    Keyed on the terminal's uuid the same way `core.session_dir` is, so one
+    tab can run Codex on another account than its neighbours, and the key
+    survives restarting Codex in that tab.
+    """
+    return os.path.join(SESSION_DIRS, "s-" + term_id.replace("-", "")[:10].lower())
+
+
+def _point_auth(home: str, target: str) -> None:
+    """Aim a home's auth.json at an account's file, by link and never by copy.
+
+    Codex writes auth.json in place, so a link is followed on write and every
+    home aimed at one file shares that account's single-use refresh token. A
+    copy would give two homes the same token to spend, which is exactly the
+    failure this whole tool exists to avoid. The swap goes through a temporary
+    name so a home is never left with no login at all.
+    """
+    link = os.path.join(home, "auth.json")
+    if os.path.islink(link) and os.readlink(link) == target:
+        return
+    tmp = link + ".ccm.tmp"
+    try:
+        os.symlink(target, tmp)
+    except FileExistsError:
+        os.unlink(tmp)
+        os.symlink(target, tmp)
+    os.replace(tmp, link)
+
+
+def prepare_session(term_id: str, account: str) -> str:
+    """The home a terminal should run Codex in, pointed at `account`'s login."""
+    path = session_home(term_id)
+    os.makedirs(SESSION_DIRS, mode=0o700, exist_ok=True)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    for item in shared_items():
+        link = os.path.join(path, item)
+        if not os.path.lexists(link):
+            try:
+                os.symlink(os.path.join(DEFAULT_HOME, item), link)
+            except FileExistsError:
+                pass                 # another launch linked it while we were looking
+    _point_auth(path, os.path.join(slot_dir(account), "auth.json"))
+    return path
+
+
+def home_account(home: str) -> str | None:
+    """Which account a home is signed in as, by the file its login lands on.
+
+    Account homes, session homes and the default home all answer, because all
+    three reach one account's auth.json in the end: only the number of links
+    on the way there differs.
+    """
+    target = os.path.realpath(os.path.join(home, "auth.json"))
+    if not os.path.exists(target):
+        return None
+    for name in account_names():
+        if os.path.realpath(os.path.join(slot_dir(name), "auth.json")) == target:
+            return name
+    return None
+
+
+def gc_session_homes(live_terms, max_age: float = 7 * 24 * 3600) -> list[str]:
+    """Remove homes for terminals that are gone and were not used recently.
+
+    A session home holds nothing but symlinks, so there is no login to lose
+    and nothing to delete from a keychain: the account's own file is what the
+    links pointed at, and it stays where it is.
+    """
+    keep = {session_home(t) for t in live_terms if t}
+    gone, cutoff = [], time.time() - max_age
+    try:
+        entries = os.listdir(SESSION_DIRS)
+    except OSError:
+        return gone
+    for name in sorted(entries):
+        path = os.path.join(SESSION_DIRS, name)
+        if not name.startswith("s-") or path in keep or not os.path.isdir(path):
+            continue
+        try:
+            if os.path.getmtime(path) > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        gone.append(path)
+    return gone
 
 
 def adopt_default() -> str | None:
@@ -190,8 +281,23 @@ def expiring(auth: dict, margin: float = 86400) -> bool:
         return True
 
 
+def auth_file(home: str) -> str:
+    """The login file a home really reads, following any link to it.
+
+    A home with no login yet answers as itself, so two homes that are both
+    empty still compare as different places rather than as the same file.
+    """
+    path = os.path.join(home, "auth.json")
+    return os.path.realpath(path) if os.path.lexists(path) else os.path.realpath(home)
+
+
 def running_homes() -> set[str]:
-    """Leave refresh to any Codex process already using the home.
+    """Leave refresh to any Codex process already using the login.
+
+    What comes back is the auth.json each running process really reads, not
+    the CODEX_HOME it was given: a session home links to an account's file, so
+    comparing the homes would miss a Codex running in one and let us rotate
+    that account's token underneath it.
 
     Process environments are only read locally and never logged. A short cache
     avoids asking ps once per account on every pass.
@@ -219,7 +325,8 @@ def running_homes() -> set[str]:
                 env = ""
             found = re.search(r"(?:^|\s)CODEX_HOME=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|$)",
                               env.strip())
-            homes.add(os.path.abspath(found.group(1) if found and found.group(1) else DEFAULT_HOME))
+            home = os.path.abspath(found.group(1) if found and found.group(1) else DEFAULT_HOME)
+            homes.add(auth_file(home))
     except (OSError, subprocess.SubprocessError):
         pass
     _RUNNING = (now, homes)
@@ -289,7 +396,7 @@ def live_auth(home: str) -> dict | None:
     auth = read_auth(home)
     if not auth or not expiring(auth):
         return auth
-    if os.path.realpath(home) in {os.path.realpath(p) for p in running_homes()}:
+    if auth_file(home) in running_homes():
         return auth
     lock = os.path.join(home, "auth.json.ccm.lock")
     try:

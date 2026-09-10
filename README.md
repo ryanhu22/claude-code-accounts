@@ -155,9 +155,11 @@ eval "$(ccm shell-init)"
 ```
 
 This defines a `claude` function that resolves the right config directory
-before it launches the real binary. It is deliberately small: the routing
+before it launches the real binary, and a `codex` function that resolves the
+right `CODEX_HOME` the same way. Both are deliberately small: the routing
 logic lives in a generated script, so a terminal opened weeks ago is never
-more than one line behind.
+more than one line behind. To see what a directory resolves to, run
+`ccm resolve` or `ccm resolve --codex`.
 
 ### Start the menu bar app at login
 
@@ -316,7 +318,20 @@ than a second copy of its refresh token. Each additional account owns a
 Everything else links back to `~/.codex`, so settings and history stay shared.
 
 Windows differ by plan. Pro Lite has a weekly window only; plans with a
-5-hour window show that too. Routing Codex accounts is not supported yet.
+5-hour window show that too.
+
+Codex sessions are routed by the same four rules as Claude Code sessions, over
+your Codex accounts. Run `ccm use <codex account>` in a repository and every
+Codex run in that repository uses it. The `codex` wrapper from
+`ccm shell-init` does the resolving, so there is nothing to set by hand, and
+one Codex account needs no rule at all. `ccm where` shows the Claude answer
+and the Codex answer for the directory you are in.
+
+A rule change takes effect when Codex next starts in that terminal, because
+Codex reads its login at start and keeps it. Press ctrl+C and run `codex`
+again. The logins are shared by symlink, so nothing is ever copied: every home
+that uses an account points at that account's one `auth.json`, which is the
+only way to keep a single-use refresh token from being spent twice.
 
 ## How it works
 

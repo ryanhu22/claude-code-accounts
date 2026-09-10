@@ -119,13 +119,17 @@ def test_resolve_any(accounts):
         core.resolve_any("missing")
 
 
-def test_assign_refuses_codex(monkeypatch):
+def test_assign_follows_the_provider_of_the_account(monkeypatch):
     Path(codex.slot_dir("hobby")).mkdir(parents=True)
-    monkeypatch.setattr(core, "save_rules", lambda *args: None)
+    saved = []
+    monkeypatch.setattr(core, "save_rules", saved.append)
     monkeypatch.setattr(core, "carry_project_state", lambda *args: None)
-    ok, message = core.assign("default", "", "hobby")
-    assert not ok
-    assert "Routing Codex accounts is not supported" in message
+    ok, message = core.assign("default", "", "hobby", live=[])
+    assert ok
+    assert message == "everything with no rule now uses hobby"
+    # A Codex account is written to the codex side and nowhere else.
+    assert saved[0].codex_default_account == "hobby"
+    assert saved[0].default_account == ""
 
 
 def test_preferences():

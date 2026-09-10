@@ -26,7 +26,9 @@ def cmd_list(_args) -> int:
     r = core.bootstrap()
     accts = core.all_accounts()
     for acct in accts:
-        used = [] if acct.is_codex else core.rules_using(acct.name, r)
+        # rules_using reads the side the account is on, so a Codex account
+        # reports the codex rules that name it rather than nothing at all.
+        used = core.rules_using(acct.name, r)
         head = f"\033[1m{acct.name}{X}"
         if acct.is_codex:
             head += f"{D} codex{X}"
@@ -114,19 +116,31 @@ _WHY = {"session": "pinned to this terminal", "project": "a rule for this projec
         "default": "no rule covers it, so the default applies"}
 
 
+def _why(reason: str) -> str:
+    return _WHY.get(reason) or f"the “{reason.split(':', 1)[-1]}” profile"
+
+
 def cmd_where(_args) -> int:
     core.bootstrap()
     term = os.environ.get("TERM_SESSION_ID", "")
     cwd = os.getcwd()
     account, reason = core.resolve(cwd, term)
-    why = _WHY.get(reason) or f"the “{reason.split(':', 1)[-1]}” profile"
     acct = core.load_account(account, with_usage=False) if account else None
     print(cwd.replace(core.HOME, "~"))
     email = f"  {D}{acct.email}{X}" if acct and acct.email else ""
     print(f"  account : {G}{account or 'none'}{X}" + email)
-    print(f"  because : {D}{why}{X}")
+    print(f"  because : {D}{_why(reason)}{X}")
     directory = core.account_dir(account).replace(core.HOME, "~") if account else "-"
     print(f"  dir     : {D}{directory}{X}")
+    if core.codex_account_names():
+        # The same three answers for the other provider. Only shown when there
+        # are Codex accounts, so nobody reads about a tool they do not use.
+        account, reason = core.resolve(cwd, term, provider="codex")
+        home = codex.slot_dir(account).replace(core.HOME, "~") if account else "-"
+        print(f"\n  {D}codex{X}")
+        print(f"  account : {G}{account or 'none'}{X}")
+        print(f"  because : {D}{_why(reason)}{X}")
+        print(f"  dir     : {D}{home}{X}")
     return 0
 
 
@@ -138,20 +152,31 @@ def _rule_table(r, accts) -> None:
         return f"{name}" + (f" {D}({a.email}){X}" if a and a.email else "")
     default = chip(r.default_account) if r.default_account else Y + "not set" + X
     print(f"{'everything else':<22} {default}")
+    # Every codex line carries the same marker, because the two providers
+    # route the same repository at the same time and the account name alone
+    # does not say which of the two a line is about.
+    if r.codex_default_account:
+        print(f"{'everything else':<22} {chip(r.codex_default_account)} {D}codex{X}")
     for prof in r.profiles:
         n = len(prof.repos)
         print(f"\n{prof.name:<22} {chip(prof.account) if prof.account else D + 'no account' + X}"
               f"  {D}{n} repo{'s' if n != 1 else ''}{X}")
+        if prof.codex_account:
+            print(f"{'':<22} {chip(prof.codex_account)} {D}codex{X}")
         for repo in prof.repos:
             print(f"  {D}{repo}{X}")
-    if r.projects:
+    if r.projects or r.codex_projects:
         print()
         for path, account in r.projects.items():
             print(f"{D}project{X} {path:<28} {chip(account)}")
-    if r.sessions:
+        for path, account in r.codex_projects.items():
+            print(f"{D}project{X} {path:<28} {chip(account)} {D}codex{X}")
+    if r.sessions or r.codex_sessions:
         print()
         for tid, account in r.sessions.items():
             print(f"{D}session{X} {tid[:13]:<28} {chip(account)}")
+        for tid, account in r.codex_sessions.items():
+            print(f"{D}session{X} {tid[:13]:<28} {chip(account)} {D}codex{X}")
 
 
 def cmd_shell_init(args) -> int:
@@ -192,6 +217,25 @@ def cmd_profile(args) -> int:
     return 0 if ok else 1
 
 
+def _after_use(account: str) -> None:
+    """What the user has to do for the change to reach a running session.
+
+    The two tools differ, so the hint does. Claude Code re-reads its
+    credential about every half minute; Codex reads its login once, when it
+    starts, so nothing reaches a Codex that is already running.
+    """
+    try:
+        provider = core.resolve_any(account)[0]
+    except core.UnknownAccount:
+        provider = "claude"
+    if provider == "codex":
+        print(f"{D}Codex reads its login when it starts: restart codex in that terminal.{X}")
+    else:
+        print(f"{D}A session started before it had a directory of its own keeps its account "
+              "until it restarts: "
+              f"ctrl+C twice, then `claude -c`.{X}")
+
+
 def cmd_use(args) -> int:
     """Point one scope at an account: session, project, profile or default."""
     core.bootstrap()
@@ -207,9 +251,7 @@ def cmd_use(args) -> int:
     ok, msg = core.assign(scope, key, args.account, cwd=cwd)
     print(msg)
     if ok:
-        print(f"{D}A session started before it had a directory of its own keeps its account "
-              "until it restarts: "
-              f"ctrl+C twice, then `claude -c`.{X}")
+        _after_use(args.account)
     return 0 if ok else 1
 
 
@@ -249,26 +291,26 @@ def cmd_pin(args) -> int:
     ok, msg = core.assign("session", _term_or_die(), args.account, cwd=os.getcwd())
     print(msg)
     if ok:
-        print(f"{D}A session started before it had a directory of its own keeps its account "
-              "until it restarts: "
-              f"ctrl+C twice, then `claude -c`.{X}")
+        _after_use(args.account)
     return 0 if ok else 1
 
 
-def cmd_unpin(_args) -> int:
-    ok, msg = core.clear("session", _term_or_die())
+def cmd_unpin(args) -> int:
+    provider = "codex" if args.codex else "claude"
+    ok, msg = core.clear("session", _term_or_die(), provider=provider)
     print(msg)
     return 0 if ok else 1
 
 
-def cmd_resolve(_args) -> int:
-    """Print the config dir this shell should launch Claude Code with.
+def cmd_resolve(args) -> int:
+    """Print the directory this shell should launch its tool with.
 
     Called by the generated resolver on every launch, so it stays quiet and
     fast and never fails loudly: the shell has a pure-text fallback for when
     this cannot answer.
     """
-    print(core.resolve_dir(os.getcwd(), os.environ.get("TERM_SESSION_ID", "")))
+    provider = "codex" if args.codex else "claude"
+    print(core.resolve_dir(os.getcwd(), os.environ.get("TERM_SESSION_ID", ""), provider))
     return 0
 
 
@@ -401,9 +443,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("pin", help="give THIS terminal its own account")
     p.add_argument("account")
     p.set_defaults(func=cmd_pin)
-    sub.add_parser("unpin", help="drop this terminal's pin").set_defaults(func=cmd_unpin)
-    sub.add_parser("resolve", help="print the config dir for this shell").set_defaults(
-        func=cmd_resolve)
+    p = sub.add_parser("unpin", help="drop this terminal's pin")
+    p.add_argument("--codex", action="store_true", help="drop this terminal's Codex pin")
+    p.set_defaults(func=cmd_unpin)
+    p = sub.add_parser("resolve", help="print the config dir for this shell")
+    p.add_argument("--codex", action="store_true", help="print the CODEX_HOME instead")
+    p.set_defaults(func=cmd_resolve)
     p = sub.add_parser(
         "login",
         help="sign an account in through the browser (add --codex for an OpenAI Codex account)",

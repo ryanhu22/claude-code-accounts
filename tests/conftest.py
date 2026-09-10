@@ -32,12 +32,14 @@ def isolated_home(monkeypatch, tmp_path):
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
     def resolver_only(args, *positional, **kwargs):
-        # The one shell test needs only zsh builtins, with no tools on PATH.
+        # The resolver tests run the generated script itself, on a PATH that
+        # holds only the text tools it greps with, so ccm can never be found
+        # and the plain-text fallback is what is really being measured. The
+        # provider is the script's one optional argument.
         env = kwargs.get("env") or {}
-        if (isinstance(args, list) and len(args) == 2
-                and Path(args[0]).name == "zsh" and args[1] == profiles.RESOLVER
-                and env.get("PATH") == str(tmp_path / "empty-bin")
-                and not env.get("TERM_SESSION_ID")):
+        if (isinstance(args, list) and Path(args[0]).name == "zsh"
+                and args[1:] in ([profiles.RESOLVER], [profiles.RESOLVER, "codex"])
+                and env.get("PATH") == str(tmp_path / "empty-bin")):
             return ORIGINAL_POPEN(args, *positional, **kwargs)
         blocked()
 

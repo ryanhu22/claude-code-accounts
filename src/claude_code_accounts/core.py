@@ -1137,6 +1137,8 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
         ok, msg = codex.rename_account(old, new)
         if not ok:
             return ok, msg
+        # Saving rules creates account homes, so rewrite only after the move.
+        _replace_account_rules(old, new, "codex")
     else:
         old_slot, new_slot = slot_dir(old), slot_dir(new)
         blob = keychain.read_credentials(old_slot) or find_live_blob(recorded_email(old_slot))
@@ -1282,6 +1284,7 @@ def remove_account(name: str) -> bool:
     global _CHIPS
     if name in codex_account_names():
         ok = codex.remove_account(name)
+        _replace_account_rules(name, "", "codex")
         cache_key = f"codex:{name}"
     else:
         import shutil
@@ -1796,14 +1799,24 @@ def prepare_session(term_id: str, account: str) -> str:
     return path
 
 
-def resolve_dir(cwd: str, term_id: str = "") -> str:
-    """The config dir to launch Claude Code with, prepared and ready.
+def resolve_dir(cwd: str, term_id: str = "", provider: str = "claude") -> str:
+    """The directory to launch with, prepared and ready.
 
     Sessions that have no terminal of their own (background runs, editors) fall
     back to the account's own dir: they cannot be switched individually anyway,
     and giving them a dir would leave one behind on every run.
+
+    For codex the answer is a CODEX_HOME instead, built the same way. Nothing
+    is copied into it either: the account's login is reached through a link,
+    because its refresh token is single use just as Claude's is.
     """
-    account, _ = resolve(cwd, term_id)
+    account, _ = resolve(cwd, term_id, provider=provider)
+    if provider == "codex":
+        if not account:
+            return codex.DEFAULT_HOME
+        if not term_id:
+            return codex.ensure_account_dir(account)
+        return codex.prepare_session(term_id, account)
     if not account:
         return DEFAULT_CONFIG
     if not term_id:
@@ -1931,19 +1944,23 @@ def save_rules(r: profiles.Rules) -> None:
                  *r.projects.values(), *r.sessions.values()}:
         if name:
             ensure_account_dir(name)
-    profiles.save(r, account_dir)
+    for name in {r.codex_default_account, *(p.codex_account for p in r.profiles),
+                 *r.codex_projects.values(), *r.codex_sessions.values()}:
+        if name:
+            codex.ensure_account_dir(name)
+    profiles.save(r, account_dir, codex.slot_dir)
 
 
-def _replace_account_rules(old: str, new: str) -> None:
+def _replace_account_rules(old: str, new: str, provider: str = "claude") -> None:
     """Carry rules with a renamed account, or clear them when it is removed."""
     r = rules()
     before = r.to_dict()
-    if r.default_account == old:
-        r.default_account = new
+    if r.default(provider) == old:
+        r.set_default(new, provider)
     for prof in r.profiles:
-        if prof.account == old:
-            prof.account = new
-    for entries in (r.projects, r.sessions):
+        if prof.account_of(provider) == old:
+            r.set_profile_account(prof.name, new, provider)
+    for entries in r.side(provider):
         for key, account in list(entries.items()):
             if account == old:
                 if new:
@@ -1955,7 +1972,12 @@ def _replace_account_rules(old: str, new: str) -> None:
 
 
 def prune_session_rules(live_terms: Iterable[str]) -> list[str]:
-    """Keep quiet terminals pinned until directory cleanup declares them dead."""
+    """Keep quiet terminals pinned until directory cleanup declares them dead.
+
+    A terminal can hold a pin on each side, and the two are dropped by the
+    same test against different homes: the dir Claude Code was launched in,
+    and the CODEX_HOME Codex was launched in.
+    """
     keep = set(live_terms)
     r = rules()
     before = r.to_dict()
@@ -1963,20 +1985,25 @@ def prune_session_rules(live_terms: Iterable[str]) -> list[str]:
             if term not in keep and not os.path.exists(session_dir(term))]
     for term in gone:
         r.sessions.pop(term)
+    for term in [t for t in r.codex_sessions
+                 if t not in keep and not os.path.exists(codex.session_home(t))]:
+        r.codex_sessions.pop(term)
+        if term not in gone:
+            gone.append(term)
     if r.to_dict() != before:
         save_rules(r)
     return gone
 
 
-def resolve(cwd: str, term_id: str = "", r: profiles.Rules | None = None
-            ) -> tuple[str, str]:
+def resolve(cwd: str, term_id: str = "", r: profiles.Rules | None = None,
+            provider: str = "claude") -> tuple[str, str]:
     """Which account a session in `cwd` should bill to, and why.
 
     A worktree resolves to its parent checkout first, so it inherits whatever
     rule covers the repository even when it lives outside the repo directory.
     """
     r = r if r is not None else rules()
-    return r.account_for((os.path.abspath(cwd), project_root(cwd)), term_id)
+    return r.account_for((os.path.abspath(cwd), project_root(cwd)), term_id, provider)
 
 
 def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
@@ -2324,19 +2351,25 @@ def rules_using(account: str, r: profiles.Rules | None = None,
     `scopes` narrows the answer. The menu bar draws profiles in a section of
     their own, so its account rows ask for the rest rather than say the same
     thing twice. A flat listing with no such section asks for all of it.
+
+    The provider follows the account, because a Codex account is only ever
+    named by codex rules: reading the Claude side for one would report the
+    account as unused while it routes half the machine.
     """
     r = r or rules()
+    provider = "codex" if account in codex_account_names() else "claude"
+    projects, pins = r.side(provider)
     want = set(scopes)
     out = []
-    if "default" in want and r.default_account == account:
+    if "default" in want and r.default(provider) == account:
         out.append("default")
     if "profile" in want:
-        out += [f"profile {p.name}" for p in r.profiles if p.account == account]
+        out += [f"profile {p.name}" for p in r.profiles if p.account_of(provider) == account]
     if "project" in want:
         out += [f"project {os.path.basename(k.rstrip('/'))}"
-                for k, v in r.projects.items() if v == account]
+                for k, v in projects.items() if v == account]
     if "session" in want:
-        n = sum(1 for v in r.sessions.values() if v == account)
+        n = sum(1 for v in pins.values() if v == account)
         if n:
             # "session" on its own means a Claude Code session that is running.
             # These are rules pinning one, which is a different thing and has
@@ -2351,29 +2384,40 @@ def bootstrap() -> profiles.Rules:
     Everything goes to whichever account the default config dir is already
     signed in as, and no profiles are made up: a profile is a statement about
     how someone organises their repositories, which only they can make.
+
+    Codex starts on its own default the same way. The login that was already
+    in ~/.codex is adopted under the name "codex", so it is the one to start
+    on when it is there: someone with a single Codex account then gets a
+    working `codex` wrapper without writing a rule at all.
     """
     r = rules()
-    if r.default_account or r.profiles or r.projects:
-        return r
-    blob = keychain.read_credentials(DEFAULT_CONFIG)
-    guess = account_for_email(identity(DEFAULT_CONFIG, blob)[0].get("email") or "")
-    r.default_account = guess or (account_names() or [""])[0]
-    if r.default_account:
+    before = r.to_dict()
+    if not (r.default_account or r.profiles or r.projects):
+        blob = keychain.read_credentials(DEFAULT_CONFIG)
+        guess = account_for_email(identity(DEFAULT_CONFIG, blob)[0].get("email") or "")
+        r.default_account = guess or (account_names() or [""])[0]
+    if not r.codex_default_account:
+        names = codex_account_names()
+        if names:
+            r.codex_default_account = "codex" if "codex" in names else names[0]
+    if r.to_dict() != before:
         save_rules(r)
     return r
 
 
 def _retire_pins_under(r: profiles.Rules, scope: str, key: str,
-                       live: Iterable[sessions.Session]) -> list[str]:
+                       live: Iterable[sessions.Session],
+                       provider: str = "claude") -> list[str]:
     """Specificity alone is the wrong order when the broader rule is newer
     and is the one the user just chose on purpose. Retire older pins under it.
     """
     gone = []
+    pins = r.side(provider)[1]
     for sess in live:
-        if sess.term_id not in r.sessions:
+        if sess.term_id not in pins:
             continue
         paths = (project_root(sess.cwd), os.path.abspath(sess.cwd))
-        projects = [r.project_rule_for(path) for path in paths]
+        projects = [r.project_rule_for(path, provider) for path in paths]
         if scope == "project":
             covered = key in projects
         elif scope in ("profile", "default"):
@@ -2387,9 +2431,86 @@ def _retire_pins_under(r: profiles.Rules, scope: str, key: str,
         else:
             continue
         if covered:
-            r.sessions.pop(sess.term_id)
+            pins.pop(sess.term_id)
             gone.append(sess.term_id)
     return gone
+
+
+def _codex_restart_needed(r: profiles.Rules, account: str,
+                          live: Iterable[sessions.Session] | None) -> bool:
+    """Whether a terminal that has already run Codex now routes somewhere new.
+
+    Codex reads auth.json once, when it starts, and keeps it in memory, so a
+    rule change reaches a terminal only when Codex next starts there. A
+    terminal that has never run Codex has nothing to restart and telling it to
+    would be noise, so the home on disk is the test: it exists only because
+    this tool routed Codex in that terminal.
+    """
+    for sess in live or ():
+        term = sess.term_id
+        if not term or not os.path.isdir(codex.session_home(term)):
+            continue
+        if r.account_for((os.path.abspath(sess.cwd), project_root(sess.cwd)),
+                         term, "codex")[0] == account:
+            return True
+    return False
+
+
+def _assign_codex(scope: str, key: str, account: str, cwd: str,
+                  live: Iterable[sessions.Session] | None,
+                  known: Iterable[sessions.Session] | None) -> tuple[bool, str]:
+    """Point one scope at a Codex account.
+
+    Writing the rule is the whole change here. Nothing is handed to a running
+    session the way `landed` does for Claude, because a Codex home holds a
+    link to the account's auth.json rather than a copy of it: there is no
+    credential to deliver, and the link the next launch follows is already
+    right. What a running Codex has is the login it read at start, which only
+    a restart replaces.
+    """
+    r = rules()
+    ran = False
+    if scope == "session":
+        if not key:
+            return False, "this session has no terminal id, so it cannot be pinned"
+        r.set_session(key, account, "codex")
+        # A pin outlives the tab only until its home is gone, so a tab pinned
+        # before Codex ever ran in it needs the home now, or the next poll
+        # reads the missing home as a dead terminal and drops the pin.
+        ran = os.path.isdir(codex.session_home(key))
+        codex.prepare_session(key, account)
+        where = "this session"
+    elif scope == "project":
+        root = project_root(key or cwd)
+        r.set_project(root, account, "codex")
+        key = profiles.tilde(root)
+        where = f"“{os.path.basename(root)}”"
+    elif scope == "profile":
+        prof = r.profile(key)
+        if not prof:
+            return False, f"no profile named {key}"
+        r.set_profile_account(key, account, "codex")
+        where = f"profile “{key}” ({len(prof.repos)} repo{'s' if len(prof.repos) != 1 else ''})"
+    elif scope == "default":
+        r.set_default(account, "codex")
+        where = "everything with no rule"
+    else:
+        return False, f"unknown scope {scope}"
+    where = f"{where} now uses {account}"
+    if scope != "session":
+        # Listed, because the sessions are read twice below and a caller may
+        # well have handed us an iterator.
+        known = list(known if known is not None
+                     else live if live is not None else sessions.live(credential_dirs()))
+        retired = _retire_pins_under(r, scope, key, known, "codex")
+        if retired:
+            n = len(retired)
+            where += f", releasing {n} pinned session{'s' if n != 1 else ''}"
+        ran = _codex_restart_needed(r, account, known)
+    save_rules(r)
+    if ran:
+        where += ". Codex reads its login when it starts, so restart codex in that terminal"
+    return True, where
 
 
 def assign(scope: str, key: str, account: str, cwd: str = "",
@@ -2404,25 +2525,17 @@ def assign(scope: str, key: str, account: str, cwd: str = "",
     new rule retires; defaults to `live`, or to a fresh listing when neither
     is given. This lets callers retire pins while deferring credential writes.
     Project settings follow the project so a move does not re-ask for trust.
+
+    The provider follows the account named, since an account belongs to one of
+    them and a rule is about one provider's sessions. Naming a Codex account
+    leaves the Claude rules exactly as they were, and the other way round.
     """
     try:
-        if account in codex_account_names():
-            return False, (f"{account} is a Codex account. "
-                           "Routing Codex accounts is not supported yet")
-        try:
-            account = resolve_account(account)
-        except UnknownAccount as original:
-            # Routing still belongs to Claude, so its nickname match wins.
-            try:
-                provider, name = resolve_any(account)
-            except UnknownAccount:
-                raise original from None
-            if provider == "codex":
-                return False, (f"{name} is a Codex account. "
-                               "Routing Codex accounts is not supported yet")
-            raise original
+        provider, account = resolve_any(account)
     except UnknownAccount as e:
         return False, str(e)
+    if provider == "codex":
+        return _assign_codex(scope, key, account, cwd, live, known)
     r = rules()
     moved: list[str] = []
     if scope == "session":
@@ -2531,25 +2644,30 @@ def apply_now(live: Iterable[sessions.Session] | None = None
 
 def clear(scope: str, key: str, cwd: str = "",
           live: Iterable[sessions.Session] | None = None,
-          applied_out: dict | None = None) -> tuple[bool, str]:
-    """Drop a rule so the level above it decides again."""
+          applied_out: dict | None = None,
+          provider: str = "claude") -> tuple[bool, str]:
+    """Drop one provider's rule so the level above it decides again."""
     r = rules()
+    projects, pins = r.side(provider)
     if scope == "session":
-        if key not in r.sessions:
+        if key not in pins:
             return False, "this session has no rule of its own"
-        r.set_session(key, None)
+        r.set_session(key, None, provider)
         where = "this session"
     elif scope == "project":
         root = project_root(key or cwd)
-        found = r.project_rule_for(root)
+        found = r.project_rule_for(root, provider)
         if not found:
             return False, "this project has no rule of its own"
-        r.projects.pop(found, None)
+        projects.pop(found, None)
         where = f"“{os.path.basename(root)}”"
     else:
         return False, f"unknown scope {scope}"
     save_rules(r)
-    return True, landed(f"{where} follows its profile again", live, applied_out)
+    where = f"{where} follows its profile again"
+    if provider == "codex":
+        return True, where          # no credential to hand out; the link is enough
+    return True, landed(where, live, applied_out)
 
 
 def add_profile(name: str, account: str = "",

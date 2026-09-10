@@ -1,4 +1,4 @@
-"""Rules deciding which Claude account a session bills to.
+"""Rules deciding which account a session bills to.
 
 The model is three levels of specificity, most specific first:
 
@@ -20,6 +20,13 @@ Claude Code itself only understands CLAUDE_CONFIG_DIR, and the shell has to
 resolve a directory before it can launch anything. So the rules are also
 written out as a flat table the shell can read with grep, regenerated whenever
 they change. If this tool is broken or missing, the last table still works.
+
+Codex is routed by the same four levels, over its own accounts. The two sides
+are stored separately rather than in one table, because a repository can be
+paid for by one Claude subscription and one ChatGPT subscription at the same
+time, and a single "account" column could not say both. Every lookup takes the
+provider as an argument and runs the same code over whichever pair of tables
+the provider names, so the two sides can never resolve differently.
 """
 from __future__ import annotations
 
@@ -39,6 +46,11 @@ ROUTES_HEADER = """\
 #   term:<TERM_SESSION_ID>=<config dir>   one terminal
 #   path:<directory>=<config dir>         a directory and everything under it
 #   default=<config dir>                  everything else
+# The codex() wrapper reads the same three rules with a codex- prefix, and the
+# directory is a CODEX_HOME rather than a CLAUDE_CONFIG_DIR.
+#   codex-term:<TERM_SESSION_ID>=<home>   one terminal
+#   codex-path:<directory>=<home>         a directory and everything under it
+#   codex-default=<home>                  everything else
 """
 
 
@@ -55,10 +67,15 @@ class Profile:
     name: str
     account: str = ""
     repos: list[str] = field(default_factory=list)   # stored ~-relative
+    codex_account: str = ""
 
     @property
     def paths(self) -> list[str]:
         return [expand(r) for r in self.repos]
+
+    def account_of(self, provider: str = "claude") -> str:
+        """The account this profile pays one provider with, if it names one."""
+        return self.codex_account if provider == "codex" else self.account
 
     def covers(self, path: str) -> str | None:
         """The repo of this profile that contains `path`, longest first."""
@@ -75,8 +92,33 @@ class Rules:
     profiles: list[Profile] = field(default_factory=list)
     projects: dict[str, str] = field(default_factory=dict)   # ~-relative path -> account
     sessions: dict[str, str] = field(default_factory=dict)   # TERM_SESSION_ID -> account
+    codex_default_account: str = ""
+    codex_projects: dict[str, str] = field(default_factory=dict)
+    codex_sessions: dict[str, str] = field(default_factory=dict)
 
     # ---------------------------------------------------------------- lookup
+
+    def side(self, provider: str = "claude") -> tuple[dict[str, str], dict[str, str]]:
+        """One provider's project and session tables, as the dicts themselves.
+
+        Picking the pair once is what lets the resolution order below be
+        written out exactly once. The algorithm is the same for both
+        providers; only the tables it reads differ, and a second copy of it
+        would be a second chance to answer the same question differently.
+        """
+        if provider == "codex":
+            return self.codex_projects, self.codex_sessions
+        return self.projects, self.sessions
+
+    def default(self, provider: str = "claude") -> str:
+        """The account for everything one provider has no rule for."""
+        return self.codex_default_account if provider == "codex" else self.default_account
+
+    def set_default(self, account: str, provider: str = "claude") -> None:
+        if provider == "codex":
+            self.codex_default_account = account
+        else:
+            self.default_account = account
 
     def profile(self, name: str) -> Profile | None:
         return next((p for p in self.profiles if p.name == name), None)
@@ -91,20 +133,22 @@ class Rules:
                 best, best_len = prof, len(hit)
         return best
 
-    def project_rule_for(self, path: str) -> str | None:
+    def project_rule_for(self, path: str, provider: str = "claude") -> str | None:
         """The project rule covering a directory, as a ~-relative key."""
         best, best_len = None, -1
-        for key in self.projects:
+        for key in self.side(provider)[0]:
             root = expand(key)
             if (path + "/").startswith(root + "/") and len(root) > best_len:
                 best, best_len = key, len(root)
         return best
 
-    def account_for(self, paths, term_id: str = "") -> tuple[str, str]:
+    def account_for(self, paths, term_id: str = "",
+                    provider: str = "claude") -> tuple[str, str]:
         """The account a session should use, and which rule decided it.
 
         `paths` is one directory, or several most specific first: a worktree
-        and the checkout it belongs to, say.
+        and the checkout it belongs to, say. `provider` picks which set of
+        rules answers; the order they are tried in is the same either way.
 
         Every level of the rules is tried against all of the paths before the
         next level is tried against any of them, because specificity belongs
@@ -120,23 +164,29 @@ class Rules:
         """
         if isinstance(paths, str):
             paths = (paths,)
-        if term_id and term_id in self.sessions:
-            return self.sessions[term_id], "session"
+        projects, sessions = self.side(provider)
+        if term_id and term_id in sessions:
+            return sessions[term_id], "session"
         for path in paths:
-            key = self.project_rule_for(path)
+            key = self.project_rule_for(path, provider)
             if key:
-                return self.projects[key], "project"
+                return projects[key], "project"
         for path in paths:
             prof = self.profile_for(path)
-            if prof and prof.account:
-                return prof.account, f"profile:{prof.name}"
-        return self.default_account, "default"
+            if prof and prof.account_of(provider):
+                return prof.account_of(provider), f"profile:{prof.name}"
+        return self.default(provider), "default"
 
     # ---------------------------------------------------------------- edits
 
-    def set_profile_account(self, name: str, account: str) -> None:
+    def set_profile_account(self, name: str, account: str,
+                            provider: str = "claude") -> None:
         prof = self.profile(name)
-        if prof:
+        if not prof:
+            return
+        if provider == "codex":
+            prof.codex_account = account
+        else:
             prof.account = account
 
     def add_repo(self, name: str, path: str) -> None:
@@ -158,38 +208,52 @@ class Rules:
         if prof:
             prof.repos = [r for r in prof.repos if expand(r) != target]
 
-    def set_project(self, path: str, account: str | None) -> None:
+    def set_project(self, path: str, account: str | None,
+                    provider: str = "claude") -> None:
+        projects = self.side(provider)[0]
         key = tilde(expand(path))
-        self.projects.pop(key, None)
+        projects.pop(key, None)
         if account:
-            self.projects[key] = account
+            projects[key] = account
 
-    def set_session(self, term_id: str, account: str | None) -> None:
-        self.sessions.pop(term_id, None)
+    def set_session(self, term_id: str, account: str | None,
+                    provider: str = "claude") -> None:
+        sessions = self.side(provider)[1]
+        sessions.pop(term_id, None)
         if account:
-            self.sessions[term_id] = account
+            sessions[term_id] = account
 
     # ---------------------------------------------------------------- io
 
     @classmethod
     def from_dict(cls, d: dict) -> Rules:
+        """Every codex key is optional, so a file written before Codex was
+        routed loads unchanged rather than being rejected or rewritten."""
         return cls(
             default_account=d.get("default_account") or "",
             profiles=[Profile(name=p.get("name") or "", account=p.get("account") or "",
-                              repos=list(p.get("repos") or []))
+                              repos=list(p.get("repos") or []),
+                              codex_account=p.get("codex_account") or "")
                       for p in (d.get("profiles") or []) if p.get("name")],
             projects={k: v for k, v in (d.get("projects") or {}).items() if v},
             sessions={k: v for k, v in (d.get("sessions") or {}).items() if v},
+            codex_default_account=d.get("codex_default_account") or "",
+            codex_projects={k: v for k, v in (d.get("codex_projects") or {}).items() if v},
+            codex_sessions={k: v for k, v in (d.get("codex_sessions") or {}).items() if v},
         )
 
     def to_dict(self) -> dict:
         return {
             "version": 1,
             "default_account": self.default_account,
-            "profiles": [{"name": p.name, "account": p.account, "repos": p.repos}
+            "profiles": [{"name": p.name, "account": p.account, "repos": p.repos,
+                          "codex_account": p.codex_account}
                          for p in self.profiles],
             "projects": dict(self.projects),
             "sessions": dict(self.sessions),
+            "codex_default_account": self.codex_default_account,
+            "codex_projects": dict(self.codex_projects),
+            "codex_sessions": dict(self.codex_sessions),
         }
 
 
@@ -201,11 +265,12 @@ def load() -> Rules:
         return Rules()
 
 
-def save(rules: Rules, dir_for) -> None:
+def save(rules: Rules, dir_for, codex_dir_for=None) -> None:
     """Persist the rules and regenerate the table the shell reads.
 
-    `dir_for(account)` gives the config directory an account owns; it is passed
-    in so this module never has to know how accounts are stored.
+    `dir_for(account)` gives the config directory an account owns, and
+    `codex_dir_for(account)` its CODEX_HOME; they are passed in so this module
+    never has to know how accounts are stored.
     """
     os.makedirs(CCM_HOME, exist_ok=True)
     tmp = CONFIG + ".tmp"
@@ -213,7 +278,7 @@ def save(rules: Rules, dir_for) -> None:
         json.dump(rules.to_dict(), f, indent=2)
         f.write("\n")
     os.replace(tmp, CONFIG)
-    write_routes(rules, dir_for)
+    write_routes(rules, dir_for, codex_dir_for)
 
 
 RESOLVER_BODY = """\
@@ -222,17 +287,25 @@ RESOLVER_BODY = """\
 # Prints the config dir a session in $PWD should use. The shell wrapper is a
 # one-liner that calls this, so changing how routing works never needs an
 # existing terminal to be restarted: only this file changes.
+# One script serves both providers: "codex" as the first argument reads the
+# codex- lines and falls back to the Codex CLI's own home. Everything else is
+# shared, so the two sides cannot drift into answering differently.
+if [ "$1" = "codex" ]; then
+  prefix="codex-"; fallback="$HOME/.codex"; set -- --codex
+else
+  prefix=""; fallback="$HOME/.claude"; set --
+fi
 # ccm prepares this terminal's own config dir and prints it. That dir is what
 # lets one session change account without touching its neighbours. The plain
 # text fallback below keeps launches working if ccm is missing or broken; it
 # resolves to the account's shared dir, which is correct, just not per session.
-if dir=$(ccm resolve 2>/dev/null) && [ -n "$dir" ]; then
+if dir=$(ccm resolve "$@" 2>/dev/null) && [ -n "$dir" ]; then
   echo "$dir"; exit 0
 fi
 ROUTES="{routes}"
-[ -f "$ROUTES" ] || {{ echo "$HOME/.claude"; exit 0 }}
+[ -f "$ROUTES" ] || {{ echo "$fallback"; exit 0 }}
 if [ -n "$TERM_SESSION_ID" ]; then
-  val=$(grep "^term:$TERM_SESSION_ID=" "$ROUTES" 2>/dev/null | tail -1 | cut -d= -f2-)
+  val=$(grep "^${{prefix}}term:$TERM_SESSION_ID=" "$ROUTES" 2>/dev/null | tail -1 | cut -d= -f2-)
   [ -n "$val" ] && {{ echo "$val"; exit 0 }}
 fi
 root=$PWD
@@ -243,8 +316,8 @@ fi
 best=""; bestlen=0
 while IFS= read -r line; do
   case "$line" in
-    path:*)
-      pth="${{line#path:}}"; dst="${{pth#*=}}"; pth="${{pth%%=*}}"
+    "${{prefix}}path:"*)
+      pth="${{line#${{prefix}}path:}}"; dst="${{pth#*=}}"; pth="${{pth%%=*}}"
       for cand in "$PWD" "$(pwd -P)" "${{root:-$PWD}}"; do
         case "$cand/" in
           "$pth"/*) [ ${{#pth}} -gt $bestlen ] && {{ best="$dst"; bestlen=${{#pth}} }} ;;
@@ -254,8 +327,8 @@ while IFS= read -r line; do
   esac
 done < "$ROUTES"
 [ -n "$best" ] && {{ echo "$best"; exit 0 }}
-val=$(grep "^default=" "$ROUTES" 2>/dev/null | tail -1 | cut -d= -f2-)
-echo "${{val:-$HOME/.claude}}"
+val=$(grep "^${{prefix}}default=" "$ROUTES" 2>/dev/null | tail -1 | cut -d= -f2-)
+echo "${{val:-$fallback}}"
 """
 
 
@@ -276,13 +349,17 @@ def write_resolver() -> None:
     os.replace(tmp, RESOLVER)
 
 
-def write_routes(rules: Rules, dir_for) -> None:
+def write_routes(rules: Rules, dir_for, codex_dir_for=None) -> None:
     """Flatten the rules into the grep-able table the shell wrapper reads.
 
     Profiles expand into one path rule per repo, so the shell never needs to
     know profiles exist. Rules are emitted least specific first only for
     readability: the wrapper picks the longest path match and checks terminals
     ahead of everything.
+
+    The codex side is written the same way under a codex- prefix, and only
+    when a caller supplies the homes: a user with no Codex accounts keeps the
+    table they had.
     """
     lines = [ROUTES_HEADER]
     if rules.default_account:
@@ -296,6 +373,18 @@ def write_routes(rules: Rules, dir_for) -> None:
         lines.append(f"path:{expand(key)}={dir_for(account)}")
     for term_id, account in rules.sessions.items():
         lines.append(f"term:{term_id}={dir_for(account)}")
+    if codex_dir_for is not None:
+        if rules.codex_default_account:
+            lines.append(f"codex-default={codex_dir_for(rules.codex_default_account)}")
+        for prof in rules.profiles:
+            if not prof.codex_account:
+                continue
+            for repo in prof.paths:
+                lines.append(f"codex-path:{repo}={codex_dir_for(prof.codex_account)}")
+        for key, account in rules.codex_projects.items():
+            lines.append(f"codex-path:{expand(key)}={codex_dir_for(account)}")
+        for term_id, account in rules.codex_sessions.items():
+            lines.append(f"codex-term:{term_id}={codex_dir_for(account)}")
     os.makedirs(CCM_HOME, exist_ok=True)
     tmp = ROUTES + ".tmp"
     with open(tmp, "w") as f:

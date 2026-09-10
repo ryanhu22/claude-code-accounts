@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Automatic start of weekly usage windows, off by default: a menu bar toggle and `ccm auto-start on`.
 - Spend a Codex reset credit from the account's menu or with `ccm reset <account>`, which puts
   every window of that account back to 0%.
+- Codex sessions are routed by the same rules as Claude Code sessions: `ccm use <codex account>`
+  sets one, and the `codex` wrapper from `ccm shell-init` picks the CODEX_HOME per terminal.
 
 ### Fixed
 

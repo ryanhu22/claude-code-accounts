@@ -165,10 +165,14 @@ def test_assign_and_clear_scopes(fake_keychain, fake_api):
         assert core.clear("project", "/repo", live=[])[0]
     assert core.rules().projects == {}
     assert "project repo" not in core.rules_using("a")
-    for name, message in (("cx", "not supported"), ("missing", "no account matches")):
-        with budget(fake_keychain, 0):
-            ok, error = core.assign("default", "", name, live=[])
-        assert not ok and message in error
+    with budget(fake_keychain, 0):
+        ok, error = core.assign("default", "", "missing", live=[])
+    assert not ok and "no account matches" in error
+    # A Codex account routes on its own side, leaving the Claude default alone.
+    with budget(fake_keychain, 0):
+        assert core.assign("default", "", "cx", live=[])[0]
+    assert core.rules().codex_default_account == "cx"
+    assert core.rules().default_account == "a"
 
 
 def test_apply_reads_each_account_once(fake_keychain, fake_api, monkeypatch):
@@ -999,6 +1003,141 @@ def test_reset_windows_spends_the_soonest_credit(fake_keychain, fake_api, monkey
     monkeypatch.setattr(codex, "consume_reset_credit", refused)
     assert core.reset_windows("cx") == (False, "the reset was refused (HTTP 402: already used)")
     assert core.reset_windows("nobody")[0] is False
+
+
+def codex_account(name: str) -> Path:
+    """A Codex account with a login of its own, as sign_in makes a Claude one."""
+    slot = Path(codex.ensure_account_dir(name))
+    (slot / "auth.json").write_text(json.dumps({"tokens": {"refresh_token": name}}))
+    return slot
+
+
+def test_codex_project_rule_leaves_the_claude_one_alone(fake_keychain, fake_api):
+    sign_in("a", "a@example.com", fake_api)
+    codex_account("cx")
+    assert core.assign("project", "/repo", "a", live=[])[0]
+    # Codex routing writes files and links; it never reads a credential.
+    with budget(fake_keychain, 0):
+        ok, message = core.assign("project", "/repo", "cx", live=[])
+    assert ok and message == "“repo” now uses cx"
+    r = core.rules()
+    assert r.projects == {"/repo": "a"} and r.codex_projects == {"/repo": "cx"}
+    assert core.resolve("/repo", provider="codex") == ("cx", "project")
+    assert core.resolve("/repo") == ("a", "project")
+    routes = Path(profiles.ROUTES).read_text()
+    assert f"path:/repo={core.slot_dir('a')}" in routes
+    assert f"codex-path:/repo={codex.slot_dir('cx')}" in routes
+
+
+def test_codex_session_pin_makes_its_home(fake_keychain):
+    codex_account("cx")
+    with budget(fake_keychain, 0):
+        assert core.assign("session", "term", "cx", live=[])[0]
+    r = core.rules()
+    assert r.codex_sessions == {"term": "cx"} and r.sessions == {}
+    home = Path(codex.session_home("term"))
+    assert home.joinpath("auth.json").resolve() == Path(codex.slot_dir("cx"), "auth.json")
+    # The pin has a home from the start, so pruning cannot mistake it for dead.
+    assert core.prune_session_rules([]) == []
+
+
+def test_codex_profile_account_sits_beside_the_claude_one(fake_keychain, fake_api):
+    sign_in("a", "a@example.com", fake_api)
+    codex_account("cx")
+    assert core.add_profile("work", live=[])[0]
+    assert core.assign("profile", "work", "cx", live=[])[0]
+    assert core.assign("profile", "work", "a", live=[])[0]
+    prof = core.rules().profile("work")
+    assert (prof.account, prof.codex_account) == ("a", "cx")
+
+
+@pytest.mark.parametrize(("names", "expected"), [
+    (["codex", "zed"], "codex"), (["alpha", "zed"], "alpha")])
+def test_bootstrap_starts_the_codex_default(fake_keychain, fake_api, names, expected):
+    sign_in("a", "a@example.com", fake_api)
+    for name in names:
+        codex_account(name)
+    assert core.bootstrap().codex_default_account == expected
+    assert core.rules().codex_default_account == expected
+
+
+def test_codex_resolve_dir_prepares_a_home(fake_keychain):
+    codex_account("cx")
+    core.save_rules(profiles.Rules(codex_default_account="cx"))
+    with budget(fake_keychain, 0):
+        assert core.resolve_dir("/repo", provider="codex") == codex.slot_dir("cx")
+        home = core.resolve_dir("/repo", "term", "codex")
+    assert home == codex.session_home("term")
+    assert Path(home, "auth.json").resolve() == Path(codex.slot_dir("cx"), "auth.json")
+    # With no codex rule at all, launches land on the Codex CLI's own home.
+    core.save_rules(profiles.Rules())
+    assert core.resolve_dir("/repo", "term", "codex") == codex.DEFAULT_HOME
+
+
+def test_prune_drops_a_codex_pin_whose_home_is_gone(fake_keychain):
+    codex_account("cx")
+    core.save_rules(profiles.Rules(codex_sessions={"live": "cx", "dead": "cx"}))
+    codex.prepare_session("live", "cx")
+    with budget(fake_keychain, 0):
+        assert core.prune_session_rules([]) == ["dead"]
+    assert core.rules().codex_sessions == {"live": "cx"}
+
+
+def test_rules_using_reads_the_side_the_account_is_on(fake_keychain):
+    codex_account("cx")
+    core.save_rules(profiles.Rules(
+        default_account="cx", profiles=[profiles.Profile("work", codex_account="cx")],
+        codex_default_account="cx", codex_projects={"/repo": "cx"},
+        codex_sessions={"term": "cx"}))
+    # The claude default naming "cx" is not a codex rule and is not reported.
+    assert core.rules_using("cx") == [
+        "default", "profile work", "project repo", "1 session rule"]
+
+
+def test_codex_cli_round_trip(fake_keychain, fake_api, monkeypatch, capsys, tmp_path):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    codex_account("cx")
+    core.save_rules(profiles.Rules(default_account="a"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("TERM_SESSION_ID", "term")
+    monkeypatch.setattr(sessions, "live", lambda *args, **kwargs: [])
+    assert cli.main(["use", "cx"]) == 0
+    output = capsys.readouterr().out
+    assert "now uses cx" in output
+    assert "restart codex in that terminal" in output
+    assert core.rules().codex_projects == {str(repo): "cx"}
+    assert core.rules().projects == {}
+    # Where prints the claude answer, then the same three lines for codex.
+    assert cli.main(["where"]) == 0
+    output = capsys.readouterr().out
+    assert output.count("account :") == 2 and "codex" in output
+    assert codex.slot_dir("cx").replace(core.HOME, "~") in output
+    assert cli.main(["resolve", "--codex"]) == 0
+    assert capsys.readouterr().out.strip() == codex.session_home("term")
+    assert cli.main(["use", "cx", "--session"]) == 0
+    assert core.rules().codex_sessions == {"term": "cx"}
+    capsys.readouterr()
+    assert cli.main(["unpin", "--codex"]) == 0
+    assert core.rules().codex_sessions == {}
+    assert "follows its profile again" in capsys.readouterr().out
+
+
+def test_profiles_table_marks_the_codex_lines(fake_keychain, capsys):
+    codex_account("cx")
+    core.save_rules(profiles.Rules(
+        default_account="a", profiles=[profiles.Profile("work", "a", ["/repo"], "cx")],
+        projects={"/repo": "a"}, sessions={"term": "a"},
+        codex_default_account="cx", codex_projects={"/other": "cx"},
+        codex_sessions={"term": "cx"}))
+    assert cli.main(["profiles"]) == 0
+    lines = [re.sub(r"\033\[\d+m", "", line) for line in capsys.readouterr().out.splitlines()]
+    assert lines.count("everything else        a") == 1
+    assert "everything else        cx codex" in lines
+    assert "                       cx codex" in lines
+    assert "project /other                       cx codex" in lines
+    assert "session term                         cx codex" in lines
 
 
 def test_every_command_renders_its_help(capsys):
