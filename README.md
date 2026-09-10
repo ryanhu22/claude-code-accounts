@@ -261,6 +261,7 @@ between a read and a write is never overwritten.
 ccm list                  # usage for every subscription
 ccm sessions              # every running session and what pays for it
 ccm poke <account>        # spend one token to start that account's 5h window
+ccm reset <account>       # spend one Codex reset credit: every window back to 0%
 ccm unpin                 # drop this terminal's rule
 ccm add <name>            # print the command that signs an account in
 ccm menubar install       # start the menu bar app at every login
@@ -295,6 +296,12 @@ credits and reset credits. Sign another account in through the browser:
 ```sh
 ccm login <name> --codex
 ```
+
+A reset credit puts every window of a Codex account back to 0%. OpenAI grants
+them now and then, and they expire. To spend one, open the account in the menu
+bar and choose "Reset every window now", or run `ccm reset <account>`. The
+credit that expires first is the one spent. It sends the same request the
+Codex CLI sends when it offers a reset, and it cannot be undone.
 
 The login already in `~/.codex` appears as `codex`, through a symlink rather
 than a second copy of its refresh token. Each additional account owns a

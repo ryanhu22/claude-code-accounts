@@ -73,6 +73,22 @@ def cmd_poke(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_reset(args) -> int:
+    """Spend one Codex reset credit. Irreversible, so it asks unless told not to."""
+    if not args.yes:
+        try:
+            answer = input(f"Spend one reset credit on {args.account}? "
+                           "Every window goes back to 0%. [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("nothing spent")
+            return 1
+    ok, msg = core.reset_windows(args.account)
+    print(f"{args.account}: {msg}")
+    return 0 if ok else 1
+
+
 def cmd_auto_start(args) -> int:
     if args.state is not None:
         core.set_pref(core.AUTO_START_PREF, args.state == "on")
@@ -368,6 +384,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.add_argument("--weekly", action="store_true", help="start only stopped weekly windows")
     p.set_defaults(func=cmd_poke)
+    p = sub.add_parser("reset", help="spend one Codex reset credit to put every window at 0%")
+    p.add_argument("account")
+    p.add_argument("-y", "--yes", action="store_true", help="do not ask first")
+    p.set_defaults(func=cmd_reset)
     p = sub.add_parser("auto-start", help="set automatic start of weekly windows")
     p.add_argument("state", nargs="?", choices=("on", "off"))
     p.set_defaults(func=cmd_auto_start)

@@ -1761,6 +1761,31 @@ class ManagerApp(rumps.App):
                                  callback=self._make_poke(acct.name)), "clock.arrow.circlepath")
             item.add(rumps.separator)
 
+        # A Codex reset credit puts every window back to 0%, once, and cannot
+        # be taken back, so the click that spends one sits behind a submenu
+        # that says the price. Offered whenever there is one to spend: the
+        # account row above shows how full the windows are, and how close to
+        # full is worth a credit is the user's call, not this menu's.
+        credits = acct.extras.get("reset_credits", 0) if acct.is_codex else 0
+        if acct.is_codex and acct.reading and credits > 0:
+            reset = rumps.MenuItem(f"reset:{acct.name}")
+            _apply_style(reset, [("  ", "dim"), ("Reset every window now…", "text")],
+                         mono=False)
+            _set_icon(reset, "arrow.counterclockwise.circle")
+            confirm = rumps.MenuItem(
+                f"Use 1 of {credits} reset credit{'s' if credits != 1 else ''}",
+                callback=self._make_reset(acct.name))
+            _apply_style(confirm, [(f"Use 1 of {credits} reset credit"
+                                    f"{'s' if credits != 1 else ''}", "text")], mono=False)
+            reset.add(confirm)
+            note = rumps.MenuItem(f"reset-note:{acct.name}", callback=None)
+            _apply_style(note, [("Every window of this account goes back to 0%. "
+                                 "The credit that expires first is spent.", "dim")],
+                         mono=False)
+            reset.add(note)
+            item.add(reset)
+            item.add(rumps.separator)
+
         # Signing in again is always a reasonable thing to want, and when a
         # directory is holding the wrong account it is the only way out - so it
         # cannot live only on rows that already look broken.
@@ -2493,6 +2518,28 @@ class ManagerApp(rumps.App):
             # so a poke that failed was indistinguishable from one that was
             # never wired up.
             self._notify(f"Could not start the 5h window for {account}.\n\n{message}")
+
+    def _make_reset(self, account: str):
+        def handler(_sender):
+            # Same shape as a poke: the menu is gone by the time the request
+            # returns, so the click is acknowledged first and the result
+            # reported to the flash row, or interrupts when it failed.
+            self._report(True, f"{account}: spending a reset credit…")
+            threading.Thread(target=self._reset, args=(account,), daemon=True).start()
+        return handler
+
+    def _reset(self, account: str) -> None:
+        ok, msg = core.reset_windows(account)
+        self._later(lambda: self._resetted(ok, account, msg))
+
+    def _resetted(self, ok: bool, account: str, message: str) -> None:
+        self._report(ok, f"{account}: {message}")
+        if ok:
+            # Forced, for the reason a poke is: the row is inside a rate limit,
+            # which is exactly when the ordinary refresh stays away.
+            self._on_refresh_tick(None, force=True)
+        else:
+            self._notify(f"Could not reset the windows for {account}.\n\n{message}")
 
     def _poke_again(self, account: str) -> None:
         acct = next((a for a in self._snapshot.accounts if a.name == account), None)

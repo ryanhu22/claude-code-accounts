@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   without editing a plist by hand.
 - A fake-data demo for the CLI, menu bar and README screenshots in a throwaway home.
 - Automatic start of weekly usage windows, off by default: a menu bar toggle and `ccm auto-start on`.
+- Spend a Codex reset credit from the account's menu or with `ccm reset <account>`, which puts
+  every window of that account back to 0%.
 
 ### Fixed
 

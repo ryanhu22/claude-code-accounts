@@ -1321,6 +1321,57 @@ def _one_poke(blob: dict, model: str) -> None:
         extra_headers={"anthropic-version": ANTHROPIC_VERSION})
 
 
+def reset_windows(name: str) -> tuple[bool, str]:
+    """Spend one of a Codex account's reset credits, putting its windows at 0%.
+
+    OpenAI grants these now and then, and the Codex CLI offers to redeem one
+    when a limit is hit. The account row already shows how many there are, so
+    this is the click that spends one: the credit that expires first, because
+    any other order can let a credit lapse while another sits unused. Nothing
+    here is reversible, which is why the menu asks twice.
+    """
+    try:
+        provider, name = resolve_any(name)
+    except UnknownAccount as e:
+        return False, str(e)
+    if provider != "codex":
+        return False, f"{name} is a Claude account, and only Codex accounts have reset credits"
+    auth = codex.live_auth(codex.slot_dir(name))
+    if not auth:
+        return False, "not signed in"
+    try:
+        details = codex.fetch_reset_credits(auth)
+    except Exception as e:  # noqa: BLE001 - network, auth or parse: all "try later"
+        return False, f"could not read the reset credits ({_describe(e)})"
+    credits = codex.spendable_credits(details)
+    if not credits:
+        return False, "no reset credit to spend"
+    try:
+        codex.consume_reset_credit(auth, credits[0].get("id"))
+    except Exception as e:  # noqa: BLE001 - the server said no; say what it said
+        return False, f"the reset was refused ({_describe(e)})"
+    forget_usage(f"codex:{name}")
+    left = len(credits) - 1
+    return True, (f"windows reset, {left} reset credit{'s' if left != 1 else ''} left"
+                  if left else "windows reset, that was the last reset credit")
+
+
+def _describe(e: Exception) -> str:
+    """The server's own words for a failed request, or the exception's."""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = json.loads(e.read().decode(errors="replace"))
+            detail = body.get("detail") or body.get("message") or body.get("error")
+            if isinstance(detail, dict):
+                detail = detail.get("message") or json.dumps(detail)
+            if detail:
+                return f"HTTP {e.code}: {detail}"
+        except Exception:  # noqa: BLE001 - an unreadable body still has a code
+            pass
+        return f"HTTP {e.code}"
+    return str(e) or e.__class__.__name__
+
+
 def poke(name: str, *, weekly_only: bool = False) -> tuple[bool, str]:  # noqa: D401
     """Spend a few tokens on an account to start every window that has no clock.
 

@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import time
 import urllib.error
+import uuid
 from dataclasses import dataclass, field
 
 HOME = os.path.expanduser("~")
@@ -36,6 +37,7 @@ CALLBACK_PATH = "/auth/callback"
 REDIRECT_URI = "http://localhost:1455/auth/callback"
 SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 UA_FALLBACK_VERSION = "0.153.0"
 PROVIDER = "codex"
 
@@ -317,17 +319,61 @@ def live_auth(home: str) -> dict | None:
             pass
 
 
-def fetch_usage(auth: dict) -> dict:
+def _call(auth: dict, url: str, body: dict | None = None) -> dict:
+    """One authenticated request to the usage backend, as the CLI makes it."""
     import urllib.request
 
     tokens = auth["tokens"]
-    req = urllib.request.Request(USAGE_URL, headers={
+    headers = {
         "Authorization": f"Bearer {tokens['access_token']}",
         "ChatGPT-Account-Id": tokens.get("account_id") or identity(auth)["account_id"],
         "Accept": "application/json", "User-Agent": user_agent(),
-    })
+    }
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers=headers,
+                                 method="POST" if body is not None else "GET")
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
+
+
+def fetch_usage(auth: dict) -> dict:
+    return _call(auth, USAGE_URL)
+
+
+def fetch_reset_credits(auth: dict) -> dict:
+    """The reset credits an account holds, each with its id, status and expiry."""
+    return _call(auth, RESET_CREDITS_URL)
+
+
+def consume_reset_credit(auth: dict, credit_id: str | None = None) -> dict:
+    """Spend one reset credit, which puts every window of the account back to 0%.
+
+    The request is the one the Codex CLI itself sends (backend-client's
+    ConsumeRateLimitResetCreditRequest): a fresh idempotency id, plus the
+    credit to spend when the caller has chosen one. The id is what keeps a
+    retried request from spending a second credit.
+    """
+    body: dict = {"redeem_request_id": str(uuid.uuid4())}
+    if credit_id:
+        body["credit_id"] = credit_id
+    return _call(auth, RESET_CREDITS_URL + "/consume", body)
+
+
+def spendable_credits(details: dict) -> list[dict]:
+    """The credits that can be spent now, soonest to expire first.
+
+    A credit the plan cannot use, or one already redeemed, is still listed by
+    the endpoint, so the count on the usage payload and the count here can
+    differ. Spending the one that expires first is the only order that never
+    lets a credit lapse while another sits unused.
+    """
+    out = [c for c in (details.get("credits") or [])
+           if isinstance(c, dict) and c.get("status") == "available"
+           and c.get("is_supported_by_plan", True)]
+    return sorted(out, key=lambda c: c.get("expires_at") or "")
 
 
 def short_name(name: str) -> str:

@@ -189,3 +189,38 @@ def test_remove_symlink_leaves_target():
     assert codex.remove_account("work") is True
     assert not slot.is_symlink()
     assert (target / "auth.json").read_text() == "keep"
+
+
+def _credit(cid, expires, status="available", supported=True):
+    return {"id": cid, "status": status, "is_supported_by_plan": supported,
+            "expires_at": expires, "reset_type": "codex_rate_limits"}
+
+
+def test_spendable_credits_soonest_first():
+    details = {"credits": [
+        _credit("late", "2026-10-05T00:00:00Z"),
+        _credit("spent", "2026-09-01T00:00:00Z", status="redeemed"),
+        _credit("soon", "2026-09-21T00:00:00Z"),
+        _credit("wrong-plan", "2026-09-10T00:00:00Z", supported=False),
+    ]}
+    assert [c["id"] for c in codex.spendable_credits(details)] == ["soon", "late"]
+    assert codex.spendable_credits({}) == []
+
+
+def test_consume_sends_the_cli_request(monkeypatch):
+    calls = []
+
+    def call(auth, url, body=None):
+        calls.append((url, body))
+        return {"ok": True}
+
+    monkeypatch.setattr(codex, "_call", call)
+    auth = {"tokens": {"access_token": "t", "account_id": "acct"}}
+    codex.consume_reset_credit(auth, "RateLimitResetCredit_1")
+    codex.consume_reset_credit(auth)
+    assert calls[0][0] == codex.RESET_CREDITS_URL + "/consume"
+    assert calls[0][1]["credit_id"] == "RateLimitResetCredit_1"
+    assert set(calls[1][1]) == {"redeem_request_id"}
+    # A fresh idempotency id per spend: reusing one would make the second
+    # click a no-op instead of a second reset.
+    assert calls[0][1]["redeem_request_id"] != calls[1][1]["redeem_request_id"]

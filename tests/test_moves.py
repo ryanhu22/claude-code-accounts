@@ -965,3 +965,36 @@ def test_owners_now_retries_owner_named_before_accounts_loaded(fake_keychain, fa
     owners, _ = core.owners_now([live.config_dir], early, prints, accts)
     assert owners == {live.config_dir: "a"}
     assert core.fingerprint(stored(fake_keychain, known_slot))
+
+
+def test_reset_windows_spends_the_soonest_credit(fake_keychain, fake_api, monkeypatch):
+    import urllib.error
+    from io import BytesIO
+    known("a", "a@example.com", fake_api, fake_keychain)
+    codex.ensure_account_dir("cx")
+    monkeypatch.setattr(codex, "live_auth", lambda home: {"tokens": {"access_token": "t"}})
+    details = {"credits": [
+        {"id": "late", "status": "available", "expires_at": "2026-10-05T00:00:00Z"},
+        {"id": "soon", "status": "available", "expires_at": "2026-09-21T00:00:00Z"},
+    ]}
+    monkeypatch.setattr(codex, "fetch_reset_credits", lambda auth: details)
+    spent = []
+    monkeypatch.setattr(codex, "consume_reset_credit",
+                        lambda auth, cid=None: spent.append(cid) or {})
+    assert core.reset_windows("a") == (
+        False, "a is a Claude account, and only Codex accounts have reset credits")
+    ok, msg = core.reset_windows("cx")
+    assert ok and spent == ["soon"] and msg == "windows reset, 1 reset credit left"
+    details["credits"] = details["credits"][:1]
+    ok, msg = core.reset_windows("cx")
+    assert ok and msg == "windows reset, that was the last reset credit"
+    details["credits"] = []
+    assert core.reset_windows("cx") == (False, "no reset credit to spend")
+    details["credits"] = [{"id": "x", "status": "available"}]
+
+    def refused(auth, cid=None):
+        raise urllib.error.HTTPError("u", 402, "nope", {}, BytesIO(b'{"detail": "already used"}'))
+
+    monkeypatch.setattr(codex, "consume_reset_credit", refused)
+    assert core.reset_windows("cx") == (False, "the reset was refused (HTTP 402: already used)")
+    assert core.reset_windows("nobody")[0] is False
