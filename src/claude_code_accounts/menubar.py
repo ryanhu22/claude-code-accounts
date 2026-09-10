@@ -1277,8 +1277,12 @@ class ManagerApp(rumps.App):
         holding a spent one recovers by itself, since it re-reads its keychain
         item about every thirty seconds.
 
-        Keychain work only, no network, so it can run often and off the main
-        thread without touching the API budget.
+        The answers Claude Code asks once, folder trust and the Claude in
+        Chrome onboarding, ride along on the same pass: they belong to the same
+        set of directories and go stale the same way.
+
+        Keychain and local files only, no network, so it can run often and off
+        the main thread without touching the API budget.
         """
         if self._syncing:
             return
@@ -1287,6 +1291,9 @@ class ManagerApp(rumps.App):
         def work() -> None:
             try:
                 core.sync_credentials(self._snapshot.sessions)
+                # Local file reads on the same interval, so a question answered
+                # in one terminal reaches the others within the minute.
+                core.sync_answers()
             except Exception:
                 pass          # a failed pass is retried in under a minute
             finally:

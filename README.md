@@ -321,6 +321,12 @@ Per-project settings follow the project. `.claude.json` keeps trust, allowed
 tools and MCP servers under the project's path, so that entry is copied across
 and a move does not ask for trust again.
 
+The answers Claude Code asks once follow the user instead. Folder trust and the
+Claude in Chrome onboarding are shared across every directory, so answering in
+one session answers for all of them, and a new session starts out trusting the
+folders you already trusted. Turning the browser tools on or off in any session
+sets them the same way everywhere.
+
 Rules live in `~/.claude-manager/config.json`. Claude Code only understands
 `CLAUDE_CONFIG_DIR`, and the shell must resolve a directory before it can
 launch anything, so the rules are also flattened into a grep-able

@@ -434,6 +434,9 @@ def profile(token: str | None) -> dict:
 
 
 IDENTITY_CACHE = os.path.join(ACCOUNTS_DIR, ".identity.json")
+# The last value of every answer that the user is allowed to change back, kept
+# per config dir so a flip can be told apart from a dir that is merely behind.
+ANSWERS_CACHE = os.path.join(profiles.CCM_HOME, "answers.json")
 
 
 def identity(config_dir: str, blob: dict | None) -> tuple[dict, str | None]:
@@ -669,7 +672,7 @@ def _cache_read(path: str = "") -> dict:
 def _cache_write(store: dict, path: str = "") -> None:
     path = path or USAGE_CACHE
     try:
-        os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ACCOUNTS_DIR, exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(store, f)
@@ -1622,6 +1625,12 @@ def _seed_config(path: str, account: str) -> None:
             os.unlink(tmp)
         except OSError:
             pass
+        return
+    # The account dir is only as current as the last session that ran in it, so
+    # the copy above can still be missing a folder the user trusted somewhere
+    # else. Collect every answer once, here, where the file is new: an existing
+    # dir returned above and pays nothing for this.
+    sync_answers([path])
 
 
 def _account_identity(account: str) -> dict | None:
@@ -1955,6 +1964,188 @@ def carry_project_state(project: str, src_dir: str, dst_dir: str) -> bool:
     except (locks.LockBusy, OSError):
         return False
     return True
+
+
+# Answers Claude Code asks for once and then remembers. Trust is per project;
+# the Claude in Chrome ones sit at the top level of the same file.
+_TRUST_KEY = "hasTrustDialogAccepted"
+_ONCE_ANSWERS = ("hasCompletedClaudeInChromeOnboarding", "cachedChromeExtensionInstalled")
+_TOGGLE_ANSWER = "claudeInChromeDefaultEnabled"
+
+
+def _answer_dirs(extra_dirs: Iterable[str] | None = None) -> list[str]:
+    """Every config dir whose answers should agree, oldest source first.
+
+    Session dirs are included whether or not their terminal is still alive: a
+    dead one is about to be reused by nobody, but a live one that ccm has not
+    polled yet is indistinguishable from it here, and reading a file costs
+    nothing.
+    """
+    out = [DEFAULT_CONFIG] + [account_dir(n) for n in account_names()]
+    try:
+        entries = sorted(os.listdir(SESSION_DIRS))
+    except OSError:
+        entries = []                       # no session has ever run
+    for name in entries:
+        path = os.path.join(SESSION_DIRS, name)
+        if name.startswith("s-") and os.path.isdir(path):
+            out.append(path)
+    out.extend(extra_dirs or ())
+    seen, dirs = set(), []
+    for path in out:
+        key = os.path.abspath(path)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(key)
+    return dirs
+
+
+def _toggle_winner(data: dict[str, dict], mtimes: dict[str, float]) -> bool | None:
+    """The value of the Chrome default that the user meant most recently.
+
+    This one is a switch rather than a milestone, so "true anywhere" would
+    stop the user ever turning it off again. A dir whose value moved since the
+    last pass is the one the user just answered in, and it wins; the newest
+    file breaks a tie between two of them. Without a move the disagreement
+    comes from seeding rather than from the user, so the majority wins and an
+    even split stays on, which is Claude Code's own default.
+    """
+    cache = _cache_read(ANSWERS_CACHE)
+    moved = [path for path, d in data.items()
+             if _TOGGLE_ANSWER in d and path in cache
+             and bool(d[_TOGGLE_ANSWER]) != bool(cache[path])]
+    if moved:
+        return bool(data[max(moved, key=lambda p: mtimes.get(p, 0.0))][_TOGGLE_ANSWER])
+    values = [bool(d[_TOGGLE_ANSWER]) for d in data.values() if _TOGGLE_ANSWER in d]
+    if not values:
+        return None                        # nobody has been asked yet
+    return values.count(True) >= values.count(False)
+
+
+def _merge_answers(data: dict, trusted: set[str], once: dict[str, bool],
+                   toggle: bool | None) -> bool:
+    """Fold the agreed answers into one dir's config. True when it changed."""
+    changed = False
+    if trusted:
+        projects = data.get("projects")
+        projects = projects if isinstance(projects, dict) else {}
+        for project in sorted(trusted):
+            entry = projects.get(project)
+            if entry is None:
+                # Trust alone. allowedTools, mcpServers and history belong to
+                # the dir that earned them and are never carried across.
+                projects[project] = {_TRUST_KEY: True}
+                changed = True
+            elif isinstance(entry, dict) and entry.get(_TRUST_KEY) is not True:
+                entry[_TRUST_KEY] = True
+                changed = True
+        if changed:
+            data["projects"] = projects
+    for key, value in once.items():
+        if value and data.get(key) is not True:
+            data[key] = True
+            changed = True
+    if toggle is not None and data.get(_TOGGLE_ANSWER) is not toggle:
+        data[_TOGGLE_ANSWER] = toggle
+        changed = True
+    return changed
+
+
+def _write_answers(config_dir: str, trusted: set[str], once: dict[str, bool],
+                   toggle: bool | None) -> bool:
+    """Apply the agreed answers to one dir, or leave it for the next pass."""
+    dst = _config_json(config_dir)
+    try:
+        with locks.config(config_dir):
+            # Re-read under the lock: the session living here may have answered
+            # something else while the other dirs were being read.
+            try:
+                with open(dst) as f:
+                    data = json.load(f)
+            except FileNotFoundError:
+                data = {}
+            if not isinstance(data, dict) or not _merge_answers(data, trusted, once, toggle):
+                return False
+            tmp = dst + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, dst)
+    except (locks.LockBusy, OSError, ValueError):
+        return False                       # busy or unreadable; try again later
+    return True
+
+
+def sync_answers(extra_dirs: Iterable[str] | None = None) -> list[str]:
+    """Make the answers Claude Code asks for once the same in every config dir.
+
+    A dir per session means a question answered in one terminal is unknown to
+    the next one, so folder trust and the Claude in Chrome onboarding were
+    asked again on every new session, and an accidental click that turned the
+    browser tools off could not be taken back from anywhere. An answer given
+    anywhere becomes the answer everywhere instead.
+
+    Trust and the onboarding milestones only ever move one way: the user
+    accepted them once and undoing them is not what the dialogs are for. The
+    Chrome default is a switch, so it follows whichever dir changed last. Any
+    dir that is busy or unreadable is skipped and picked up on a later pass;
+    nothing here raises.
+    """
+    dirs = _answer_dirs(extra_dirs)
+    data: dict[str, dict] = {}
+    mtimes: dict[str, float] = {}
+    for path in dirs:
+        src = _config_json(path)
+        try:
+            with open(src) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data[path] = loaded
+                mtimes[path] = os.path.getmtime(src)
+        except (OSError, ValueError):
+            continue                       # missing or corrupt; it only reads
+    if not data:
+        return []
+
+    trusted: set[str] = set()
+    for d in data.values():
+        projects = d.get("projects")
+        if not isinstance(projects, dict):
+            continue
+        trusted.update(p for p, entry in projects.items()
+                       if isinstance(entry, dict) and entry.get(_TRUST_KEY) is True)
+    once = {key: any(d.get(key) is True for d in data.values()) for key in _ONCE_ANSWERS}
+    toggle = _toggle_winner(data, mtimes)
+
+    accounts = os.path.abspath(ACCOUNTS_DIR)
+    written = []
+    for path in dirs:
+        if path not in data and (os.path.exists(_config_json(path))
+                                 or os.path.dirname(path) != accounts):
+            # A file we could not read stays untouched, and a dir Claude Code
+            # has never run in stays empty. An account dir is the exception:
+            # _seed_config copies from there, so the answers are worth having
+            # even when nothing else is.
+            continue
+        if _write_answers(path, trusted, once, toggle):
+            written.append(path)
+
+    if toggle is not None:
+        # Record what each file now holds, not what it was asked to hold: a dir
+        # that was busy still has its old value, and claiming otherwise would
+        # make it look like a fresh answer on the next pass.
+        cache = _cache_read(ANSWERS_CACHE)
+        seen = {}
+        for path in dirs:
+            if path in written:
+                seen[path] = toggle
+            elif path in data and _TOGGLE_ANSWER in data[path]:
+                seen[path] = bool(data[path][_TOGGLE_ANSWER])
+            elif path in cache:
+                seen[path] = bool(cache[path])
+        if seen != cache:
+            _cache_write(seen, ANSWERS_CACHE)
+    return written
 
 
 def _config_json(config_dir: str) -> str:

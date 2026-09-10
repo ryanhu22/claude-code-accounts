@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Folder trust and the Claude in Chrome answers are shared across every session, so a new
+  terminal no longer asks again for what you already answered somewhere else.
 - Credentials refresh thirty minutes before expiry so Claude Code sessions receive the successor before rotating their shared token themselves.
 - Moving a session to another account updates its recorded identity and drops stale
   cached usage, so `/status` names the account whose credential it holds.

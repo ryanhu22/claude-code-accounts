@@ -159,6 +159,7 @@ def redirect_home(home: str, setattr):
             "DEFAULT_CONFIG": home / ".claude",
             "USAGE_CACHE": home / ".claude-accts/.usage-cache.json",
             "IDENTITY_CACHE": home / ".claude-accts/.identity.json",
+            "ANSWERS_CACHE": home / ".claude-manager/answers.json",
             "CHIP_FILE": home / ".claude-accts/.chips.json",
             "PREFS_FILE": home / ".claude-manager/prefs.json",
             "STASH_DIR": home / ".claude-manager/pending",
