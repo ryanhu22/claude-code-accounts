@@ -1181,7 +1181,14 @@ class ManagerApp(rumps.App):
         keeps the fast path. New or ended sessions need a poll before drawing.
         """
         try:
-            if _live_pids() != {s.pid for s in self._snapshot.sessions}:
+            # Claude Code's registry answers for its own rows. Codex has no
+            # registry, so its rows are checked for having died; a Codex that
+            # started since is left to the five second tick, because asking
+            # lsof about every Codex process here would cost what the fast
+            # path saves.
+            shown = self._snapshot.sessions
+            if (_live_pids() != {s.pid for s in shown if not s.is_codex}
+                    or any(not sessions.alive(s.pid) for s in shown if s.is_codex)):
                 self._poll_sessions()
                 self._take_sessions()
             if self._rebuild_pending:

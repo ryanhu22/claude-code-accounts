@@ -17,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sets one, and the `codex` wrapper from `ccm shell-init` picks the CODEX_HOME per terminal.
 - Running Codex sessions are listed beside the Claude Code ones in `ccm sessions` and the menu
   bar, with the same columns, read from Codex's own lock files, state database and rollouts.
+- The menu moves a Codex session the same way it moves a Claude Code one: a Codex row lists
+  Codex accounts, says which rule chose the one it spends, and every profile and the default
+  can name one Claude account and one Codex account at once.
 
 ### Fixed
 

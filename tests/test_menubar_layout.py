@@ -10,7 +10,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from claude_code_accounts import core, sessions
+from claude_code_accounts import core, glyphs, oauth, profiles, sessions, transcripts
+
+CODEX_HOME = "/homes/codex"
 
 
 @pytest.fixture
@@ -39,6 +41,197 @@ def app(menubar):
     app._tracker = SimpleNamespace(update_sessions=Mock(), focus=SimpleNamespace(session=None))
     app._repaint = Mock()
     return app
+
+
+class Item:
+    """A menu item, reduced to what the menu builder actually touches.
+
+    The styled title is kept as the segments it was built from, because that
+    is what says which chip a row carries, and an attributed string needs
+    AppKit to exist.
+    """
+
+    def __init__(self, title, callback=None):
+        self.title = title
+        self.callback = callback
+        self.rows = []
+        self.segments = []
+        self.state = 0
+        self._menuitem = SimpleNamespace(
+            setImage_=lambda image: None, setState_=self._state,
+            setToolTip_=lambda text: None, setAttributedTitle_=lambda title: None)
+
+    def _state(self, value):
+        self.state = value
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def __getitem__(self, key):
+        return next(row for row in self.rows if row.title == key)
+
+
+SEPARATOR = Item("---")
+
+
+@pytest.fixture
+def rows(menubar, monkeypatch):
+    """Build real menu rows without AppKit, keeping each row's segments."""
+    monkeypatch.setattr(menubar, "rumps",
+                        SimpleNamespace(MenuItem=Item, separator=SEPARATOR,
+                                        quit_application=lambda sender=None: None))
+    monkeypatch.setattr(menubar, "_apply_style",
+                        lambda item, segments, **kw: setattr(item, "segments", list(segments)))
+    monkeypatch.setattr(menubar, "_set_icon", lambda item, name: None)
+    monkeypatch.setattr(menubar, "_rows_that_fit", lambda: 30)
+    monkeypatch.setattr(menubar, "_styled",
+                        lambda *args, **kw: SimpleNamespace(
+                            size=lambda: SimpleNamespace(width=0.0)))
+    monkeypatch.setattr(glyphs, "template", lambda provider, size=13.0: None)
+    monkeypatch.setattr(oauth, "installed_browsers", lambda: [("Default browser", "")])
+    return menubar
+
+
+@pytest.fixture
+def snap(rows, monkeypatch):
+    """One account and one session per provider, as the menu sees them."""
+    snapshot = rows.Snapshot()
+    snapshot.accounts = [
+        core.Account(name="fable", slot="/slots/fable", email="fable@example.com"),
+        core.Account(name="cx", slot="/slots/cx", email="cx@example.com", provider="codex"),
+    ]
+    claude = sessions.Session(
+        pid=21, config_dir="/dirs/fable", env_config_dir="/dirs/fable", term_id="T1",
+        cwd="/repos/acme", kind="interactive", status="idle", term_program="Apple_Terminal",
+        tty="ttys001", name="acme", name_source="user")
+    codex = sessions.Session(
+        pid=22, config_dir=CODEX_HOME, env_config_dir=CODEX_HOME, provider="codex",
+        term_id="T2", cwd="/repos/acme", kind="bg", status="busy",
+        term_program="Apple_Terminal", tty="ttys002", name="fixtures", name_source="user",
+        context_tokens=20_000, context_window=258_400,
+        spent=transcripts.Totals(20_000, 0, 250_000, 20_000, 12))
+    snapshot.sessions = [claude, codex]
+    snapshot.running_on = {"/dirs/fable": "fable", CODEX_HOME: "cx"}
+    snapshot.rules = profiles.Rules(default_account="fable", codex_default_account="cx")
+    monkeypatch.setattr(rows, "_CODEX_NAMES", {"cx"})
+    return snapshot
+
+
+@pytest.fixture
+def picker(app):
+    """An app with the state a row needs, and no rule change reaching disk."""
+    app._signing_in = {}
+    app._account_rows = {}
+    app._pick_tabs = None
+    app._flash = ("", "", 0.0)
+    app._tracker.enabled = False
+    app._tracker.focus = SimpleNamespace(session=None, exact=True)
+    app._did = Mock()
+    return app
+
+
+def titles(item):
+    return [row.title for row in item.rows]
+
+
+def words(item):
+    return "".join(text for text, *_ in item.segments)
+
+
+def test_codex_session_row_reads_the_codex_rules(rows, picker, snap):
+    snap.rules.codex_sessions["T2"] = "cx-night"
+    item = rows.ManagerApp._session_item(picker, snap.sessions[1], snap)
+    said = titles(item)
+    assert "Codex reads its login when it starts, so restart it in this tab:" in said
+    assert "press ctrl+C, then run  codex resume --last" in said
+    assert not any("claude -c" in line for line in said)
+    # Only Codex accounts, and the pin it already has can be dropped.
+    assert [line for line in said if line.startswith("session:T2:")] == ["session:T2:cx"]
+    assert "clear:session:T2:codex" in said
+
+
+def test_claude_session_row_keeps_its_own_restart_line(rows, picker, snap):
+    snap.rules.sessions["T1"] = "sonnet"
+    item = rows.ManagerApp._session_item(picker, snap.sessions[0], snap)
+    said = titles(item)
+    assert "press ctrl+C twice, then run  claude -c" in said
+    assert not any("codex resume" in line for line in said)
+    assert [line for line in said if line.startswith("session:T1:")] == ["session:T1:fable"]
+
+
+def test_fresh_codex_row_draws_an_empty_bar(rows, snap):
+    """A TUI that has not taken a turn yet reports no context and no spend."""
+    fresh = sessions.Session(pid=23, config_dir=CODEX_HOME, env_config_dir=CODEX_HOME,
+                             provider="codex", term_id="T3", cwd="/repos/acme",
+                             kind="interactive", status="idle")
+    drawn = "".join(text for text, *_ in rows._session_segments(fresh, "cx"))
+    assert "[  -   ]" in drawn and "tok" not in drawn
+    spent = "".join(text for text, *_ in [rows._spent_cell(snap.sessions[1])])
+    assert spent.strip() == "290K tok"
+
+
+def test_scope_rows_list_both_providers_under_one_heading(rows, picker, snap, monkeypatch):
+    built = rows.ManagerApp._scope_rows(
+        picker, "Use for every project with no rule", "default", "", snap,
+        current={"claude": "fable", "codex": "cx"}, cwd="",
+        clearable={"claude", "codex"})
+    assert [row.title for row in built] == [
+        "sc:default:", "default::fable", "sc:default::codex", "default::cx",
+        "clear:default::claude", "clear:default::codex"]
+    assert [row.state for row in built[1:4:2]] == [1, 1]
+    assert words(built[2]).strip() == "Codex"
+    assert words(built[4]).strip() == "Remove this rule"
+    assert words(built[5]).strip() == "Remove the Codex rule"
+    cleared = []
+    monkeypatch.setattr(core, "clear",
+                        lambda *args, **kw: (cleared.append(kw["provider"]), (True, "done"))[1])
+    for row in built[4:]:
+        row.callback(None)
+    assert cleared == ["claude", "codex"]
+
+
+def test_scope_rows_for_one_provider_list_only_its_accounts(rows, picker, snap):
+    built = rows.ManagerApp._scope_rows(
+        picker, "Use for this session", "session", "T2", snap,
+        current="cx", cwd="/repos/acme", clearable=False, provider="codex")
+    assert [row.title for row in built] == ["sc:session:T2", "session:T2:cx"]
+    assert built[1].state == 1
+
+
+def test_profile_and_default_rows_show_the_codex_account(rows, picker, snap):
+    prof = profiles.Profile("work", "fable", ["~/repos/acme"], codex_account="cx")
+    snap.rules.profiles = [prof]
+    row = words(rows.ManagerApp._profile_item(picker, prof, snap))
+    assert row.index("cx ") > row.index("project")
+    assert "fable" in row
+    assert words(rows.ManagerApp._default_item(picker, snap)).count("cx ") == 1
+
+
+def test_profile_row_leads_with_codex_when_it_is_the_only_account(rows, picker, snap):
+    prof = profiles.Profile("codex-only", "", ["~/repos/acme"], codex_account="cx")
+    snap.rules.profiles = [prof]
+    row = words(rows.ManagerApp._profile_item(picker, prof, snap))
+    assert "unassigned" not in row and row.index("cx ") < row.index("codex-only")
+
+
+def test_codex_account_submenu_lists_its_sessions(rows, picker, snap):
+    item = rows.ManagerApp._account_item(picker, snap.accounts[1], snap)
+    said = titles(item)
+    assert "runhead:acct:cx" not in said
+    assert "lg:run:acct:cx" in said and "run:acct:cx:22" in said
+    assert "run:acct:cx:21" not in said
+
+
+def test_rebuilt_menu_counts_sessions_of_both_tools(rows, picker, snap, monkeypatch):
+    picker._snapshot = snap
+    picker.menu = Menu()
+    picker._sessions_heading = "RUNNING SESSIONS"
+    picker._refresh_item = None
+    monkeypatch.setattr(core, "pref", lambda name, default=None: default)
+    rows.ManagerApp._rebuild(picker)
+    assert "RUNNING SESSIONS · 2" in picker.menu
+    assert set(picker._session_rows) == {21, 22}
+    assert set(picker._account_rows) == {"fable", "cx"}
 
 
 @pytest.mark.parametrize("width", [0, 40, 80.5, 81])
@@ -116,6 +309,11 @@ def test_menu_open_still_protects_rows_when_poll_fails(menubar, app, monkeypatch
 
 
 class Menu(dict):
+    def add(self, item):
+        # A separator has no title of its own, and every one of them has to
+        # keep its place, so it is keyed by where it landed.
+        self[getattr(item, "title", None) or f"sep{len(self)}"] = item
+
     def insert_after(self, key, item):
         pairs = list(self.items())
         index = list(self).index(key) + 1

@@ -79,10 +79,13 @@ reaches the sessions that are already running.
 - Every subscription with its 5-hour, 7-day and model-scoped windows, each
   with the time until it resets. The one you choose, or the one behind the
   front terminal tab, is drawn in the menu bar itself.
-- Every running session: which account it spends, which rule chose it, how
-  full its context window is, and what it has spent over its whole life.
+- Every running session of both tools: which account it spends, which rule
+  chose it, how full its context window is, and what it has spent over its
+  whole life.
 - One click moves a session, its project, or its whole profile to another
-  account. Running sessions follow within about thirty seconds.
+  account. Claude Code sessions follow within about thirty seconds. A moved
+  Codex session takes effect the next time it starts, because Codex reads its
+  login once at startup.
 - Sign in, rename, recolour and remove accounts. Start an idle account's
   5-hour window so it lines up with when you want it.
 
@@ -208,6 +211,9 @@ dropped on its own.
 
 Account names take any unique prefix or substring, so `ccm use wo` finds
 `work`.
+
+Every scope can name one Claude account and one Codex account at the same
+time, and the provider follows the account that you pick.
 
 Everything here is in the menu bar too. Each session row offers the same
 three scopes, and a PROFILES section shows which account each group uses.
