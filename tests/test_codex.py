@@ -79,6 +79,7 @@ def test_extras(payload):
         "has_5h": False, "credits_balance": "0", "has_credits": False,
         "unlimited_credits": False, "reset_credits": 2,
         "reset_credits_applicable": 0, "limit_reached": False,
+        "reset_credit_expires": "",
     }
 
 
@@ -224,3 +225,20 @@ def test_consume_sends_the_cli_request(monkeypatch):
     # A fresh idempotency id per spend: reusing one would make the second
     # click a no-op instead of a second reset.
     assert calls[0][1]["redeem_request_id"] != calls[1][1]["redeem_request_id"]
+
+
+def test_usage_carries_the_soonest_credit_expiry(monkeypatch, payload):
+    details = {"credits": [
+        _credit("late", "2026-10-05T00:00:00Z"), _credit("soon", "2026-09-21T00:00:00Z")]}
+    monkeypatch.setattr(codex, "_call", lambda auth, url, body=None:
+                        dict(payload) if url == codex.USAGE_URL else details)
+    data = codex.fetch_usage({"tokens": {"access_token": "t", "account_id": "a"}})
+    assert codex.extras(data)["reset_credit_expires"] == "2026-09-21T00:00:00Z"
+    # No credits: the second endpoint is never asked, and the field is empty.
+    none = dict(payload, rate_limit_reset_credits={"available_count": 0})
+    calls = []
+    monkeypatch.setattr(codex, "_call",
+                        lambda auth, url, body=None: calls.append(url) or dict(none))
+    assert codex.extras(codex.fetch_usage({"tokens": {"access_token": "t", "account_id": "a"}}))[
+        "reset_credit_expires"] == ""
+    assert calls == [codex.USAGE_URL]

@@ -340,7 +340,20 @@ def _call(auth: dict, url: str, body: dict | None = None) -> dict:
 
 
 def fetch_usage(auth: dict) -> dict:
-    return _call(auth, USAGE_URL)
+    """The usage payload, with the reset credits' details folded in.
+
+    The usage payload counts the credits and says nothing else about them,
+    and the one fact worth knowing before spending one is when it expires.
+    That lives on a second endpoint, asked only when there is a credit to
+    describe, and never allowed to take the usage down with it.
+    """
+    data = _call(auth, USAGE_URL)
+    if (data.get("rate_limit_reset_credits") or {}).get("available_count"):
+        try:
+            data["_reset_credits"] = fetch_reset_credits(auth)
+        except Exception:  # noqa: BLE001 - the count still stands on its own
+            pass
+    return data
 
 
 def fetch_reset_credits(auth: dict) -> dict:
@@ -432,7 +445,10 @@ def extras(data: dict) -> dict:
     rate = data.get("rate_limit") or {}
     credits = data.get("credits") or {}
     resets = data.get("rate_limit_reset_credits") or {}
+    spendable = spendable_credits(data.get("_reset_credits") or {})
     return {
+        # When the credit that would be spent next lapses, ISO 8601, or "".
+        "reset_credit_expires": (spendable[0].get("expires_at") or "") if spendable else "",
         "has_5h": any((rate.get(k) or {}).get("limit_window_seconds") == 18000
                       for k in ("primary_window", "secondary_window")),
         "credits_balance": str(credits.get("balance") or ""),

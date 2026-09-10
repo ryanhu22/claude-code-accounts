@@ -461,6 +461,17 @@ def _clock_time(iso: str | None) -> str:
         else local.strftime("%a %-I:%M %p").lower()
 
 
+def _day(iso: str) -> str:
+    """A date weeks away, as a person says it: "Sep 21", never a clock time."""
+    if not iso:
+        return ""
+    try:
+        dt = _dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return dt.astimezone().strftime("%b %-d")
+
+
 def _compact_reset(iso: str | None) -> str:
     """Short countdown for an inline row: 45m, 4h, 34h, 3d.
 
@@ -1772,17 +1783,20 @@ class ManagerApp(rumps.App):
             _apply_style(reset, [("  ", "dim"), ("Reset every window now…", "text")],
                          mono=False)
             _set_icon(reset, "arrow.counterclockwise.circle")
-            confirm = rumps.MenuItem(
-                f"Use 1 of {credits} reset credit{'s' if credits != 1 else ''}",
-                callback=self._make_reset(acct.name))
-            _apply_style(confirm, [(f"Use 1 of {credits} reset credit"
-                                    f"{'s' if credits != 1 else ''}", "text")], mono=False)
-            reset.add(confirm)
-            note = rumps.MenuItem(f"reset-note:{acct.name}", callback=None)
-            _apply_style(note, [("Every window of this account goes back to 0%. "
-                                 "The credit that expires first is spent.", "dim")],
-                         mono=False)
-            reset.add(note)
+            # The row that spends is shaped like every other action here: an
+            # icon and a command. The two dim lines under it are the price and
+            # the one fact worth knowing first, which is when the credit lapses.
+            label = f"Use 1 of {credits} reset credit{'s' if credits != 1 else ''} now"
+            _set_icon(self._line(reset, f"reset-go:{acct.name}", label,
+                                 callback=self._make_reset(acct.name)),
+                      "arrow.counterclockwise")
+            lapses = _day(acct.extras.get("reset_credit_expires") or "")
+            for key, text in (("reset-note", "Every window of this account goes back to 0%."),
+                              ("reset-when", f"The one that expires first goes, on {lapses}."
+                               if lapses else "The one that expires first goes.")):
+                note = rumps.MenuItem(f"{key}:{acct.name}", callback=None)
+                _apply_style(note, [("  ", "dim"), (text, "dim")], mono=False)
+                reset.add(note)
             item.add(reset)
             item.add(rumps.separator)
 
@@ -2536,8 +2550,15 @@ class ManagerApp(rumps.App):
         self._report(ok, f"{account}: {message}")
         if ok:
             # Forced, for the reason a poke is: the row is inside a rate limit,
-            # which is exactly when the ordinary refresh stays away.
+            # which is exactly when the ordinary refresh stays away. And said
+            # out loud: the flash row lives in a menu that closed on the
+            # click, and a credit was just spent, so the answer cannot wait
+            # for the menu to be opened again.
             self._on_refresh_tick(None, force=True)
+            try:
+                rumps.notification("Claude Code Accounts", account, message)
+            except Exception:  # noqa: BLE001 - no bundle to notify from; the row still says it
+                pass
         else:
             self._notify(f"Could not reset the windows for {account}.\n\n{message}")
 
