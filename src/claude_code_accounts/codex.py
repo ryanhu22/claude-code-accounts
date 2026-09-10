@@ -291,6 +291,17 @@ def auth_file(home: str) -> str:
     return os.path.realpath(path) if os.path.lexists(path) else os.path.realpath(home)
 
 
+def is_codex_command(command: str) -> bool:
+    """Whether a process command line is the Codex CLI, however it is installed.
+
+    The Rust binary answers to its own name, the npm package runs as `codex.js`
+    under a node that is named something else entirely, and a checkout run
+    straight from the package directory names neither.
+    """
+    head = command.split(None, 1)[0] if command.strip() else ""
+    return os.path.basename(head) in ("codex", "codex.js") or "/@openai/codex/" in command
+
+
 def running_homes() -> set[str]:
     """Leave refresh to any Codex process already using the login.
 
@@ -315,8 +326,7 @@ def running_homes() -> set[str]:
             if len(parts) != 2:
                 continue
             pid, command = parts
-            executable = os.path.basename(command.split(None, 1)[0])
-            if executable not in ("codex", "codex.js") and "/@openai/codex/" not in command:
+            if not is_codex_command(command):
                 continue
             try:
                 env = subprocess.run(["ps", "eww", "-p", pid], capture_output=True,

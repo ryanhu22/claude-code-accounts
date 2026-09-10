@@ -6,7 +6,7 @@ import os
 import shlex
 import sys
 
-from . import __version__, codex, core, sessions, shell
+from . import __version__, codex, core, shell
 
 DESCRIPTION = (
     "Several Claude Code and Codex subscriptions on one Mac: usage for each, "
@@ -266,17 +266,21 @@ def _term_or_die() -> str:
 
 def cmd_sessions(_args) -> int:
     r = core.bootstrap()
-    live = sessions.live(core.credential_dirs())
+    live = core.all_sessions()
     core.prune_session_rules(s.term_id for s in live)
     accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
     if not live:
-        print("no Claude Code sessions running")
+        print("no Claude Code or Codex sessions running")
         return 0
     owners = core.dirs_to_accounts({s.env_config_dir for s in live}, accts)
     for s in live:
-        pinned = s.term_id and s.term_id in r.sessions
+        # A terminal can hold a pin on each side, and only the one that belongs
+        # to the tool this row is running says anything about it.
+        pins = r.codex_sessions if s.is_codex else r.sessions
+        pinned = s.term_id and s.term_id in pins
         running_on = owners.get(s.env_config_dir, "")
-        wanted, reason = core.resolve(s.cwd, s.term_id)
+        wanted, reason = core.resolve(s.cwd, s.term_id,
+                                      provider="codex" if s.is_codex else "claude")
         drift = f"  {Y}-> {wanted} on restart{X}" if wanted and wanted != running_on else ""
         pin_mark = "\u25cf" if pinned else " "
         print(f"{pin_mark} {s.label[:24]:<25} {s.status or s.kind:<7} "
@@ -438,7 +442,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_menubar)
     sub.add_parser("where", help="which context and account this directory uses").set_defaults(
         func=cmd_where)
-    sub.add_parser("sessions", help="every running Claude Code session").set_defaults(
+    sub.add_parser("sessions",
+                   help="every running Claude Code and Codex session").set_defaults(
         func=cmd_sessions)
     p = sub.add_parser("pin", help="give THIS terminal its own account")
     p.add_argument("account")

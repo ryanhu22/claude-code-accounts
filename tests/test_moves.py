@@ -1124,6 +1124,26 @@ def test_codex_cli_round_trip(fake_keychain, fake_api, monkeypatch, capsys, tmp_
     assert "follows its profile again" in capsys.readouterr().out
 
 
+def test_sessions_lists_a_codex_row_beside_the_claude_ones(fake_keychain, monkeypatch,
+                                                           capsys):
+    codex_account("cx")
+    core.save_rules(profiles.Rules(codex_projects={"/repo": "cx"}))
+    home = codex.prepare_session("term", "cx")
+    live = sessions.Session(pid=4242, config_dir=home, provider="codex",
+                            env_config_dir=home, term_id="term", cwd="/repo",
+                            kind="bg", status="busy", title="run the suite")
+    monkeypatch.setattr(sessions, "live", lambda *args, **kwargs: [])
+    monkeypatch.setattr(core.codex_sessions, "live", lambda *args, **kwargs: [live])
+    # A Codex row names its account from a file and its rule from the codex
+    # side, so it adds no keychain call: the two are bootstrap looking at the
+    # default config dir, which happens with no session running at all.
+    with budget(fake_keychain, 2):
+        assert cli.main(["sessions"]) == 0
+    output = capsys.readouterr().out
+    assert "repo" in output and "busy" in output and "cx" in output
+    assert "project" in output
+
+
 def test_profiles_table_marks_the_codex_lines(fake_keychain, capsys):
     codex_account("cx")
     core.save_rules(profiles.Rules(

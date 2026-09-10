@@ -333,6 +333,14 @@ again. The logins are shared by symlink, so nothing is ever copied: every home
 that uses an account points at that account's one `auth.json`, which is the
 only way to keep a single-use refresh token from being spent twice.
 
+Running Codex sessions are listed beside the Claude Code ones, in `ccm sessions`
+and in the menu bar, with the same columns: the account it spends, the
+repository, what the session is about, how full its context is, the tokens it
+has spent, and whether it is busy. Codex keeps no session registry, so each row
+is read from what Codex writes itself. The lock file a process holds says which
+threads are live, its state database names the thread, and the thread's rollout
+gives the model, the context and the turn that is running now.
+
 ## How it works
 
 ### One config directory per account

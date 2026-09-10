@@ -25,7 +25,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from . import codex, keychain, locks, profiles, sessions
+from . import codex, codex_sessions, keychain, locks, profiles, sessions
 
 if TYPE_CHECKING:
     from . import oauth
@@ -253,6 +253,21 @@ def credential_dirs() -> list[str]:
             seen.add(key)
             out.append(d)
     return out
+
+
+def all_sessions(with_git: bool = False,
+                 with_transcript: bool = False) -> list[sessions.Session]:
+    """Every session running on this machine, both tools, newest first.
+
+    For the two places that show a person what is running: the menu and
+    `ccm sessions`. Everything that hands out or moves a Claude credential
+    keeps calling `sessions.live` directly, so a Codex row can never reach
+    sync_credentials, apply_now, prune or the directory cleanup, none of which
+    have any business with a home whose login is a file.
+    """
+    out = sessions.live(credential_dirs(), with_git=with_git, with_transcript=with_transcript)
+    out += codex_sessions.live(with_git=with_git)
+    return sorted(out, key=lambda s: s.updated_at, reverse=True)
 
 
 def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
@@ -2307,6 +2322,21 @@ def owners_now(dirs: Iterable[str], known: dict[str, str], prints: dict[str, str
     return owners, current
 
 
+def is_codex_home(path: str) -> bool:
+    """Whether a config dir is a CODEX_HOME rather than a Claude one.
+
+    Answered by where it lives, which is a string compare and no keychain
+    call: an account home, a per-terminal home, or the Codex CLI's own. A home
+    reached through some other path is left to the caller, which knows by then
+    whether the keychain holds a Claude login for it.
+    """
+    real = os.path.realpath(path)
+    if real == os.path.realpath(codex.DEFAULT_HOME):
+        return True
+    return any(real.startswith(os.path.realpath(parent) + os.sep)
+               for parent in (codex.ACCOUNTS_DIR, codex.SESSION_DIRS))
+
+
 def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
     """Name the account behind each config dir, reading each credential once.
 
@@ -2314,6 +2344,10 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str,
     compare against, and each read is a `security` call: the cost was the
     number of directories times the number of accounts. Here every credential
     is read once and matched by fingerprint.
+
+    A Codex home answers from its auth.json instead, and costs no keychain call
+    at all: either its path names it, or the read that found no Claude login
+    there has already happened.
     """
     accts = [a for a in accts if a.provider == "claude"]
     by_fp: dict[str, str] = {}
@@ -2325,13 +2359,20 @@ def dirs_to_accounts(dirs: Iterable[str], accts: Iterable[Account]) -> dict[str,
     for d in dirs:
         if not d:
             continue
+        if is_codex_home(d):
+            out[d] = codex.home_account(d) or ""
+            continue
         base = os.path.basename(os.path.abspath(d).rstrip("/"))
         if is_account_dir(d) and any(a.name == base for a in accts):
             out[d] = base
             continue
         blob = keychain.read_credentials(d, max_age=keychain.RECENT)
         if not blob:
-            out[d] = ""
+            # No Claude login here. A dir holding an auth.json is a Codex home
+            # reached by some path of its own, and it names its account by the
+            # file that login lands on.
+            out[d] = (codex.home_account(d) or ""
+                      if os.path.exists(os.path.join(d, "auth.json")) else "")
             continue
         name = by_fp.get(fingerprint(blob))
         if not name:

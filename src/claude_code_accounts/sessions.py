@@ -33,6 +33,7 @@ STALE_AFTER = 7 * 24 * 3600
 class Session:
     pid: int
     config_dir: str              # the dir whose registry listed it: its account
+    provider: str = "claude"     # claude | codex: which tool is running here
     proc_start: str = ""         # tells a reused pid from the one before it
     session_id: str = ""
     cwd: str = ""
@@ -50,9 +51,14 @@ class Session:
     branch: str = ""
     title: str = ""              # Claude Code's own description of the conversation
     context_tokens: int = 0
+    context_window: int = 0      # the window the session itself reported, 0 if it did not
     model: str = ""
     context_pct: float | None = None
     spent: transcripts.Totals = field(default_factory=lambda: transcripts.Totals())
+
+    @property
+    def is_codex(self) -> bool:
+        return self.provider == "codex"
 
     @property
     def is_worktree(self) -> bool:
@@ -69,7 +75,13 @@ class Session:
 
     @property
     def window(self) -> int:
-        return transcripts.window_for(self.model)
+        """The context window, as the session reported it or by its model.
+
+        Codex names its own window in the rollout, which beats any table: it
+        knows what the server gave that thread. Claude Code says nothing about
+        it, so its model is looked up the way it always was.
+        """
+        return self.context_window or transcripts.window_for(self.model)
 
     @property
     def derived_name(self) -> bool:

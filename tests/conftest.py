@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_code_accounts import core, locks, profiles
+from claude_code_accounts import codex_sessions, core, locks, profiles
 from fakes import FakeApi, FakeKeychain, redirect_home
 
 ORIGINAL_POPEN = subprocess.Popen
@@ -22,6 +22,11 @@ def isolated_home(monkeypatch, tmp_path):
     for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "TERM_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
     redirect_home(str(home), monkeypatch.setattr)
+    # The machine running the tests may have Codex open. Sessions are found by
+    # asking ps, so without this the real ones would walk into the fake home.
+    monkeypatch.setattr(codex_sessions, "processes", list)
+    monkeypatch.setattr(codex_sessions, "_FILES", {})
+    monkeypatch.setattr(codex_sessions, "_digests", {})
 
     def blocked(*args, **kwargs):
         pytest.fail("Tests must not contact the network or launch external tools")

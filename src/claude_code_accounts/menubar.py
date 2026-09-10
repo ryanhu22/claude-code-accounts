@@ -1203,12 +1203,18 @@ class ManagerApp(rumps.App):
     def _collect(self, force: bool = False) -> Snapshot:
         snap = Snapshot()
         snap.accounts = core.all_accounts(force=force)
-        snap.sessions = sessions.live(core.credential_dirs(), with_git=True,
-                                      with_transcript=True)
+        snap.sessions = core.all_sessions(with_git=True, with_transcript=True)
         snap.rules = core.bootstrap()
         terms = [s.term_id for s in snap.sessions if s.term_id]
-        core.sync_credentials(snap.sessions)
-        core.gc_session_dirs(terms)
+        # Credentials, config dirs and Codex homes are three different things,
+        # and each pass belongs to the tool whose sessions it is looking at.
+        # A session rule is the exception: one terminal can hold a pin on each
+        # side, and pruning reads both, so it hears about every live terminal.
+        claude = [s for s in snap.sessions if not s.is_codex]
+        core.sync_credentials(claude)
+        core.gc_session_dirs([s.term_id for s in claude if s.term_id])
+        codex.gc_session_homes([s.term_id for s in snap.sessions
+                                if s.is_codex and s.term_id])
         core.prune_session_rules(terms)
         snap.running_on = core.dirs_to_accounts(
             {s.env_config_dir for s in snap.sessions}, snap.accounts)
@@ -1301,7 +1307,8 @@ class ManagerApp(rumps.App):
 
         def work() -> None:
             try:
-                core.sync_credentials(self._snapshot.sessions)
+                core.sync_credentials(
+                    [s for s in self._snapshot.sessions if not s.is_codex])
                 # Local file reads on the same interval, so a question answered
                 # in one terminal reaches the others within the minute.
                 core.sync_answers()
@@ -1336,7 +1343,7 @@ class ManagerApp(rumps.App):
     def _poll_sessions(self) -> None:
         # Serialize polls so an older worker cannot overwrite the opening poll.
         with self._session_poll_lock:
-            live = sessions.live(core.credential_dirs(), with_git=True, with_transcript=True)
+            live = core.all_sessions(with_git=True, with_transcript=True)
             # A peer can switch credentials or rules. Keep cached owners only
             # while their fingerprints and the rules file stay unchanged.
             known = self._snapshot.running_on

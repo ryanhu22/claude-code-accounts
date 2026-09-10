@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   every window of that account back to 0%.
 - Codex sessions are routed by the same rules as Claude Code sessions: `ccm use <codex account>`
   sets one, and the `codex` wrapper from `ccm shell-init` picks the CODEX_HOME per terminal.
+- Running Codex sessions are listed beside the Claude Code ones in `ccm sessions` and the menu
+  bar, with the same columns, read from Codex's own lock files, state database and rollouts.
 
 ### Fixed
 
