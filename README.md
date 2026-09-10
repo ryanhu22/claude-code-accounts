@@ -197,6 +197,13 @@ ccm where                         # what this directory resolves to, and why
 A worktree resolves to its parent checkout first, so it inherits the
 repository's rule even when it lives outside the repository directory.
 
+A choice you make now outranks a narrower one you made earlier. Pointing a
+project at an account releases the session rules of the terminals running in
+it, so every session in that project moves together. A profile choice does
+the same for its repositories that have no project rule of their own, and the
+default for everything under no rule. A session rule whose terminal is gone is
+dropped on its own.
+
 Account names take any unique prefix or substring, so `ccm use wo` finds
 `work`.
 

@@ -16,6 +16,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Choosing an account for a project, profile or the default releases the older session rules
+  under it, so every running session in that project moves together instead of the pinned
+  ones staying behind. Session rules for terminals that no longer exist are dropped.
 - Folder trust and the Claude in Chrome answers are shared across every session, so a new
   terminal no longer asks again for what you already answered somewhere else.
 - Credentials refresh thirty minutes before expiry so Claude Code sessions receive the successor before rotating their shared token themselves.
