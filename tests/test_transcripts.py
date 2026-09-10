@@ -94,3 +94,21 @@ def test_live_flushes_pending_tokens_with_empty_transcript(monkeypatch, tmp_path
     sessions.live([], with_env=False, with_transcript=True)
     assert saves == [True]
     assert not transcripts._dirty
+
+
+def test_digest_takes_the_size_after_a_compact(tmp_path):
+    path = tmp_path / "s.jsonl"
+    assistant = {"type": "assistant", "message": {"model": "claude-fable-5-1", "usage": {
+        "input_tokens": 5, "cache_read_input_tokens": 900000, "cache_creation_input_tokens": 0}}}
+    boundary = {"type": "system", "subtype": "compact_boundary",
+                "compactMetadata": {"trigger": "manual", "preTokens": 900005, "postTokens": 19005}}
+    path.write_text("\n".join(json.dumps(r) for r in (assistant, boundary)) + "\n")
+    # The compact is the newest fact about the context, so it wins over the
+    # usage block from before it, and the model name survives.
+    assert (transcripts.digest(str(path)).context_tokens,
+            transcripts.digest(str(path)).model) == (19005, "claude-fable-5-1")
+    # The next turn's usage block takes over again.
+    later = dict(assistant, message={"model": "claude-fable-5-1", "usage": {
+        "input_tokens": 21000, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
+    path.write_text(path.read_text() + json.dumps(later) + "\n")
+    assert transcripts.digest(str(path)).context_tokens == 21000

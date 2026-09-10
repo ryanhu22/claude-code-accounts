@@ -247,4 +247,11 @@ def _scan(path: str, size: int, tail: int) -> Digest:
             if total:
                 out.context_tokens = total
                 out.model = msg.get("model") or out.model
+        elif kind == "system" and d.get("subtype") == "compact_boundary":
+            # A compact writes no assistant record, so the last usage block
+            # kept describing the context from before it until the next turn.
+            # The boundary carries the size after it, which is the truth now.
+            after = (d.get("compactMetadata") or {}).get("postTokens")
+            if isinstance(after, int) and after > 0:
+                out.context_tokens = after
     return out
