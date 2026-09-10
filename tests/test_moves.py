@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 import urllib.error
 from contextlib import contextmanager
@@ -998,3 +999,19 @@ def test_reset_windows_spends_the_soonest_credit(fake_keychain, fake_api, monkey
     monkeypatch.setattr(codex, "consume_reset_credit", refused)
     assert core.reset_windows("cx") == (False, "the reset was refused (HTTP 402: already used)")
     assert core.reset_windows("nobody")[0] is False
+
+
+def test_every_command_renders_its_help(capsys):
+    # argparse only expands help strings when it prints them on older Pythons,
+    # and at parser build time on 3.14, so a stray "%" broke every command in
+    # the installed tool while the suite stayed green.
+    with pytest.raises(SystemExit) as top:
+        cli.main(["--help"])
+    assert top.value.code == 0
+    commands = re.findall(r"\{([^}]+)\}", capsys.readouterr().out)[0].split(",")
+    assert "reset" in commands
+    for command in commands:
+        with pytest.raises(SystemExit) as done:
+            cli.main([command, "--help"])
+        assert done.value.code == 0, command
+        assert command in capsys.readouterr().out
