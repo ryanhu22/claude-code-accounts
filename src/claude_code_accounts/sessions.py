@@ -54,6 +54,7 @@ class Session:
     context_window: int = 0      # the window the session itself reported, 0 if it did not
     model: str = ""
     context_pct: float | None = None
+    logged_out: bool = False     # its login was revoked and it stopped looking
     spent: transcripts.Totals = field(default_factory=lambda: transcripts.Totals())
 
     @property
@@ -97,20 +98,33 @@ class Session:
         """What tells this session apart from its siblings.
 
         Worktrees of one repo differ by branch, and that is also which worktree
-        you are looking at, so it wins there. Sessions sharing a checkout are
-        all on main instead, and are told apart by what they are about: the
-        name if one was chosen, otherwise the title Claude Code wrote for the
-        conversation.
+        you are looking at, so it wins there over anything generated. It does
+        not win over a name the session chose: a fresh worktree's branch is
+        named after its folder ("worktree-agent-a0560e9575"), which says
+        nothing, and the row kept it even after the session had a real name.
+        Sessions sharing a checkout are all on main instead, and are told apart
+        by what they are about: the name if one was chosen, otherwise the title
+        Claude Code wrote for the conversation.
         """
+        chosen = self._chosen_name()
         if self.is_worktree:
-            return self.branch or self.cwd.rstrip("/").split("/")[-1]
-        if not self.derived_name:
-            name, repo = self.name, self.repo
-            if name.lower().startswith(repo.lower() + "-"):
-                name = name[len(repo) + 1:]
-            if name:
-                return name
+            return chosen or self.branch or self.cwd.rstrip("/").split("/")[-1]
+        if chosen:
+            return chosen
         return self.title or self.branch or self.name
+
+    def _chosen_name(self) -> str:
+        """The name somebody gave this session, without the repo in front.
+
+        Claude Code's own names start with the repository, which is already a
+        column of its own on every row that shows this.
+        """
+        if self.derived_name:
+            return ""
+        name, repo = self.name, self.repo
+        if name.lower().startswith(repo.lower() + "-"):
+            name = name[len(repo) + 1:]
+        return name
 
     @property
     def interactive(self) -> bool:
@@ -292,6 +306,13 @@ def live(config_dirs: Iterable[str], with_env: bool = True,
             g = transcripts.digest(path)
             s.title, s.context_tokens = g.title, g.context_tokens
             s.model, s.context_pct = g.model, g.context_pct
+            s.logged_out = g.logged_out
+            if g.custom_title:
+                # The transcript wins over the registry file. Both carry the
+                # session's name, the session writes this one as soon as it has
+                # one, and the registry catches up only sometimes, so a named
+                # session kept showing the placeholder it started with.
+                s.name, s.name_source = g.custom_title, "user"
             s.spent = transcripts.lifetime(path, save=False)
         transcripts.flush()
     return sorted(out, key=lambda s: s.updated_at, reverse=True)

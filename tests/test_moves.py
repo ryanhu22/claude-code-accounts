@@ -49,7 +49,7 @@ def test_assign_project_then_apply(fake_keychain, fake_api):
     assert f"path:/repo={target}" in Path(profiles.ROUTES).read_text()
     # 1 fresh slot + 1 locked session read + 1 profile token read + 1 write.
     with budget(fake_keychain, 3, 1):
-        moved, applied = core.apply_now([live])
+        moved, applied, _ = core.apply_now([live])
     assert moved == [live.label]
     assert applied == {live.config_dir: "b"}
     assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, target)
@@ -194,7 +194,7 @@ def test_apply_reads_each_account_once(fake_keychain, fake_api, monkeypatch):
     for writes in (3, 0):
         loads.clear()
         with budget(fake_keychain, 1 + writes, writes):
-            moved, applied = core.apply_now(live)
+            moved, applied, _ = core.apply_now(live)
         assert len(loads) == 1
         assert len(moved) == writes
         assert applied == ({s.config_dir: "a" for s in live} if writes else {})
@@ -212,7 +212,7 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
     # 1 slot + 1 locked session read; the pre-read hits the memo.
     # The fresh check keeps the session's live generation in both calls.
     with budget(fake_keychain, 2):
-        assert core.apply_now([live]) == ([], {})
+        assert core.apply_now([live]) == ([], {}, {})
     with budget(fake_keychain, 2):
         assert core.prepare_session("term", "a") == live.config_dir
     assert stored(fake_keychain, live.config_dir) == newer
@@ -222,7 +222,7 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
     # A different account replaces the session even when its expiry is earlier.
     # Its first identity sync also reads the live token for the profile.
     with budget(fake_keychain, 3, 1):
-        assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"})
+        assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"}, {})
     assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, other)
     with budget(fake_keychain, 0):
         assert core.assign("default", "", "a", live=[])[0]
@@ -711,7 +711,7 @@ def test_hand_out_syncs_identity(fake_keychain, fake_api, via):
         assert core.prepare_session("term", "b") == live.config_dir
     else:
         core.save_rules(profiles.Rules(default_account="b"))
-        assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"})
+        assert core.apply_now([live]) == ([live.label], {live.config_dir: "b"}, {})
     assert stored(fake_keychain, live.config_dir) == want
     assert json.loads(config.read_text()) == {**kept, "oauthAccount": identity}
     assert config.stat().st_mode & 0o777 == 0o600
@@ -1176,3 +1176,63 @@ def test_every_command_renders_its_help(capsys):
             cli.main([command, "--help"])
         assert done.value.code == 0, command
         assert command in capsys.readouterr().out
+
+
+def test_refresh_slots_rotates_ahead_of_expiry_and_hands_it_around(
+        fake_keychain, fake_api, monkeypatch):
+    """The pass that a sleeping Mac used to skip: rotate, then hand out."""
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [live.config_dir])
+    old = fake_api.blob("a@example.com", gen=1, expires_in=20 * 60)
+    keychain.write_credentials(slot, old)
+    keychain.write_credentials(live.config_dir, old)
+    fake_api.reset()
+    assert core.refresh_slots() == ["a"]
+    assert fake_api.refresh_calls == 1
+    rotated = stored(fake_keychain, slot)
+    assert rotated["refreshToken"] == "a@example.com-refresh2"
+    assert (stored(fake_keychain, live.config_dir)["refreshToken"]
+            == rotated["refreshToken"])
+    # Nothing is due now, so the next pass costs no request and reports nothing.
+    fake_api.reset()
+    assert core.refresh_slots() == []
+    assert fake_api.refresh_calls == 0
+
+
+def test_a_logged_out_session_is_written_to_but_promised_nothing(
+        fake_keychain, fake_api):
+    """It takes the credential; it has stopped reading the dir it sits in."""
+    known("a", "a@example.com", fake_api, fake_keychain)
+    target = known("b", "b@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a"))
+    live = session("term", "/repo", "a")
+    live.logged_out = True
+    applied = {}
+    ok, message = core.assign("project", "/repo", "b", live=[live], applied_out=applied)
+    assert ok
+    assert message == ("“repo” now uses b. 1 logged-out session needs /login or a "
+                       "restart in its tab to notice it")
+    assert "switch" not in message
+    assert applied == {live.config_dir: "b", "stuck": {live.config_dir: "b"}}
+    assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, target)
+    assert core.apply_now([live]) == ([], {}, {})
+
+
+def test_the_credential_log_records_a_refresh(fake_keychain, fake_api, capsys):
+    core.enable_file_log()
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    keychain.write_credentials(slot, fake_api.blob("a@example.com", gen=1,
+                                                   expires_in=20 * 60))
+    assert core.refresh_slots() == ["a"]
+    assert "refresh a " in Path(core.log_file()).read_text()
+    assert cli.main(["log"]) == 0
+    printed = capsys.readouterr().out
+    assert "refresh a " in printed
+    # Fingerprints of a generation, never anything that could be sent anywhere.
+    assert "refresh1" not in printed and "refresh2" not in printed
+
+
+def test_the_log_command_says_when_there_is_nothing_to_show(capsys):
+    assert cli.main(["log"]) == 0
+    assert capsys.readouterr().out == "no credential events yet\n"

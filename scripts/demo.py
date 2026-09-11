@@ -166,7 +166,8 @@ def seed(home) -> World:
         environments[s.pid] = ({"TERM_SESSION_ID": s.term_id, "TERM_PROGRAM": s.term_program,
                                "CLAUDE_CONFIG_DIR": s.config_dir}, s.tty)
         branches[cwd] = branch
-        digests[s.session_id] = transcripts.Digest(title, s.context_tokens, s.model)
+        digests[s.session_id] = transcripts.Digest(
+            title=title, context_tokens=s.context_tokens, model=s.model)
         totals[s.session_id] = s.spent
         world.sessions.append(s)
     seed_codex_session(home, now)

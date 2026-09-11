@@ -26,6 +26,14 @@ from . import codex, core, focus, gauge, glyphs, keychain, oauth, sessions
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
 SESSION_POLL_SECONDS = 5       # local only: how soon a new session appears
+# A credential tick that arrives this long after the last one means the Mac
+# slept in between, because a timer does not fire while it does. Anything over
+# twice the interval is a gap rather than a late tick.
+WAKE_GAP_SECONDS = 120
+# When to look again after a wake. A session that refreshed on its own in the
+# first seconds strands its siblings until the successor is handed around, and
+# 45 seconds is too long to leave nine sessions racing for one token.
+WAKE_BURST = (5.0, 10.0, 20.0)
 FLASH_SECONDS = 30             # how long the last rule change stays on screen
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
@@ -846,7 +854,11 @@ def _session_segments(sess: sessions.Session, running_on: str) -> list[tuple[str
         # sit two from the token count and four from its own age, so it read
         # as part of the tokens rather than as the state of a session that has
         # been in it for that long. "busy 3m" is one fact.
-        ("    " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        # A logged-out session is neither working nor waiting, so it takes the
+        # column rather than sitting in it as "idle", which is what a session
+        # waiting for you looks like.
+        ("    " + _fit("out" if sess.logged_out else (sess.status or sess.kind), 5),
+         _status_tone(sess.status, sess.logged_out)),
         (f"{_age(sess.idle_for):>3}", "dim"),
     ]
 
@@ -883,7 +895,8 @@ def _session_line(sess: sessions.Session, why: str = "") -> list[tuple[str, str]
         (_fit(sess.repo, REPO_W), "dim"),
         (" ", "dim"),
         (_fit(sess.detail or sess.label, SUB_DETAIL_W), "text"),
-        ("  " + _fit(sess.status or sess.kind, 5), _status_tone(sess.status)),
+        ("  " + _fit("out" if sess.logged_out else (sess.status or sess.kind), 5),
+         _status_tone(sess.status, sess.logged_out)),
         (f"{_age(sess.idle_for):>3}", "dim"),
         (f"   {why}" if why else "", "dim"),
     ]
@@ -897,8 +910,12 @@ def _why(reason: str) -> str:
             "default": "the default"}.get(reason, reason)
 
 
-def _status_tone(status: str) -> str:
+def _status_tone(status: str, logged_out: bool = False) -> str:
     """Working sessions stand out; idle ones stay quiet.
+
+    A logged-out session is the exception and takes the warning colour: it is
+    the one state in this column that needs the reader to do something, and it
+    does not clear itself.
 
     Three states, and they were drawn in two. Busy is green, because the
     question this list is opened for is which sessions are working right now.
@@ -910,10 +927,11 @@ def _status_tone(status: str) -> str:
     reads without a legend, and it spends no hue this menu has already given
     a meaning to.
 
-    Nothing here returns a warning colour. A session at a shell prompt is a
-    state, not a problem, and orange still means one thing: a window running
-    out.
+    A session at a shell prompt is a state, not a problem, so it stays plain:
+    the only colour spent here is the one a logged-out session takes.
     """
+    if logged_out:
+        return "hot"
     return {"busy": "ok", "shell": "text"}.get(status, "dim")
 
 
@@ -982,7 +1000,9 @@ def _shape(snap: Snapshot) -> tuple:
     r = snap.rules
     return (
         tuple((a.name, a.signed_in, a.error, a.mismatch) for a in snap.accounts),
-        tuple(s.pid for s in snap.sessions),
+        # Logged out is part of the shape, not of the text: it adds a warning
+        # line and a row to the session's menu, so noticing it needs a rebuild.
+        tuple((s.pid, s.logged_out) for s in snap.sessions),
         tuple(sorted(snap.running_on.items())),
         tuple((p.name, p.account, p.codex_account, tuple(p.repos)) for p in r.profiles),
         r.default_account,
@@ -1082,6 +1102,31 @@ def _watcher_class() -> type:
     return _WATCHER
 
 
+_WAKER: type | None = None
+
+
+def _waker_class() -> type:
+    """The observer that hears the Mac wake up.
+
+    Defined on first use and cached for the same two reasons the menu watcher
+    is: importing this module must not need AppKit, and an Objective-C class
+    name may only be registered once in a process.
+    """
+    global _WAKER
+    if _WAKER is None:
+        import AppKit
+
+        class CCMWakeWatcher(AppKit.NSObject):
+            def didWake_(self, _note):
+                try:
+                    self.owner._on_wake()
+                except Exception:
+                    pass      # a failed catch-up must not take the app down
+
+        _WAKER = CCMWakeWatcher
+    return _WAKER
+
+
 class Snapshot:
     def __init__(self) -> None:
         self.accounts: list[core.Account] = []
@@ -1123,13 +1168,16 @@ class ManagerApp(rumps.App):
         self._rebuild_pending = False
         self._alerts: list[str] = []
         self._drawn_at = 0.0
+        self._last_tick = 0.0
         self._hide_from_dock()
+        core.enable_file_log()
         self.refresh_now(None)
         self._watch_menu()
         _start_timer(self._on_refresh_tick, REFRESH_SECONDS)
         _start_timer(self._on_credential_tick, CREDENTIAL_SYNC_SECONDS)
         _start_timer(self._on_sessions_tick, SESSION_POLL_SECONDS)
         _start_timer(self._on_sync_tick, 1)
+        self._watch_wake()
 
     # ------------------------------------------------------------------ plumbing
 
@@ -1146,6 +1194,26 @@ class ManagerApp(rumps.App):
             self.menu._menu.setDelegate_(self._watcher)
         except Exception:
             self._watcher = None
+
+    def _watch_wake(self) -> None:
+        """Ask macOS to tell us when the Mac wakes. Optional by design.
+
+        Waking is the one moment a token can already be expired in nine
+        directories at once, because no timer fires while the machine sleeps.
+        Without this the app still catches up, from the gap it sees between two
+        credential ticks; the notification is simply sooner and exact.
+        """
+        try:
+            import AppKit
+
+            # NSNotificationCenter does not retain an observer, so the app holds it.
+            self._waker = _waker_class().alloc().init()
+            self._waker.owner = self
+            AppKit.NSWorkspace.sharedWorkspace().notificationCenter(
+            ).addObserver_selector_name_object_(
+                self._waker, "didWake:", AppKit.NSWorkspaceDidWakeNotification, None)
+        except Exception:
+            self._waker = None
 
     def _style_refresh_row(self, snap: Snapshot) -> None:
         if self._refresh_item is None:
@@ -1312,12 +1380,53 @@ class ManagerApp(rumps.App):
         holding a spent one recovers by itself, since it re-reads its keychain
         item about every thirty seconds.
 
+        The pass rotates first and hands out second. A rotation is at most one
+        HTTPS request per token lifetime per account, and only for a slot
+        already inside half an hour of expiry, so it is cheap enough to belong
+        here: leaving it to the three minute usage poll is what let a sleeping
+        Mac wake up with every copy of a login expired at once. Everything else
+        on this pass is the keychain and local files.
+
         The answers Claude Code asks once, folder trust and the Claude in
         Chrome onboarding, ride along on the same pass: they belong to the same
         set of directories and go stale the same way.
+        """
+        now = time.time()
+        gap = now - self._last_tick if self._last_tick else 0.0
+        self._last_tick = now
+        if gap > WAKE_GAP_SECONDS:
+            # Timers do not fire while the Mac sleeps, so a gap this long is a
+            # wake, and it is the only signal when the notification is missed.
+            self._on_wake()
+            return
+        self._credential_pass(answers=True)
 
-        Keychain and local files only, no network, so it can run often and off
-        the main thread without touching the API budget.
+    def _on_wake(self) -> None:
+        """Catch the credentials up the moment the Mac wakes, then keep looking.
+
+        A token can expire inside a sleep. Every copy of it wakes expired at
+        once, and the two sessions that refresh on their own spend the same
+        single-use token, which the server reads as reuse and answers by
+        revoking the whole family. So the first thing after a wake is our own
+        rotation, and the successor goes straight to every copy.
+
+        Called from the wake notification and from a credential tick that came
+        back late, so it must be safe to run twice: the pass it starts refuses
+        to overlap with one already running.
+        """
+        core.log.info("wake")
+        self._credential_pass(then_refresh=True)
+        for delay in WAKE_BURST:
+            threading.Timer(delay, self._credential_pass).start()
+
+    def _credential_pass(self, *, answers: bool = False,
+                         then_refresh: bool = False) -> None:
+        """Rotate what is near expiry, then hand the newest copy to everyone.
+
+        Never two at once: a second pass would race the first for the same
+        single-use refresh token, which is the thing this exists to prevent.
+        Off the main thread, because a rotation waits on the network and AppKit
+        draws on the thread that would be waiting.
         """
         if self._syncing:
             return
@@ -1325,11 +1434,16 @@ class ManagerApp(rumps.App):
 
         def work() -> None:
             try:
+                core.refresh_slots()
                 core.sync_credentials(
                     [s for s in self._snapshot.sessions if not s.is_codex])
-                # Local file reads on the same interval, so a question answered
-                # in one terminal reaches the others within the minute.
-                core.sync_answers()
+                if answers:
+                    # Local file reads on the same interval, so a question
+                    # answered in one terminal reaches the others in a minute.
+                    core.sync_answers()
+                if then_refresh:
+                    # A wake also leaves the usage numbers as old as the sleep.
+                    self._later(lambda: self._on_refresh_tick(None, force=True))
             except Exception:
                 pass          # a failed pass is retried in under a minute
             finally:
@@ -1906,13 +2020,37 @@ class ManagerApp(rumps.App):
                             if in_front else ("  ", "dim")] + segments)
         self._session_rows[sess.pid] = (item, segments)
 
+        # Claude Code empties a revoked token out of the dir and then stops
+        # re-reading its keychain item, so every login the app writes there
+        # afterwards goes unread. The row has to say that, because the rest of
+        # this menu promises a switch in 30 seconds that this tab will not make.
+        stuck = sess.logged_out and not sess.is_codex
+        if stuck:
+            said = ("Logged out. It holds a working login now, but stopped looking: "
+                    "run /login in that tab, or ctrl+C twice and  claude -c"
+                    if running_on else
+                    "Logged out, and its account has no login. "
+                    "Sign the account in from its row above.")
+            out = rumps.MenuItem(f"out:{sess.pid}", callback=None)
+            _apply_style(out, [("  ", "dim"), (said, "warn")], mono=False)
+            item.add(out)
+            bundle = focus.bundle_for_program(sess.term_program)
+            if bundle and sess.tty:
+                _set_icon(self._line(item, f"tab:{sess.pid}", "Take me to that tab",
+                                     callback=self._make_reveal(sess)),
+                          "arrow.up.forward.app")
+
         if wanted and wanted != running_on:
             # A running session holds its credentials in memory, so the rule
             # cannot reach it. Say what to do rather than only what will happen.
             # Both tools read their account once and keep it, and each is left
             # in a different way, so the two lines that say how are the row's
             # own rather than one sentence that covers neither exactly.
-            if not sess.is_codex:
+            if stuck:
+                # The logged-out line above already says how to restart it, and
+                # saying it twice reads as two separate problems.
+                how = []
+            elif not sess.is_codex:
                 how = ["It reads its account once at launch, so restart this tab:",
                        "press ctrl+C twice, then run  claude -c"]
             elif sess.kind == "bg":
@@ -1939,7 +2077,7 @@ class ManagerApp(rumps.App):
                                      "Restart Codex in that tab now",
                                      callback=self._make_restart(sess, bundle)),
                           "arrow.clockwise")
-            if bundle and sess.tty:
+            if bundle and sess.tty and not stuck:
                 _set_icon(self._line(item, f"tab:{sess.pid}", "Take me to that tab",
                                      callback=self._make_reveal(sess)),
                           "arrow.up.forward.app")
@@ -2509,15 +2647,12 @@ class ManagerApp(rumps.App):
         """
         def work() -> None:
             try:
-                moved, applied = core.apply_now(self._snapshot.sessions)
+                moved, applied, stuck = core.apply_now(self._snapshot.sessions)
             except Exception:
                 return        # the 45 second sync picks the sessions up anyway
             if not applied:
                 return
-            n = len(moved)
-            done = (f"{note}. {n} running session{'s' if n != 1 else ''} "
-                    f"switch{'es' if n == 1 else ''} within about 30 seconds"
-                    if moved else note)
+            done = note + core.applied_note(moved, stuck)
             self._later(lambda: self._settle(done, applied))
 
         threading.Thread(target=work, daemon=True).start()
@@ -2536,7 +2671,10 @@ class ManagerApp(rumps.App):
         """
         snap = self._snapshot
         snap.rules = core.rules()
-        snap.running_on = {**snap.running_on, **(applied or {})}
+        # Every value here is an account name. "stuck" is the group of
+        # logged-out dirs that core.landed adds beside them, not a directory.
+        written = {d: a for d, a in (applied or {}).items() if isinstance(a, str)}
+        snap.running_on = {**snap.running_on, **written}
         self._rebuild()
 
     def _make_reveal(self, sess: sessions.Session):

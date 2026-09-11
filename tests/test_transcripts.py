@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -112,3 +113,37 @@ def test_digest_takes_the_size_after_a_compact(tmp_path):
         "input_tokens": 21000, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
     path.write_text(path.read_text() + json.dumps(later) + "\n")
     assert transcripts.digest(str(path)).context_tokens == 21000
+
+
+def test_digest_reads_a_revoked_login_and_the_turn_that_clears_it(tmp_path):
+    path = tmp_path / "s.jsonl"
+    refused = {"type": "assistant", "isApiErrorMessage": True,
+               "timestamp": "2026-09-11T08:15:00.000Z",
+               "message": {"content": [{"type": "text", "text":
+                           "API Error: 401 OAuth access token has been revoked. "
+                           "Please run /login"}]}}
+    path.write_text(json.dumps(refused) + "\n")
+    out = transcripts.digest(str(path))
+    assert out.logged_out
+    assert out.logged_out_at == dt.datetime(
+        2026, 9, 11, 8, 15, tzinfo=dt.timezone.utc).timestamp()
+    # An error turn carries no usage, so it must not be read as a context size.
+    assert out.context_tokens == 0
+    # It answered again, which is the only proof that it is signed in.
+    with path.open("a") as f:
+        f.write(record(20, 0, 1000, 5))
+    after = transcripts.digest(str(path))
+    assert not after.logged_out and after.logged_out_at == 0.0
+    assert after.context_tokens == 1020
+
+
+def test_digest_takes_the_last_name_the_session_chose(tmp_path):
+    path = tmp_path / "s.jsonl"
+    titles = [{"type": "custom-title", "customTitle": name, "sessionId": "s1"}
+              for name in ("first pass", "calendar sync")]
+    generated = {"type": "ai-title", "aiTitle": "Fixing the calendar importer"}
+    path.write_text("\n".join(json.dumps(r) for r in (*titles, generated)) + "\n")
+    out = transcripts.digest(str(path))
+    assert out.custom_title == "calendar sync"
+    # The generated title is a separate record and keeps its own field.
+    assert out.title == "Fixing the calendar importer"

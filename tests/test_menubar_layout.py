@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -196,6 +197,81 @@ def test_claude_session_row_keeps_its_own_restart_line(rows, picker, snap):
     assert "press ctrl+C twice, then run  claude -c" in said
     assert not any("codex resume" in line for line in said)
     assert [line for line in said if line.startswith("session:T1:")] == ["session:T1:fable"]
+
+
+def test_logged_out_claude_row_says_so_instead_of_promising_a_switch(rows, picker, snap):
+    """It holds a working login and cannot see it, so the row says what to do."""
+    sess = replace(snap.sessions[0], logged_out=True)
+    snap.rules.sessions["T1"] = "sonnet"
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    said = titles(item)
+    assert words(item["out:21"]).strip() == (
+        "Logged out. It holds a working login now, but stopped looking: "
+        "run /login in that tab, or ctrl+C twice and  claude -c")
+    assert said.index("out:21") < said.index("tab:21")
+    assert said.count("tab:21") == 1
+    assert "press ctrl+C twice, then run  claude -c" not in said
+    # Neither working nor waiting, and the one state here worth a colour.
+    assert ("    out  ", "hot") in rows._session_segments(sess, "fable")
+
+
+def test_a_logged_out_session_without_a_login_is_sent_to_its_account(rows, picker, snap):
+    sess = replace(snap.sessions[0], env_config_dir="/dirs/gone", logged_out=True)
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    assert words(item["out:21"]).strip() == (
+        "Logged out, and its account has no login. Sign the account in from its row above.")
+
+
+def test_an_ordinary_claude_row_is_untouched(rows, picker, snap):
+    sess = snap.sessions[0]
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    assert "out:21" not in titles(item)
+    assert ("    idle ", "dim") in rows._session_segments(sess, "fable")
+
+
+def test_credential_tick_after_a_sleep_runs_the_wake_burst(rows, app, monkeypatch):
+    """A gap longer than two intervals is a wake, notification or not."""
+    order, armed = [], []
+    monkeypatch.setattr(core, "refresh_slots", lambda: order.append("refresh") or [])
+    monkeypatch.setattr(core, "sync_credentials", lambda live: order.append("sync") or [])
+    monkeypatch.setattr(core, "sync_answers", lambda: order.append("answers") or [])
+    monkeypatch.setattr(rows, "threading", SimpleNamespace(
+        Thread=lambda target, daemon: SimpleNamespace(start=target),
+        Timer=lambda delay, fn: armed.append((delay, fn)) or SimpleNamespace(
+            start=lambda: None)))
+    app._syncing = False
+    app._done = []
+    app._last_tick = time.time() - 200
+    rows.ManagerApp._on_credential_tick(app, None)
+    # Rotate first, hand out second: the other order strands the copies.
+    assert order == ["refresh", "sync"]
+    assert [delay for delay, _ in armed] == list(rows.WAKE_BURST) == [5.0, 10.0, 20.0]
+    # The usage numbers are as old as the sleep, so a forced refresh follows.
+    assert len(app._done) == 1
+    # Each burst step is the same pass, and one already running is not doubled.
+    order.clear()
+    armed[0][1]()
+    assert order == ["refresh", "sync"]
+    app._syncing = True
+    order.clear()
+    armed[1][1]()
+    assert order == []
+
+
+def test_an_ordinary_credential_tick_syncs_the_answers_too(rows, app, monkeypatch):
+    order, armed = [], []
+    monkeypatch.setattr(core, "refresh_slots", lambda: order.append("refresh") or [])
+    monkeypatch.setattr(core, "sync_credentials", lambda live: order.append("sync") or [])
+    monkeypatch.setattr(core, "sync_answers", lambda: order.append("answers") or [])
+    monkeypatch.setattr(rows, "threading", SimpleNamespace(
+        Thread=lambda target, daemon: SimpleNamespace(start=target),
+        Timer=lambda delay, fn: armed.append(delay) or SimpleNamespace(start=lambda: None)))
+    app._syncing = False
+    app._done = []
+    app._last_tick = time.time() - 45
+    rows.ManagerApp._on_credential_tick(app, None)
+    assert order == ["refresh", "sync", "answers"]
+    assert armed == [] and app._done == []
 
 
 def test_fresh_codex_row_draws_an_empty_bar(rows, snap):

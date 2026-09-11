@@ -22,9 +22,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   can name one Claude account and one Codex account at once.
 - A Codex session that a rule has moved restarts in its own tab from the menu, in Terminal and
   iTerm2, and `ccm poke` and automatic start now cover Codex accounts.
+- `ccm log` prints the recent credential events: refreshes, copies handed out and revoked
+  logins, by fingerprint, from `~/.claude-manager/credentials.log`.
 
 ### Fixed
 
+- Credentials are refreshed on every 45 second pass and again when the Mac wakes, so a Mac
+  that sleeps past a token's expiry no longer wakes with every copy of that login expired at
+  once, which the server answered by revoking all of them.
+- A session whose login the server revoked is marked `out` in the menu and in `ccm sessions`,
+  and says it needs `/login` in its own tab. It used to be promised a switch within about
+  thirty seconds, which it could not make: Claude Code stops reading the directory.
 - Choosing an account for a project, profile or the default releases the older session rules
   under it, so every running session in that project moves together instead of the pinned
   ones staying behind. Session rules for terminals that no longer exist are dropped.

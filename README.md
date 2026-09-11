@@ -254,14 +254,29 @@ is once per move, not per turn, and cheapest right after `/clear` or
 
 Several directories holding one account means several copies of one refresh
 token, and a refresh token is single use: whichever session refreshes first
-spends it for the rest. The app's three-minute usage poll refreshes tokens
-with less than thirty minutes left and hands the successor to every copy in
-one pass. This gives it a head start on Claude Code, which refreshes about
-five minutes before expiry, or a tool run's timeout plus five minutes before
-a long run. Every 45 seconds the app also takes the newest credential of each
-lineage, whoever produced it, and hands it to the copies that are behind. A
-session left holding a spent token recovers on its own, because of that same
-thirty-second re-read.
+spends it for the rest. Every 45 seconds the app refreshes any account with
+less than thirty minutes left, hands the successor to every copy of it, and
+takes the newest credential of each lineage, whoever produced it, to the
+copies that are behind. This gives it a head start on Claude Code, which
+refreshes about five minutes before expiry, or a tool run's timeout plus five
+minutes before a long run. A session left holding a spent token recovers on
+its own, because of that same thirty-second re-read.
+
+The app also refreshes when the Mac wakes, and again 5, 10 and 20 seconds
+later. No timer runs while a Mac sleeps, so a Mac that sleeps past an expiry
+wakes with every copy of a login expired at once; two of them then refresh
+with the same spent token, and the server reads that as reuse and revokes the
+whole family.
+
+A session whose login the server revoked says `out` in the status column, in
+red. Claude Code clears the dead token from that directory and then stops
+reading it, so the working login the app writes there afterwards never
+arrives. Run `/login` in that tab, or press ctrl+C twice and run `claude -c`.
+Nothing else in the app can reach it.
+
+`ccm log` prints what has happened to the credentials: every refresh, every
+copy handed out, and every login the server revoked, with a fingerprint of
+each generation and no tokens. The file is `~/.claude-manager/credentials.log`.
 
 The account's own directory is authoritative. A session copy is promoted over
 it only when it is newer *and* the API confirms it belongs to the same
@@ -280,6 +295,7 @@ ccm reset <account>       # spend one Codex reset credit: every window back to 0
 ccm unpin                 # drop this terminal's rule
 ccm add <name>            # print the command that signs an account in
 ccm menubar install       # start the menu bar app at every login
+ccm log                   # recent credential events, newest last
 ```
 
 `ccm shell-init` also defines short aliases: `subs`, `ccwhoami`, `ccsessions`,

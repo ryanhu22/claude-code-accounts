@@ -264,9 +264,23 @@ def _term_or_die() -> str:
     return term
 
 
+def cmd_log(args) -> int:
+    """Print what has happened to the credentials, oldest line first."""
+    lines = core.recent_log(args.number)
+    if not lines:
+        print("no credential events yet")
+        return 0
+    for line in lines:
+        print(line)
+    return 0
+
+
 def cmd_sessions(_args) -> int:
     r = core.bootstrap()
-    live = core.all_sessions()
+    # The transcripts, because they hold the one fact this list cannot get from
+    # the registry: whether the server has logged a session out. A session in
+    # that state ignores the account this table names for it.
+    live = core.all_sessions(with_transcript=True)
     core.prune_session_rules(s.term_id for s in live)
     accts = [core.load_account(n, with_usage=False) for n in core.account_names()]
     if not live:
@@ -282,8 +296,14 @@ def cmd_sessions(_args) -> int:
         wanted, reason = core.resolve(s.cwd, s.term_id,
                                       provider="codex" if s.is_codex else "claude")
         drift = f"  {Y}-> {wanted} on restart{X}" if wanted and wanted != running_on else ""
+        # A logged-out session cannot follow any rule until it restarts, so the
+        # restart is the whole note: naming the account it would come back on
+        # puts a second arrow on the row and answers a later question first.
+        if s.logged_out:
+            drift = f"  {Y}-> run /login in that tab{X}"
+        status = "out" if s.logged_out else (s.status or s.kind)
         pin_mark = "\u25cf" if pinned else " "
-        print(f"{pin_mark} {s.label[:24]:<25} {s.status or s.kind:<7} "
+        print(f"{pin_mark} {s.label[:24]:<25} {status:<7} "
               f"{s.cwd.replace(core.HOME, '~')[:44]:<45} {running_on or '?':<15}"
               f"{D}{reason}{X}{drift}")
     print(f"\n{D}\u25cf = has a rule of its own. `ccm use <account> --session` pins the "
@@ -468,7 +488,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.add_argument("--codex", action="store_true", help="print the Codex sign-in command")
     p.set_defaults(func=cmd_add)
+    p = sub.add_parser("log", help="recent credential events: refreshes, hand-outs "
+                                   "and revoked logins")
+    p.add_argument("-n", "--number", type=int, default=40,
+                   help="how many lines to print (default 40)")
+    p.set_defaults(func=cmd_log)
     args = parser.parse_args(argv)
+    core.enable_file_log()
     return args.func(args)
 
 

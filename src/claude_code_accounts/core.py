@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -106,6 +107,79 @@ def user_agent() -> str:
 
 def oauth_headers() -> dict:
     return {"anthropic-beta": "oauth-2025-04-20", "User-Agent": user_agent()}
+
+
+# --------------------------------------------------------------------------- log
+
+# Credentials move between directories on their own, in the background, from
+# three different passes. When a login breaks there is otherwise nothing left
+# to read: the tokens are gone, the dirs look empty, and the only account of
+# what happened is whatever the user remembers. So every move writes one line.
+# Fingerprints only. A token never goes near this file.
+log = logging.getLogger("claude_code_accounts.credentials")
+
+_log_handler: logging.Handler | None = None
+_log_path = ""
+
+
+def log_file() -> str:
+    return os.path.join(profiles.CCM_HOME, "credentials.log")
+
+
+def enable_file_log() -> None:
+    """Send the credential events to a file, once per process.
+
+    Attached by the two programs a person runs, rather than at import, so a
+    library caller never grows a file it did not ask for. The handler is small
+    on purpose: a megabyte and three backups is about a month of ordinary
+    traffic, and the file is the user's alone to read.
+    """
+    global _log_handler, _log_path
+    path = log_file()
+    if _log_handler is not None and _log_path == path:
+        return
+    from logging.handlers import RotatingFileHandler
+
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3)
+        os.chmod(path, 0o600)
+    except OSError:
+        return            # no home to write in: the app still works, quietly
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    if _log_handler is not None:
+        log.removeHandler(_log_handler)
+        _log_handler.close()
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    # Ours alone. A menu bar app has no console, and a CLI run should not print
+    # credential plumbing over the answer the user asked for.
+    log.propagate = False
+    _log_handler, _log_path = handler, path
+
+
+def recent_log(count: int = 40) -> list[str]:
+    """The last lines of the credential log, oldest first.
+
+    Read whole: the handler caps the file at a megabyte, so the simple read
+    costs less than being clever about seeking to the end of it.
+    """
+    try:
+        with open(log_file()) as f:
+            lines = [line.rstrip("\n") for line in f]
+    except OSError:
+        return []
+    return lines[-max(1, count):]
+
+
+def _where(config_dir: str) -> str:
+    """A config dir as one word, which is its account name for a slot."""
+    return os.path.basename(os.path.abspath(config_dir))
+
+
+def _mark(fp: str | None) -> str:
+    """Enough of a fingerprint to follow one generation through the log."""
+    return (fp or "-")[:8]
 
 
 # --------------------------------------------------------------------------- http
@@ -299,6 +373,7 @@ def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
                 keychain.write_credentials(d, rotated)
                 carry_identity(d, spent, fingerprint(rotated))
                 moved.append(d)
+                log.info("propagate %s %s", _where(d), _mark(fingerprint(rotated)))
         except (locks.LockBusy, RuntimeError):
             continue          # the next pass finds it still spent and retries
     return moved
@@ -389,7 +464,10 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
             if not resp:
                 # invalid_grant means this copy is stranded, not that the
                 # account is gone: a peer dir may hold the live successor.
-                return None if err == "invalid_grant" else current
+                if err == "invalid_grant":
+                    log.info("invalid_grant %s %s", _where(config_dir), _mark(spent))
+                    return None
+                return current
             rotated = _apply(current, resp)
             if not _persist(config_dir, rotated, spent):
                 return rotated
@@ -397,9 +475,34 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
         return blob                       # Claude Code is mid-refresh; try later
     new_fp = fingerprint(rotated)
     if new_fp != spent:
+        log.info("refresh %s %s->%s", _where(config_dir), _mark(spent), _mark(new_fp))
         carry_identity(config_dir, spent, new_fp)
         propagate(spent, resp, skip=config_dir)
     return rotated
+
+
+def refresh_slots(names: Iterable[str] | None = None) -> list[str]:
+    """Rotate every account slot that is close to expiry, and hand it around.
+
+    The usage poll used to be the only thing that did this, every 180 seconds
+    and only while the Mac is awake. A Mac that sleeps through an expiry wakes
+    with nine session copies of one login all expired at once, two of them
+    refresh with the same single-use token, and the server reads that as reuse
+    and revokes the whole family. So the rotation belongs on its own pass, far
+    more often than the API budget allows a usage poll to run.
+
+    Cheap when nothing is due: `live_blob` returns the stored credential
+    without a request or a lock unless it is inside REFRESH_AHEAD of expiry.
+    Returns the accounts whose credential actually changed.
+    """
+    moved = []
+    for name in (account_names() if names is None else list(names)):
+        slot = slot_dir(name)
+        before = fingerprint(keychain.read_credentials(slot, max_age=keychain.RECENT))
+        after = fingerprint(live_blob(slot))
+        if before and after and before != after:
+            moved.append(name)
+    return moved
 
 
 def plan_label(tier: str, account: dict | None = None) -> str:
@@ -934,6 +1037,7 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
                 known = _cached_email(config_dir)
                 if (have and (have.get("expiresAt") or 0) > (blob.get("expiresAt") or 0)
                         and (not known or known == email.lower())):
+                    log.info("keep %s its copy is ahead", _where(config_dir))
                     return False
             keychain.write_credentials(config_dir, blob)
     except (locks.LockBusy, RuntimeError):
@@ -967,6 +1071,9 @@ def hand_out(path: str, want: dict, email: str = "", *, account: str = "") -> bo
     wrote = False
     if not same:
         wrote = adopt(path, want, email=email, keep_newer=True)
+        if wrote:
+            log.info("hand_out %s %s %s", _where(path), account or email or "?",
+                     _mark(fingerprint(want)))
         same = wrote or bool(email and _cached_email(path) == email.lower())
     if account and same:
         _sync_identity(path, account)
@@ -1957,6 +2064,8 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
             if ahead[path] == "mine" and adopt(home, b, email=owner, keep_newer=True):
                 master = b
                 healed.append(home)
+                log.info("promote %s from %s %s", account, _where(path),
+                         _mark(fingerprint(b)))
         want = (identity(home, master)[0].get("email") or "")
         best = fingerprint(master)
         for path in session_paths:
@@ -2693,18 +2802,38 @@ def landed(where: str, live: Iterable[sessions.Session] | None = None,
     once. `applied_out` gives the caller what each directory was handed, so a
     menu can redraw from it instead of reading the directories back.
     """
-    moved, applied = apply_now(live)
+    moved, applied, stuck = apply_now(live)
     if applied_out is not None:
         applied_out.update(applied)
-    if not moved:
-        return where
-    n = len(moved)
-    return (f"{where}. {n} running session{'s' if n != 1 else ''} "
-            f"switch{'' if n != 1 else 'es'} within about 30 seconds")
+        if stuck:
+            applied_out["stuck"] = stuck
+    return where + applied_note(moved, stuck)
+
+
+def applied_note(moved: list[str], stuck: dict[str, str]) -> str:
+    """What a rule change did to the sessions that are running now.
+
+    Two facts, and they were one sentence. A session holding a working login
+    switches by itself within half a minute. A session Claude Code has logged
+    out does not: it stopped re-reading its keychain item when the token was
+    revoked, so it sits on the old account until somebody signs it in again,
+    and promising that one a switch in 30 seconds was simply false.
+    """
+    out = ""
+    if moved:
+        n = len(moved)
+        out += (f". {n} running session{'s' if n != 1 else ''} "
+                f"switch{'' if n != 1 else 'es'} within about 30 seconds")
+    if stuck:
+        k = len(stuck)
+        out += (f". {k} logged-out session{'s' if k != 1 else ''} "
+                f"need{'s' if k == 1 else ''} /login or a restart in "
+                f"{'its tab' if k == 1 else 'their tabs'} to notice it")
+    return out
 
 
 def apply_now(live: Iterable[sessions.Session] | None = None
-              ) -> tuple[list[str], dict[str, str]]:
+              ) -> tuple[list[str], dict[str, str], dict[str, str]]:
     """Hand the current rules to every live session that has a dir of its own.
 
     This is what makes a rule change land without a restart: the session re-reads
@@ -2714,11 +2843,14 @@ def apply_now(live: Iterable[sessions.Session] | None = None
     A session started before it had a dir of its own is skipped; there is
     nowhere to write that only it would see.
 
-    Returns the sessions that moved and, for the caller that wants to redraw
-    without reading anything back, what each directory was given.
+    Returns the sessions that moved, what each directory was given, for the
+    caller that wants to redraw without reading anything back, and the dirs
+    whose session is logged out. The last group was written to like the rest,
+    but a logged-out session has stopped reading, so it is not moving.
     """
     moved: list[str] = []
     applied: dict[str, str] = {}
+    stuck: dict[str, str] = {}
     r = rules()
     credentials: dict[str, tuple[dict | None, str]] = {}
     for sess in (live if live is not None else sessions.live(credential_dirs())):
@@ -2735,9 +2867,12 @@ def apply_now(live: Iterable[sessions.Session] | None = None
             credentials[account] = live_blob(home), _cached_email(home)
         want, email = credentials[account]
         if want and hand_out(path, want, email=email, account=account):
-            moved.append(sess.label)
             applied[path] = account
-    return moved, applied
+            if sess.logged_out:
+                stuck[path] = account
+            else:
+                moved.append(sess.label)
+    return moved, applied, stuck
 
 
 def clear(scope: str, key: str, cwd: str = "",

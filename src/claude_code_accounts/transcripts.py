@@ -13,6 +13,7 @@ file's size and mtime, which makes a refresh that changed nothing free.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import glob
 import json
 import os
@@ -162,8 +163,11 @@ def lifetime(path: str, save: bool = True) -> Totals:
 @dataclass
 class Digest:
     title: str = ""
+    custom_title: str = ""       # the name the session chose for itself
     context_tokens: int = 0
     model: str = ""
+    logged_out: bool = False     # the server refused this session's login
+    logged_out_at: float = 0.0
 
     @property
     def window(self) -> int:
@@ -220,6 +224,43 @@ def digest(path: str) -> Digest:
     return out
 
 
+# What the server says when a session's login is gone. Matched on the parts
+# that name the failure rather than on a whole sentence, because the wording
+# around them is the server's and changes: "API Error: 401 {"type":"error",
+# "error":{"type":"authentication_error","message":"OAuth access token has
+# been revoked"}}. Please run /login".
+REVOKED_MARKS = ("revoked", "authentication_failed", "Please run /login")
+
+
+def _said(message: dict) -> str:
+    """The words of one assistant record, whose content is a list of blocks."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+
+
+def _revoked(message: dict) -> bool:
+    """Whether an error turn is the one failure a session cannot recover from.
+
+    Both halves are required. "OAuth" alone appears in errors about a scope or
+    a beta header, and "revoked" alone appears in errors about an API key that
+    has nothing to do with the login this session runs on.
+    """
+    text = _said(message)
+    return "OAuth" in text and any(mark in text for mark in REVOKED_MARKS)
+
+
+def _epoch(stamp) -> float:
+    """A record's ISO 8601 timestamp in seconds, or 0 when it cannot be read."""
+    try:
+        return _dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _scan(path: str, size: int, tail: int) -> Digest:
     out = Digest()
     try:
@@ -238,8 +279,24 @@ def _scan(path: str, size: int, tail: int) -> Digest:
         kind = d.get("type")
         if kind == "ai-title" and d.get("aiTitle"):
             out.title = str(d["aiTitle"])
+        elif kind == "custom-title" and d.get("customTitle"):
+            # The name the session settled on, written by the session itself.
+            # The registry file carries a name too, and only catches up
+            # sometimes, so the last of these records is the newer fact. Later
+            # records win, which is what renaming a session looks like here.
+            out.custom_title = str(d["customTitle"])
         elif kind == "assistant":
             msg = d.get("message") or {}
+            if d.get("isApiErrorMessage"):
+                # Claude Code writes the server's refusal in as an assistant
+                # turn. A revoked token is the one refusal a session cannot
+                # come back from on its own: it clears the dead credential and
+                # then stops re-reading its keychain item, so a working login
+                # written into its dir afterwards is never noticed.
+                if _revoked(msg):
+                    out.logged_out = True
+                    out.logged_out_at = _epoch(d.get("timestamp"))
+                continue
             usage = msg.get("usage") or {}
             total = sum(int(usage.get(k) or 0) for k in
                         ("input_tokens", "cache_read_input_tokens",
@@ -247,6 +304,9 @@ def _scan(path: str, size: int, tail: int) -> Digest:
             if total:
                 out.context_tokens = total
                 out.model = msg.get("model") or out.model
+                # It answered again, so whatever refused it is over. Only a
+                # real usage block counts: an error turn carries none.
+                out.logged_out, out.logged_out_at = False, 0.0
         elif kind == "system" and d.get("subtype") == "compact_boundary":
             # A compact writes no assistant record, so the last usage block
             # kept describing the context from before it until the next turn.
