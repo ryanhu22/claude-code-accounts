@@ -1236,3 +1236,147 @@ def test_the_credential_log_records_a_refresh(fake_keychain, fake_api, capsys):
 def test_the_log_command_says_when_there_is_nothing_to_show(capsys):
     assert cli.main(["log"]) == 0
     assert capsys.readouterr().out == "no credential events yet\n"
+
+
+@pytest.fixture
+def sole(monkeypatch):
+    """The menu bar app is running, so it is the only thing that may refresh."""
+    monkeypatch.setattr(core, "SOLE_REFRESHER", True)
+
+
+def test_a_generation_is_named_by_its_access_token(fake_api):
+    first = fake_api.blob("a@example.com", gen=2)
+    second = fake_api.blob("a@example.com", gen=2)
+    assert core.fingerprint(first) == core.fingerprint(second)
+    # A copy with no refresh token is still the same generation, which is what
+    # lets every comparison in here go on working while the app strips them.
+    copy = core.session_copy(first)
+    assert core.fingerprint(copy) == core.fingerprint(first)
+    assert "refreshToken" not in copy
+    assert copy["expiresAt"] == first["expiresAt"]
+    assert copy["subscriptionType"] == "max"
+
+
+def test_a_session_copy_cannot_refresh_while_the_app_can(fake_keychain, fake_api, sole):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    copy = stored(fake_keychain, live.config_dir)
+    assert "refreshToken" not in copy
+    assert core.fingerprint(copy) == core.fingerprint(stored(fake_keychain, slot))
+    assert copy["expiresAt"] == stored(fake_keychain, slot)["expiresAt"]
+
+
+def test_hand_out_strips_only_inside_a_session_dir(fake_keychain, fake_api, sole):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    want = stored(fake_keychain, slot)
+    path = core.session_dir("term")
+    Path(path).mkdir(parents=True)
+    assert core.hand_out(path, want, "a@example.com")
+    assert "refreshToken" not in stored(fake_keychain, path)
+    # ~/.claude is not a session dir: a bare `claude` there has to be able to
+    # refresh for itself once the app stops.
+    Path(core.DEFAULT_CONFIG).mkdir(parents=True, exist_ok=True)
+    assert core.hand_out(core.DEFAULT_CONFIG, want, "a@example.com")
+    assert stored(fake_keychain, core.DEFAULT_CONFIG) == want
+
+
+def test_without_the_app_a_session_keeps_the_whole_credential(fake_keychain, fake_api):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, slot)
+
+
+def test_a_rotation_reaches_every_copy_in_the_shape_it_may_hold(
+        fake_keychain, fake_api, sole, monkeypatch):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    Path(core.DEFAULT_CONFIG).mkdir(parents=True, exist_ok=True)
+    keychain.write_credentials(core.DEFAULT_CONFIG, stored(fake_keychain, slot))
+    monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [live.config_dir])
+    keychain.write_credentials(slot, fake_api.blob("a@example.com", gen=1,
+                                                   expires_in=20 * 60))
+    rotated = core.live_blob(slot)
+    assert rotated["refreshToken"] == "a@example.com-refresh2"
+    copy = stored(fake_keychain, live.config_dir)
+    assert "refreshToken" not in copy
+    assert copy["accessToken"] == rotated["accessToken"]
+    full = stored(fake_keychain, core.DEFAULT_CONFIG)
+    assert full["accessToken"] == rotated["accessToken"]
+    assert full["refreshToken"] == rotated["refreshToken"]
+
+
+def test_sync_takes_the_refresh_token_off_a_full_copy(fake_keychain, fake_api, sole):
+    core.enable_file_log()
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a"))
+    live = session("term", "/repo", "a")
+    # What `ccm resolve` or a /login in that tab leaves behind: the whole thing.
+    keychain.write_credentials(live.config_dir, stored(fake_keychain, slot))
+    assert core.sync_credentials([live]) == [live.config_dir]
+    copy = stored(fake_keychain, live.config_dir)
+    assert "refreshToken" not in copy
+    assert core.fingerprint(copy) == core.fingerprint(stored(fake_keychain, slot))
+    assert f"strip {os.path.basename(live.config_dir)}" in Path(core.log_file()).read_text()
+    # Nothing left to take: the pass is quiet from here on.
+    assert core.sync_credentials([live]) == []
+
+
+def test_quitting_gives_the_refresh_tokens_back(fake_keychain, fake_api, sole):
+    slots = {n: known(n, f"{n}@example.com", fake_api, fake_keychain) for n in ("a", "b")}
+    core.save_rules(profiles.Rules(projects={"/a": "a", "/b": "b"}))
+    live = [session(f"t{i}", f"/{n}", n) for i, n in enumerate(("a", "b"))]
+    assert all("refreshToken" not in stored(fake_keychain, s.config_dir) for s in live)
+    assert core.hand_back_refresh_tokens() == [s.config_dir for s in live]
+    for sess, name in zip(live, ("a", "b"), strict=True):
+        assert stored(fake_keychain, sess.config_dir) == stored(fake_keychain, slots[name])
+    # Every copy can refresh again, so a second pass has nothing to hand back.
+    assert core.hand_back_refresh_tokens() == []
+
+
+def test_a_stripped_copy_still_names_its_account(fake_keychain, fake_api, sole):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "a")
+    accts = core.all_accounts(with_usage=False)
+    assert core.dirs_to_accounts([live.config_dir], accts) == {live.config_dir: "a"}
+    owners, prints = core.owners_now([live.config_dir], {}, {}, accts)
+    assert owners == {live.config_dir: "a"}
+    assert prints[live.config_dir] == core.fingerprint(
+        stored(fake_keychain, live.config_dir))
+
+
+def test_the_sleep_pass_rotates_everything_with_hours_left(fake_keychain, fake_api):
+    soon = known("a", "a@example.com", fake_api, fake_keychain)
+    later = known("b", "b@example.com", fake_api, fake_keychain)
+    keychain.write_credentials(soon, fake_api.blob("a@example.com", gen=1,
+                                                   expires_in=2 * 3600))
+    keychain.write_credentials(later, fake_api.blob("b@example.com", gen=1,
+                                                    expires_in=10 * 3600))
+    assert core.refresh_slots() == []             # neither is due on an ordinary pass
+    assert core.refresh_slots(ahead=7 * 3600) == ["a"]
+    assert stored(fake_keychain, soon)["refreshToken"] == "a@example.com-refresh2"
+    assert stored(fake_keychain, later)["refreshToken"] == "b@example.com-refresh1"
+
+
+def test_sync_keeps_the_default_dir_on_the_account_it_is_signed_in_as(
+        fake_keychain, fake_api):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    Path(core.DEFAULT_CONFIG).mkdir(parents=True, exist_ok=True)
+    Path(core.HOME, ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "a@example.com"}}))
+    keychain.write_credentials(core.DEFAULT_CONFIG,
+                               fake_api.blob("a@example.com", gen=0, expires_in=60))
+    assert core.sync_credentials([]) == [core.DEFAULT_CONFIG]
+    assert stored(fake_keychain, core.DEFAULT_CONFIG) == stored(fake_keychain, slot)
+    assert core.sync_credentials([]) == []
+
+
+def test_sync_leaves_the_default_dir_alone_when_no_account_matches(
+        fake_keychain, fake_api):
+    known("a", "a@example.com", fake_api, fake_keychain)
+    Path(core.DEFAULT_CONFIG).mkdir(parents=True, exist_ok=True)
+    Path(core.HOME, ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "gone@example.com"}}))
+    stale = fake_api.blob("gone@example.com", gen=1, expires_in=60)
+    keychain.write_credentials(core.DEFAULT_CONFIG, stale)
+    assert core.sync_credentials([]) == []
+    assert stored(fake_keychain, core.DEFAULT_CONFIG) == stale

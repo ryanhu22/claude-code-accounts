@@ -252,21 +252,39 @@ is once per move, not per turn, and cheapest right after `/clear` or
 
 ### Keeping the copies alive
 
-Several directories holding one account means several copies of one refresh
-token, and a refresh token is single use: whichever session refreshes first
-spends it for the rest. Every 45 seconds the app refreshes any account with
-less than thirty minutes left, hands the successor to every copy of it, and
-takes the newest credential of each lineage, whoever produced it, to the
-copies that are behind. This gives it a head start on Claude Code, which
-refreshes about five minutes before expiry, or a tool run's timeout plus five
-minutes before a long run. A session left holding a spent token recovers on
-its own, because of that same thirty-second re-read.
+Several directories holding one account means several copies of one login, and
+the refresh token inside a login is single use: whichever session spends it
+first strands the rest. So while the menu bar app runs, it is the only thing
+that refreshes an account. Every session directory holds an access token and
+no refresh token, so no session can spend one. Claude Code accepts a login
+like that and sends the access token it finds until the app replaces it.
 
-The app also refreshes when the Mac wakes, and again 5, 10 and 20 seconds
-later. No timer runs while a Mac sleeps, so a Mac that sleeps past an expiry
-wakes with every copy of a login expired at once; two of them then refresh
-with the same spent token, and the server reads that as reuse and revokes the
-whole family.
+The app rotates an account half an hour before its token expires, again when
+the Mac is about to sleep, and again when the Mac wakes. Each new access token
+goes straight to every copy of that account, and the 45 second pass picks up
+whatever was busy at the time. A session left holding an old token catches up
+on its own, because Claude Code re-reads its keychain item about every thirty
+seconds.
+
+Rotating before a sleep matters as much as rotating after a wake. No timer
+runs while a Mac sleeps, so a Mac that slept past an expiry used to wake with
+every copy of a login expired at once; two of them then refreshed with the
+same spent token, and the server read that as reuse and revoked the whole
+family. The app now goes to sleep on tokens with hours of life ahead of them,
+and it looks again on wake, and 5, 10 and 20 seconds after that.
+
+Quit the app, or stop it with `launchctl`, and it writes the refresh tokens
+back into every session directory on the way out. The sessions then refresh on
+their own, the way they did before the app existed, and two sessions on one
+account can collide again. The app is what makes several sessions per account
+safe. `ccm resolve` hands out a whole login too, because a machine with no app
+running has nothing else to refresh for it; the app takes the refresh token
+off that copy on its next pass.
+
+`~/.claude` is a copy as well, for anything that runs `claude` without the
+shell wrapper. The app keeps it on the login of the account it is signed in
+as. That one keeps its refresh token, so a bare `claude` can still refresh
+while the app is not running.
 
 A session whose login the server revoked says `out` in the status column, in
 red. Claude Code clears the dead token from that directory and then stops

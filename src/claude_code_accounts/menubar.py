@@ -15,6 +15,7 @@ import datetime as _dt
 import glob
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -34,6 +35,11 @@ WAKE_GAP_SECONDS = 120
 # first seconds strands its siblings until the successor is handed around, and
 # 45 seconds is too long to leave nine sessions racing for one token.
 WAKE_BURST = (5.0, 10.0, 20.0)
+# How much of a token's life must be left for the sleep pass to leave it alone.
+# Rotating everything with under seven hours on it means a short sleep never
+# crosses an expiry at all, and a long one wakes on the freshest token we could
+# have held. The wake pass covers the rest.
+SLEEP_AHEAD = 7 * 3600
 FLASH_SECONDS = 30             # how long the last rule change stays on screen
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
@@ -1123,6 +1129,12 @@ def _waker_class() -> type:
                 except Exception:
                     pass      # a failed catch-up must not take the app down
 
+            def willSleep_(self, _note):
+                try:
+                    self.owner._on_sleep()
+                except Exception:
+                    pass      # nor must a failed rotation on the way down
+
         _WAKER = CCMWakeWatcher
     return _WAKER
 
@@ -1171,6 +1183,11 @@ class ManagerApp(rumps.App):
         self._last_tick = 0.0
         self._hide_from_dock()
         core.enable_file_log()
+        # From here on this process is the only thing that may spend a refresh
+        # token: every copy it hands a session carries the access token alone.
+        # Set before the first refresh, so no full copy goes out first.
+        core.SOLE_REFRESHER = True
+        self._watch_stop()
         self.refresh_now(None)
         self._watch_menu()
         _start_timer(self._on_refresh_tick, REFRESH_SECONDS)
@@ -1195,13 +1212,39 @@ class ManagerApp(rumps.App):
         except Exception:
             self._watcher = None
 
+    def _watch_stop(self) -> None:
+        """Hand the refresh tokens back when launchctl stops the app.
+
+        `launchctl` and a logout both send SIGTERM, which ends the process
+        without going through the Quit item, and every session would be left
+        holding a token it cannot renew. Optional by design: this only works on
+        the main thread, and without it the Quit item still does the job.
+        """
+        try:
+            signal.signal(signal.SIGTERM, self._on_stop)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _on_stop(_signum, _frame) -> None:
+        try:
+            core.hand_back_refresh_tokens()
+        finally:
+            # Not sys.exit: a SystemExit raised inside a signal handler has to
+            # unwind the AppKit run loop, which may be blocked in C.
+            os._exit(0)
+
     def _watch_wake(self) -> None:
-        """Ask macOS to tell us when the Mac wakes. Optional by design.
+        """Ask macOS to tell us when the Mac sleeps and wakes. Optional by design.
 
         Waking is the one moment a token can already be expired in nine
         directories at once, because no timer fires while the machine sleeps.
         Without this the app still catches up, from the gap it sees between two
         credential ticks; the notification is simply sooner and exact.
+
+        Sleeping is the other half: a token rotated on the way down is the
+        freshest one the Mac can wake up holding, and a short sleep then never
+        crosses an expiry at all.
         """
         try:
             import AppKit
@@ -1209,9 +1252,11 @@ class ManagerApp(rumps.App):
             # NSNotificationCenter does not retain an observer, so the app holds it.
             self._waker = _waker_class().alloc().init()
             self._waker.owner = self
-            AppKit.NSWorkspace.sharedWorkspace().notificationCenter(
-            ).addObserver_selector_name_object_(
+            center = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+            center.addObserver_selector_name_object_(
                 self._waker, "didWake:", AppKit.NSWorkspaceDidWakeNotification, None)
+            center.addObserver_selector_name_object_(
+                self._waker, "willSleep:", AppKit.NSWorkspaceWillSleepNotification, None)
         except Exception:
             self._waker = None
 
@@ -1418,6 +1463,32 @@ class ManagerApp(rumps.App):
         self._credential_pass(then_refresh=True)
         for delay in WAKE_BURST:
             threading.Timer(delay, self._credential_pass).start()
+
+    def _quit(self, _sender) -> None:
+        """Give the sessions their refresh tokens back, then go.
+
+        While the app runs it is the only thing that rotates these logins, and
+        the copies it hands out cannot rotate themselves. The moment it stops,
+        that has to be true the other way around again.
+        """
+        core.hand_back_refresh_tokens()
+        rumps.quit_application()
+
+    def _on_sleep(self) -> None:
+        """Go to sleep on the freshest tokens the accounts can hold.
+
+        Rotating half an hour ahead is right while the timers run, and useless
+        against a sleep: a Mac that goes down with six hours left on a token
+        and comes back nine hours later wakes every copy of it expired at once.
+        Rotating everything under seven hours here costs one request per
+        account at most, and makes a short sleep cross no expiry at all.
+
+        On a thread, because macOS is waiting for this notification to return
+        before it sleeps, and the rotation waits on the network.
+        """
+        core.log.info("sleep")
+        threading.Thread(target=lambda: core.refresh_slots(ahead=SLEEP_AHEAD),
+                         daemon=True).start()
 
     def _credential_pass(self, *, answers: bool = False,
                          then_refresh: bool = False) -> None:
@@ -1664,7 +1735,7 @@ class ManagerApp(rumps.App):
         _set_icon(self._refresh_item, "arrow.clockwise")
         self._style_refresh_row(snap)
         self.menu.add(self._refresh_item)
-        quit_item = rumps.MenuItem("Quit", callback=rumps.quit_application)
+        quit_item = rumps.MenuItem("Quit", callback=self._quit)
         _set_icon(quit_item, "power")
         self.menu.add(quit_item)
         _forget(stale)          # the tree this one replaced

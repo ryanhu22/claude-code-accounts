@@ -208,13 +208,45 @@ def _get(path: str, token: str, timeout: int = 20) -> dict:
 # --------------------------------------------------------------------------- tokens
 
 def fingerprint(blob: dict | None) -> str | None:
-    """Identity of a credential GENERATION, from its refresh token.
+    """Identity of a credential GENERATION, from its access token.
 
     Two config dirs showing the same fingerprint hold the same copy of one
-    login, so a rotation in either one strands the other.
+    login, so a rotation in either one strands the other. A rotation replaces
+    both tokens at once, so either one identifies the generation; the access
+    token is the one EVERY copy carries. A session copy handed out while the
+    app is the sole refresher has no refresh token at all, and it still has to
+    compare equal to the slot it was cut from.
     """
-    token = (blob or {}).get("refreshToken")
+    token = (blob or {}).get("accessToken")
     return hashlib.sha256(token.encode()).hexdigest()[:16] if token else None
+
+
+# While the menu bar app runs, it is the only thing allowed to spend a refresh
+# token, and it sets this at startup. A refresh token is single use, and a Mac
+# that sleeps past an expiry wakes every copy of one login expired at the same
+# instant: two of them refresh with the same token, and the server reads that
+# as reuse and revokes the whole family. The app cannot win that race, so it
+# removes it. A session copy carries the access token and nothing to rotate it
+# with, which Claude Code accepts, and the app hands out each successor. The
+# CLI never sets this: a machine with no app running has nothing else to
+# refresh for its sessions.
+SOLE_REFRESHER = False
+
+
+def session_copy(blob: dict) -> dict:
+    """A login as a session dir may hold it: usable, and unable to rotate.
+
+    Everything a session reads stays, `expiresAt` included. With no refresh
+    token Claude Code sends the access token it finds and ignores a stale local
+    expiry, so a copy like this never tries anything with the server.
+    """
+    return {k: v for k, v in blob.items()
+            if k not in ("refreshToken", "refreshTokenExpiresAt")}
+
+
+def _for_dir(config_dir: str, blob: dict) -> dict:
+    """What a dir may hold, which is less while the app does the rotating."""
+    return session_copy(blob) if SOLE_REFRESHER and is_session_dir(config_dir) else blob
 
 
 # Claude Code refreshes about five minutes before expiry, or a tool run's
@@ -354,7 +386,9 @@ def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
     has the successor.
 
     Only dirs whose stored fingerprint still matches the spent generation are
-    touched, so a dir holding some other login is never overwritten.
+    touched, so a dir holding some other login is never overwritten. A session
+    dir gets the successor's access token alone while the app is the sole
+    refresher, which is all it needs and all it may have.
     """
     if not spent:
         return []
@@ -370,7 +404,7 @@ def propagate(spent: str | None, resp: dict, skip: str) -> list[str]:
                 if fingerprint(cur) != spent:
                     continue  # it moved on while we waited
                 rotated = _apply(cur, resp)
-                keychain.write_credentials(d, rotated)
+                keychain.write_credentials(d, _for_dir(d, rotated))
                 carry_identity(d, spent, fingerprint(rotated))
                 moved.append(d)
                 log.info("propagate %s %s", _where(d), _mark(fingerprint(rotated)))
@@ -396,7 +430,12 @@ def _persist(config_dir: str, rotated: dict, spent: str | None) -> bool:
     written to disk instead, keyed to the generation it replaced, and picked up
     on the next read. This is how an account silently "expires" while nothing
     is wrong with it.
+
+    The app only rotates slots, so a session dir never reaches here; the same
+    rule is applied anyway, to the stash as well as to the keychain item, so no
+    stray call can leave a spendable refresh token behind a session's name.
     """
+    rotated = _for_dir(config_dir, rotated)
     try:
         keychain.write_credentials(config_dir, rotated)
     except RuntimeError:
@@ -433,19 +472,24 @@ def _drop_stash(config_dir: str) -> None:
         pass
 
 
-def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
+def live_blob(config_dir: str, allow_refresh: bool = True,
+              margin: float = REFRESH_AHEAD) -> dict | None:
     """Usable credentials for a config dir, refreshed in place when stale.
 
     The refresh runs under Claude Code's own locks and re-reads the credential
     once held, the same double check Claude Code does, so our refresh and a
     session's refresh can never both spend the same token.
 
+    `margin` is how long before expiry a credential counts as stale. The wider
+    one the sleep pass asks for is what lets the Mac go to sleep on the
+    freshest tokens it can hold.
+
     Returns None only when there is nothing usable: no credential at all, or a
     refresh the server rejected. A network failure returns the stored blob,
     because it is probably still valid.
     """
     blob = keychain.read_credentials(config_dir)
-    if not blob or not allow_refresh or not expiring(blob):
+    if not blob or not allow_refresh or not expiring(blob, margin):
         return blob
     try:
         with locks.credentials(config_dir):
@@ -454,10 +498,10 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
             # already spent, so use it before trying to exchange it again.
             saved = _take_stash(config_dir, current)
             if saved and _persist(config_dir, saved, fingerprint(current)):
-                if not expiring(saved):
+                if not expiring(saved, margin):
                     return saved
                 current = saved
-            if not expiring(current):
+            if not expiring(current, margin):
                 return current            # somebody else refreshed while we waited
             spent = fingerprint(current)
             resp, err = refresh(current)
@@ -481,7 +525,8 @@ def live_blob(config_dir: str, allow_refresh: bool = True) -> dict | None:
     return rotated
 
 
-def refresh_slots(names: Iterable[str] | None = None) -> list[str]:
+def refresh_slots(names: Iterable[str] | None = None,
+                  ahead: float = REFRESH_AHEAD) -> list[str]:
     """Rotate every account slot that is close to expiry, and hand it around.
 
     The usage poll used to be the only thing that did this, every 180 seconds
@@ -492,14 +537,17 @@ def refresh_slots(names: Iterable[str] | None = None) -> list[str]:
     more often than the API budget allows a usage poll to run.
 
     Cheap when nothing is due: `live_blob` returns the stored credential
-    without a request or a lock unless it is inside REFRESH_AHEAD of expiry.
+    without a request or a lock unless it is inside `ahead` of expiry. The
+    sleep pass asks for a much wider margin, because a token rotated on the way
+    into a sleep is the freshest one the Mac can wake up holding.
+
     Returns the accounts whose credential actually changed.
     """
     moved = []
     for name in (account_names() if names is None else list(names)):
         slot = slot_dir(name)
         before = fingerprint(keychain.read_credentials(slot, max_age=keychain.RECENT))
-        after = fingerprint(live_blob(slot))
+        after = fingerprint(live_blob(slot, margin=ahead))
         if before and after and before != after:
             moved.append(name)
     return moved
@@ -1000,6 +1048,11 @@ def is_account_dir(config_dir: str) -> bool:
     return os.path.dirname(os.path.abspath(config_dir).rstrip("/")) == ACCOUNTS_DIR
 
 
+def is_session_dir(config_dir: str) -> bool:
+    """Whether a dir belongs to one terminal, which is what a copy is written to."""
+    return os.path.dirname(os.path.abspath(config_dir)) == os.path.abspath(SESSION_DIRS)
+
+
 def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
           keep_newer: bool = False) -> bool:
     """Write a credential into a config dir under Claude Code's locks.
@@ -1010,6 +1063,9 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
     another's, which then spreads: the answer is used to decide what to copy
     where. With keep_newer and a known email, re-read under the lock so a
     session rotation cannot be replaced by an older copy of the same account.
+
+    A session dir gets `session_copy` of the blob while the app is the sole
+    refresher, so the token it holds cannot be spent by anything but the app.
     """
     # An account's own directory may only ever hold that account's login. It is
     # named for one subscription and everything else treats it as the truth
@@ -1039,7 +1095,7 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
                         and (not known or known == email.lower())):
                     log.info("keep %s its copy is ahead", _where(config_dir))
                     return False
-            keychain.write_credentials(config_dir, blob)
+            keychain.write_credentials(config_dir, _for_dir(config_dir, blob))
     except (locks.LockBusy, RuntimeError):
         return False
     store = _cache_read(IDENTITY_CACHE)
@@ -1683,7 +1739,7 @@ def auto_start(accts: Iterable[Account]) -> list[tuple[str, bool, str]]:
 def context_owners(paths: Iterable[str], accts: Iterable[Account]) -> dict[str, str]:
     """Which account each context is signed in as, without asking the API.
 
-    A context holds a copy of an account's credential, so equal refresh tokens
+    A context holds a copy of an account's credential, so equal fingerprints
     already identify it. Only a context matching no account costs a request,
     which keeps the panel honest while the API is rate limiting us: a failed
     lookup used to just drop the "in use by" mark.
@@ -2022,6 +2078,11 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
     account, because a dir that has not caught up with a rule change is holding
     somebody else's login, and copying that around would mix two accounts up.
 
+    Two passes follow the hand-out: every session copy that still carries a
+    refresh token of the master's generation loses it while the app is the sole
+    refresher, and ~/.claude is brought up to date as one more copy of whichever
+    account it is signed in as.
+
     Keychain work only, apart from that one confirmation, which is cached.
     """
     # account_names stays Claude-only; Codex homes never enter the keychain pass.
@@ -2083,7 +2144,116 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
                 continue
             if adopt(path, master, email=want, keep_newer=True):
                 healed.append(path)
+        healed += _strip_copies(session_paths, master)
+    healed += _sync_default()
     return healed
+
+
+def _strip_copies(session_paths: Iterable[str], master: dict) -> list[str]:
+    """Take the refresh token off every copy that is on the master's generation.
+
+    `ccm resolve` hands out a full copy, because a CLI-only machine has no app
+    to refresh for it, and a /login in one tab writes a whole credential there
+    too. Either way the app is the one rotating that lineage within the minute,
+    so the token in the copy is nothing but a second thing that can spend it.
+    A copy on some OTHER generation is the promotion case above: it is a new
+    lineage, and once it has been promoted its fingerprint is the master's and
+    it is stripped on this same pass.
+    """
+    if not SOLE_REFRESHER:
+        return []
+    stripped, best = [], fingerprint(master)
+    for path in session_paths:
+        copy = keychain.read_credentials(path, max_age=keychain.RECENT)
+        if not copy or not copy.get("refreshToken") or fingerprint(copy) != best:
+            continue
+        try:
+            with locks.credentials(path, timeout=3.0):
+                cur = keychain.read_credentials(path)
+                if not cur or not cur.get("refreshToken") or fingerprint(cur) != best:
+                    continue      # it moved on while we waited
+                keychain.write_credentials(path, session_copy(master))
+                stripped.append(path)
+                log.info("strip %s %s", _where(path), _mark(best))
+        except (locks.LockBusy, RuntimeError):
+            continue              # the next pass finds it still full and retries
+    return stripped
+
+
+def _sync_default() -> list[str]:
+    """Keep ~/.claude on the login of whichever account it is signed in as.
+
+    Anything that runs `claude` without the shell wrapper reads that dir, and
+    nothing kept it current, so it sat on a token that had expired weeks ago.
+    Which account it belongs to is whatever it last authenticated as, matched
+    against the accounts by email.
+
+    It is not a session dir, so it keeps the whole credential: a bare `claude`
+    there has to be able to refresh for itself when the app is not running.
+    """
+    want = (recorded_email(DEFAULT_CONFIG) or _cached_email(DEFAULT_CONFIG)).lower()
+    if not want:
+        return []
+    for name in account_names():
+        home = account_dir(name)
+        master = keychain.read_credentials(home, max_age=keychain.RECENT)
+        if not master:
+            continue
+        email = (identity(home, master)[0].get("email") or "").lower()
+        if email != want:
+            continue
+        if fingerprint(keychain.read_credentials(
+                DEFAULT_CONFIG, max_age=keychain.RECENT)) == fingerprint(master):
+            return []
+        return [DEFAULT_CONFIG] if adopt(
+            DEFAULT_CONFIG, master, email=email, keep_newer=True) else []
+    return []
+
+
+def _session_dirs() -> list[str]:
+    """Every per-terminal config dir on this machine, live terminal or not."""
+    try:
+        entries = sorted(os.listdir(SESSION_DIRS))
+    except OSError:
+        return []                          # no session has ever run
+    out = [os.path.join(SESSION_DIRS, name) for name in entries if name.startswith("s-")]
+    return [path for path in out if os.path.isdir(path)]
+
+
+def hand_back_refresh_tokens() -> list[str]:
+    """Give every session copy its refresh token back, on the app's way out.
+
+    The stripped copies are safe only because something else is rotating for
+    them. Once the app stops, a session holding an access token alone is an
+    hour away from being signed out with no way back, so the tokens go back
+    where they were before the app took them and the sessions fend for
+    themselves again, exactly as they did before.
+
+    Keychain reads and writes only, no network: this runs from the Quit item
+    and from a SIGTERM handler, and anything slower would not finish.
+    """
+    given: list[str] = []
+    dirs = _session_dirs()
+    for name in account_names():
+        master = keychain.read_credentials(slot_dir(name), max_age=keychain.RECENT)
+        if not master or not master.get("refreshToken"):
+            continue
+        mine = fingerprint(master)
+        for path in dirs:
+            copy = keychain.read_credentials(path, max_age=keychain.RECENT)
+            if not copy or copy.get("refreshToken") or fingerprint(copy) != mine:
+                continue
+            try:
+                with locks.credentials(path, timeout=3.0):
+                    cur = keychain.read_credentials(path)
+                    if not cur or cur.get("refreshToken") or fingerprint(cur) != mine:
+                        continue   # it moved on while we waited
+                    keychain.write_credentials(path, master)
+                    given.append(path)
+                    log.info("handback %s", _where(path))
+            except (locks.LockBusy, RuntimeError):
+                continue           # a busy dir keeps its copy; it is still usable
+    return given
 
 
 def gc_session_dirs(live_terms: Iterable[str], max_age: float = 7 * 24 * 3600) -> list[str]:

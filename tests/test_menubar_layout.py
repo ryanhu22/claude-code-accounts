@@ -258,6 +258,33 @@ def test_credential_tick_after_a_sleep_runs_the_wake_burst(rows, app, monkeypatc
     assert order == []
 
 
+def test_the_sleep_notification_rotates_everything_with_hours_left(rows, app, monkeypatch):
+    """A Mac that sleeps on fresh tokens cannot wake past their expiry."""
+    asked = []
+    monkeypatch.setattr(core, "refresh_slots", lambda ahead: asked.append(ahead) or [])
+    monkeypatch.setattr(rows, "threading", SimpleNamespace(
+        Thread=lambda target, daemon: SimpleNamespace(start=target)))
+    rows.ManagerApp._on_sleep(app)
+    assert asked == [7 * 3600] == [rows.SLEEP_AHEAD]
+
+
+def test_quit_gives_the_refresh_tokens_back_first(rows, picker, snap, monkeypatch):
+    """Nothing else refreshes these logins while the app runs, so it undoes that."""
+    picker._snapshot = snap
+    picker.menu = Menu()
+    picker._sessions_heading = "RUNNING SESSIONS"
+    picker._refresh_item = None
+    monkeypatch.setattr(core, "pref", lambda name, default=None: default)
+    order = []
+    monkeypatch.setattr(core, "hand_back_refresh_tokens",
+                        lambda: order.append("handback") or [])
+    monkeypatch.setattr(rows.rumps, "quit_application",
+                        lambda sender=None: order.append("quit"))
+    rows.ManagerApp._rebuild(picker)
+    picker.menu["Quit"].callback(None)
+    assert order == ["handback", "quit"]
+
+
 def test_an_ordinary_credential_tick_syncs_the_answers_too(rows, app, monkeypatch):
     order, armed = [], []
     monkeypatch.setattr(core, "refresh_slots", lambda: order.append("refresh") or [])

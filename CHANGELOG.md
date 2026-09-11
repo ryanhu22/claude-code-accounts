@@ -27,6 +27,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- While the menu bar app runs it is the only thing that refreshes a login: each session holds
+  an access token and no refresh token, so no session can spend one. The app rotates half an
+  hour ahead, before the Mac sleeps and when it wakes, and hands the new access token to every
+  copy. It gives the refresh tokens back when it quits, and it keeps `~/.claude` current too.
 - Credentials are refreshed on every 45 second pass and again when the Mac wakes, so a Mac
   that sleeps past a token's expiry no longer wakes with every copy of that login expired at
   once, which the server answered by revoking all of them.
