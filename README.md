@@ -300,8 +300,8 @@ refreshed, an account whose 7-day window or model-scoped weekly window has no
 clock gets one request, at most once an hour per account. It is off by
 default, because it sends requests on your behalf, and it runs only while the
 menu bar app is running. The request that starts a weekly window starts the
-5-hour window too. Codex accounts are not started automatically yet: that
-needs a request to the Codex backend, which this tool does not send.
+5-hour window too. Codex accounts are started the same way, through the Codex
+CLI's own request.
 
 ## Codex accounts
 
@@ -324,7 +324,10 @@ than a second copy of its refresh token. Each additional account owns a
 Everything else links back to `~/.codex`, so settings and history stay shared.
 
 Windows differ by plan. Pro Lite has a weekly window only; plans with a
-5-hour window show that too.
+5-hour window show that too. `ccm poke <codex account>` and automatic start of
+weekly windows work here as well, by running one tiny `codex exec` request in
+that account's home, because only a request Codex itself makes starts a Codex
+window.
 
 Codex sessions are routed by the same four rules as Claude Code sessions, over
 your Codex accounts. Run `ccm use <codex account>` in a repository and every
@@ -335,9 +338,12 @@ and the Codex answer for the directory you are in.
 
 A rule change takes effect when Codex next starts in that terminal, because
 Codex reads its login at start and keeps it. Press ctrl+C and run `codex`
-again. The logins are shared by symlink, so nothing is ever copied: every home
-that uses an account points at that account's one `auth.json`, which is the
-only way to keep a single-use refresh token from being spent twice.
+again, or, in Terminal and iTerm2, open the session in the menu bar and choose
+"Restart Codex in that tab now", which quits the TUI and resumes the same
+thread on the account the rule names. The logins are shared by symlink, so
+nothing is ever copied: every home that uses an account points at that
+account's one `auth.json`, which is the only way to keep a single-use refresh
+token from being spent twice.
 
 Running Codex sessions are listed beside the Claude Code ones, in `ccm sessions`
 and in the menu bar, with the same columns: the account it spends, the

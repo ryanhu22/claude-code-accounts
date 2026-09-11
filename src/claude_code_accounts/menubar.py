@@ -1787,8 +1787,12 @@ class ManagerApp(rumps.App):
         # It used to test the five hour window alone and name it in the label,
         # so an account whose only stopped clock was the Fable one showed no
         # button at all, and the row it would have fixed kept reading "unused".
-        stopped = [lim for lim in acct.limits if not lim.resets_at]
-        if not acct.is_codex and acct.reading and stopped:
+        # A Codex account is started the same way, by the Codex CLI's own
+        # request. Its model-scoped window has no model to ask for, so the
+        # names on the label are the general windows alone.
+        stopped = [lim for lim in acct.limits
+                   if not lim.resets_at and not (acct.is_codex and lim.scope)]
+        if acct.reading and stopped:
             names = ", ".join(lim.label for lim in stopped)
             _set_icon(self._line(item, f"poke:{acct.name}",
                                  f"Start the {names} window now" if len(stopped) == 1
@@ -1908,19 +1912,34 @@ class ManagerApp(rumps.App):
             # Both tools read their account once and keep it, and each is left
             # in a different way, so the two lines that say how are the row's
             # own rather than one sentence that covers neither exactly.
-            why, how = (("Codex reads its login when it starts, "
-                         "so restart it in this tab:",
-                         "press ctrl+C, then run  codex resume --last")
-                        if sess.is_codex else
-                        ("It reads its account once at launch, so restart this tab:",
-                         "press ctrl+C twice, then run  claude -c"))
-            for line, tone in (
+            if not sess.is_codex:
+                how = ["It reads its account once at launch, so restart this tab:",
+                       "press ctrl+C twice, then run  claude -c"]
+            elif sess.kind == "bg":
+                # A `codex exec` run cannot be resumed and it ends on its own,
+                # so there is nothing to restart here. Saying how to restart it
+                # would be asking the user to throw the run away.
+                how = ["This run keeps the login it started with. "
+                       "The next run follows the rule."]
+            else:
+                how = ["Codex reads its login when it starts, so restart it in this tab:",
+                       "press ctrl+C, then run  codex resume --last"]
+            for line, tone in [
                     (f"Spending {running_on}; {_why(reason)} says {wanted}", "warn"),
-                    (why, "dim"), (how, "dim")):
+                    *((line, "dim") for line in how)]:
                 d = rumps.MenuItem(line, callback=None)
                 _apply_style(d, [("  ", "dim"), (line, tone)], mono=False)
                 item.add(d)
-            if focus.bundle_for_program(sess.term_program) and sess.tty:
+            bundle = focus.bundle_for_program(sess.term_program)
+            # The two lines above are the restart done by hand. Terminal and
+            # iTerm2 can be told to do it instead, and the thread id is what
+            # brings the same conversation back on the account the rule names.
+            if sess.is_codex and sess.kind == "interactive" and bundle and sess.tty:
+                _set_icon(self._line(item, f"restart:{sess.pid}",
+                                     "Restart Codex in that tab now",
+                                     callback=self._make_restart(sess, bundle)),
+                          "arrow.clockwise")
+            if bundle and sess.tty:
                 _set_icon(self._line(item, f"tab:{sess.pid}", "Take me to that tab",
                                      callback=self._make_reveal(sess)),
                           "arrow.up.forward.app")
@@ -2527,6 +2546,29 @@ class ManagerApp(rumps.App):
                 self._notify(f"Could not open that tab: {err}")
         return handler
 
+    def _make_restart(self, sess: sessions.Session, bundle_id: str):
+        def handler(_sender):
+            # Shaped like a poke: the tab has to come forward, the TUI has to
+            # leave, and the resume is typed a second and a half later, all of
+            # it after the menu has closed. So say the click landed first.
+            self._report(True, f"{sess.label}: restarting Codex in that tab…")
+            threading.Thread(target=self._restart, args=(sess, bundle_id),
+                             daemon=True).start()
+        return handler
+
+    def _restart(self, sess: sessions.Session, bundle_id: str) -> None:
+        err = focus.restart_codex(bundle_id, sess.tty, sess.session_id,
+                                  sess.status == "busy")
+        self._later(lambda: self._restarted(sess, err))
+
+    def _restarted(self, sess: sessions.Session, err: str) -> None:
+        if err:
+            # The menu closed on the click, so a failure has nowhere to be read
+            # except an alert, exactly as a failed poke does.
+            self._notify(f"Could not restart Codex in that tab.\n\n{err}")
+            return
+        self._report(True, f"{sess.label}: Codex is starting again on that thread")
+
     def _make_clear(self, scope: str, key: str, cwd: str, provider: str = "claude"):
         def handler(_sender):
             applied: dict[str, str] = {}
@@ -2633,7 +2675,7 @@ class ManagerApp(rumps.App):
             # flash row above lives 30 seconds in a menu nobody is looking at,
             # so a poke that failed was indistinguishable from one that was
             # never wired up.
-            self._notify(f"Could not start the 5h window for {account}.\n\n{message}")
+            self._notify(f"Could not start the windows for {account}.\n\n{message}")
 
     def _make_reset(self, account: str):
         def handler(_sender):
@@ -2667,7 +2709,7 @@ class ManagerApp(rumps.App):
     def _poke_again(self, account: str) -> None:
         acct = next((a for a in self._snapshot.accounts if a.name == account), None)
         if acct and acct.reading and any(not lim.resets_at for lim in acct.limits):
-            core.forget_usage(account)
+            core.forget_usage(core.usage_key(acct))
             self._on_refresh_tick(None, force=True)
 
     def _make_rename(self, account: str):

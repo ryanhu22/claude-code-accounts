@@ -72,11 +72,91 @@ def test_poke_weekly_model_selection(fake_api, requests, data, weekly_only, mode
 def test_stopped_weekly_ignores_ineligible_accounts(fake_api):
     acct = known("a", fake_api, payload(session=None, fable=None))
     assert [lim.label for lim in core.stopped_weekly(acct)] == ["7d", "fable"]
-    assert core.stopped_weekly(replace(acct, provider="codex")) == []
     assert core.stopped_weekly(replace(acct, email=None)) == []
     assert core.stopped_weekly(replace(acct, limits=[])) == []
     running = known("b", fake_api, payload(weekly=RUNNING))
     assert core.stopped_weekly(running) == []
+
+
+def codex_account(weekly=None, name="cx"):
+    """A Codex account as `load_codex_account` builds one, windows and all."""
+    return core.Account(
+        provider="codex", name=name, slot=f"/homes/{name}", email=f"{name}@example.com",
+        limits=[
+            core.Limit(kind="weekly_all", label="7d", percent=0, resets_at=weekly,
+                       span=604800),
+            core.Limit(kind="scoped_weekly", label="spark", percent=0, resets_at=None,
+                       span=604800, scope="spark"),
+        ])
+
+
+@pytest.fixture
+def codex_cli(monkeypatch):
+    """The Codex account "cx", with its CLI recorded rather than run."""
+    homes = []
+    monkeypatch.setattr(core, "codex_account_names", lambda: ["cx"])
+    monkeypatch.setattr(core.codex, "poke",
+                        lambda home: (homes.append(home), (True, ""))[1])
+    return homes
+
+
+def test_poke_runs_the_codex_cli_on_the_accounts_home(monkeypatch, codex_cli):
+    acct = codex_account()
+    monkeypatch.setattr(core, "load_codex_account", lambda name, force=False: acct)
+    assert core.poke("cx") == (True, "1 window group(s) started")
+    assert codex_cli == ["/homes/cx"]
+    # A nickname reaches it too, and the request goes out once per click.
+    assert core.poke("c") == (True, "1 window group(s) started")
+    assert codex_cli == ["/homes/cx", "/homes/cx"]
+
+
+def test_poke_leaves_a_codex_account_alone_when_its_windows_run(monkeypatch, codex_cli):
+    """The model-scoped window is not a reason to send anything.
+
+    Its own model is named only by a display name, so there is no slug to ask
+    for, and a request to any other model would not start it.
+    """
+    monkeypatch.setattr(core, "load_codex_account",
+                        lambda name, force=False: codex_account(weekly=RUNNING))
+    assert core.poke("cx") == (True, "every window is already running")
+    assert core.poke("cx", weekly_only=True) == (True, "every weekly window is already running")
+    assert codex_cli == []
+
+
+def test_poke_passes_on_what_the_codex_cli_said(monkeypatch, codex_cli):
+    monkeypatch.setattr(core, "load_codex_account", lambda name, force=False: codex_account())
+    monkeypatch.setattr(core.codex, "poke", lambda home: (False, "You've hit your usage limit."))
+    assert core.poke("cx") == (False, "You've hit your usage limit.")
+    monkeypatch.setattr(core, "load_codex_account", lambda name, force=False: core.Account(
+        provider="codex", name="cx", slot="/homes/cx", error="login expired"))
+    assert core.poke("cx") == (False, "login expired")
+
+
+def test_codex_account_is_due_and_keyed_apart_from_a_claude_one():
+    acct = codex_account()
+    assert [lim.label for lim in core.stopped_weekly(acct)] == ["7d", "spark"]
+    now = 10000.0
+    assert core.auto_start_due([acct], now, {}) == ["codex:cx"]
+    assert core.auto_start_due([acct], now, {"codex:cx": now}) == []
+    # An account of the same name on the other side has its own attempt.
+    assert core.auto_start_due([acct], now, {"cx": now}) == ["codex:cx"]
+
+
+def test_auto_start_pokes_both_providers_under_their_own_keys(fake_api, monkeypatch):
+    claude = known("cx", fake_api)
+    core.set_pref(core.AUTO_START_PREF, True)
+    poked = []
+
+    def poke(name, *, weekly_only=False):
+        poked.append((name, weekly_only))
+        return True, "1 window group(s) started"
+
+    monkeypatch.setattr(core, "poke", poke)
+    started = core.auto_start([claude, codex_account()])
+    assert [name for name, _ok, _msg in started] == ["cx", "cx"]
+    assert poked == [("cx", True), ("cx", True)]
+    assert set(core.auto_start_attempts()) == {"cx", "codex:cx"}
+    assert core.auto_start([claude, codex_account()]) == []
 
 
 def test_auto_start_due_obeys_hourly_cap(fake_api):

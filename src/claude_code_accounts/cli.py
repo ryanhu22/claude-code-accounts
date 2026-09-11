@@ -426,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account", nargs="?", help="account for new, new name for rename")
     p.add_argument("--path", help="repository (default: this directory)")
     p.set_defaults(func=cmd_profile)
-    p = sub.add_parser("poke", help="spend one token to start an account's 5h window")
+    p = sub.add_parser("poke", help="spend a few tokens to start an account's stopped "
+                                    "usage windows")
     p.add_argument("account")
     p.add_argument("--weekly", action="store_true", help="start only stopped weekly windows")
     p.set_defaults(func=cmd_poke)

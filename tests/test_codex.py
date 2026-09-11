@@ -2,8 +2,10 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -290,6 +292,58 @@ def test_consume_sends_the_cli_request(monkeypatch):
     # A fresh idempotency id per spend: reusing one would make the second
     # click a no-op instead of a second reset.
     assert calls[0][1]["redeem_request_id"] != calls[1][1]["redeem_request_id"]
+
+
+def test_poke_runs_the_cli_in_a_throwaway_directory(monkeypatch):
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        seen["work_exists"] = os.path.isdir(argv[3])
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(codex.subprocess, "run", run)
+    assert codex.poke("/homes/work") == (True, "")
+    assert seen["argv"][:3] == ["codex", "exec", "-C"]
+    assert seen["argv"][4:] == ["--skip-git-repo-check", "-s", "read-only",
+                                "-o", "/dev/null", "Reply with only the word ok."]
+    assert seen["kwargs"]["env"]["CODEX_HOME"] == "/homes/work"
+    assert seen["kwargs"]["stdin"] is subprocess.DEVNULL
+    assert seen["kwargs"]["timeout"] == 120
+    # A real directory while the request runs, and nothing left behind after it.
+    assert seen["work_exists"] and not os.path.exists(seen["argv"][3])
+
+
+def test_poke_reports_the_line_the_cli_ended_on(monkeypatch):
+    monkeypatch.setattr(codex.subprocess, "run", lambda argv, **kwargs: SimpleNamespace(
+        returncode=1, stdout="",
+        stderr="stream error\n\nYou've hit your usage limit. Try again in 2 days.\n"))
+    assert codex.poke("/homes/work") == (
+        False, "You've hit your usage limit. Try again in 2 days.")
+
+
+def test_poke_falls_back_to_stdout_then_to_the_exit_code(monkeypatch):
+    out = SimpleNamespace(returncode=3, stdout="rate limited\n", stderr=" \n")
+    monkeypatch.setattr(codex.subprocess, "run", lambda argv, **kwargs: out)
+    assert codex.poke("/homes/work") == (False, "rate limited")
+    out.stdout = ""
+    assert codex.poke("/homes/work") == (False, "the Codex CLI exited 3")
+
+
+def test_poke_says_when_the_cli_is_missing_or_slow(monkeypatch):
+    def missing(argv, **kwargs):
+        raise OSError("No such file or directory: 'codex'")
+
+    monkeypatch.setattr(codex.subprocess, "run", missing)
+    assert codex.poke("/homes/work") == (False, "No such file or directory: 'codex'")
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 120)
+
+    monkeypatch.setattr(codex.subprocess, "run", slow)
+    assert codex.poke("/homes/work") == (
+        False, "the Codex CLI did not answer within two minutes")
 
 
 def test_usage_carries_the_soonest_credit_expiry(monkeypatch, payload):

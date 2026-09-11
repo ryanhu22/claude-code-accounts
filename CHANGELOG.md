@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The menu moves a Codex session the same way it moves a Claude Code one: a Codex row lists
   Codex accounts, says which rule chose the one it spends, and every profile and the default
   can name one Claude account and one Codex account at once.
+- A Codex session that a rule has moved restarts in its own tab from the menu, in Terminal and
+  iTerm2, and `ccm poke` and automatic start now cover Codex accounts.
 
 ### Fixed
 

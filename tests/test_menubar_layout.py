@@ -4,15 +4,17 @@ import importlib.util
 import json
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
-from claude_code_accounts import core, glyphs, oauth, profiles, sessions, transcripts
+from claude_code_accounts import core, focus, glyphs, oauth, profiles, sessions, transcripts
 
 CODEX_HOME = "/homes/codex"
+THREAD = "0199c0f4-4c4b-7b52-9e1e-f0b1b4d0a4e1"
 
 
 @pytest.fixture
@@ -142,12 +144,49 @@ def test_codex_session_row_reads_the_codex_rules(rows, picker, snap):
     snap.rules.codex_sessions["T2"] = "cx-night"
     item = rows.ManagerApp._session_item(picker, snap.sessions[1], snap)
     said = titles(item)
-    assert "Codex reads its login when it starts, so restart it in this tab:" in said
-    assert "press ctrl+C, then run  codex resume --last" in said
-    assert not any("claude -c" in line for line in said)
+    # A `codex exec` run cannot be resumed, so it is never asked to restart.
+    assert "This run keeps the login it started with. The next run follows the rule." in said
+    assert not any("codex resume" in line or "claude -c" in line for line in said)
+    assert "restart:22" not in said and "tab:22" in said
     # Only Codex accounts, and the pin it already has can be dropped.
     assert [line for line in said if line.startswith("session:T2:")] == ["session:T2:cx"]
     assert "clear:session:T2:codex" in said
+
+
+def test_interactive_codex_row_restarts_in_its_own_tab(rows, picker, snap, monkeypatch):
+    """A Codex TUI is quit and resumed in place, on the thread it already holds."""
+    sess = replace(snap.sessions[1], pid=24, kind="interactive", status="idle",
+                   session_id=THREAD)
+    snap.sessions = [snap.sessions[0], sess]
+    snap.rules.codex_sessions["T2"] = "cx-night"
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    said = titles(item)
+    assert "Codex reads its login when it starts, so restart it in this tab:" in said
+    assert "press ctrl+C, then run  codex resume --last" in said
+    assert said.index("restart:24") < said.index("tab:24")
+    assert words(item["restart:24"]).strip() == "Restart Codex in that tab now"
+
+    calls = []
+    monkeypatch.setattr(focus, "restart_codex", lambda *args: calls.append(args) or "")
+    monkeypatch.setattr(rows.threading, "Thread",
+                        lambda target, args, daemon: SimpleNamespace(
+                            start=lambda: target(*args)))
+    picker._done, picker._lock = [], threading.Lock()
+    picker._report = Mock()
+    item["restart:24"].callback(None)
+    assert calls == [("com.apple.Terminal", "ttys002", THREAD, False)]
+    for follow_up in picker._done:
+        follow_up()
+    assert picker._report.call_args_list[-1].args == (
+        True, "fixtures: Codex is starting again on that thread")
+
+
+def test_a_restart_that_fails_interrupts(rows, picker, monkeypatch, snap):
+    sess = replace(snap.sessions[1], kind="interactive", session_id=THREAD)
+    picker._notify = Mock()
+    rows.ManagerApp._restarted(picker, sess, "that tab is gone")
+    assert picker._notify.call_args.args == (
+        "Could not restart Codex in that tab.\n\nthat tab is gone",)
 
 
 def test_claude_session_row_keeps_its_own_restart_line(rows, picker, snap):
@@ -220,6 +259,18 @@ def test_codex_account_submenu_lists_its_sessions(rows, picker, snap):
     assert "runhead:acct:cx" not in said
     assert "lg:run:acct:cx" in said and "run:acct:cx:22" in said
     assert "run:acct:cx:21" not in said
+
+
+def test_codex_account_row_offers_to_start_its_stopped_windows(rows, picker, snap):
+    """The general windows only: the model-scoped one has no model to ask for."""
+    acct = snap.accounts[1]
+    acct.limits = [
+        core.Limit(kind="weekly_all", label="7d", percent=0, resets_at=None, span=604800),
+        core.Limit(kind="scoped_weekly", label="spark", percent=0, resets_at=None,
+                   span=604800, scope="spark"),
+    ]
+    item = rows.ManagerApp._account_item(picker, acct, snap)
+    assert words(item["poke:cx"]).strip() == "Start the 7d window now"
 
 
 def test_rebuilt_menu_counts_sessions_of_both_tools(rows, picker, snap, monkeypatch):

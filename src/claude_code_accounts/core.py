@@ -1409,20 +1409,23 @@ def poke(name: str, *, weekly_only: bool = False) -> tuple[bool, str]:  # noqa: 
     the Fable row is, only starts on a request to that model, so starting the
     others left it reading "unused" and the account looked half awake. Each
     window that still has no reset time gets the request that starts it.
+
+    A Codex account is started the same way but through `_poke_codex`, because
+    the request that starts a Codex window is the Codex CLI's, not ours.
     """
     try:
         if name in codex_account_names():
-            return False, "Poking a Codex account is not supported"
+            return _poke_codex(name, weekly_only)
         try:
             name = resolve_account(name)
         except UnknownAccount as original:
             # Claude nicknames keep their meaning even when Codex has a match.
             try:
-                provider, _ = resolve_any(name)
+                provider, found = resolve_any(name)
             except UnknownAccount:
                 raise original from None
             if provider == "codex":
-                return False, "Poking a Codex account is not supported"
+                return _poke_codex(found, weekly_only)
             raise original
     except UnknownAccount as e:
         return False, str(e)
@@ -1475,17 +1478,55 @@ def poke(name: str, *, weekly_only: bool = False) -> tuple[bool, str]:  # noqa: 
     return True, f"{len(started)} window group(s) started"
 
 
+def _poke_codex(name: str, weekly_only: bool = False) -> tuple[bool, str]:
+    """Start a Codex account's stopped windows, by running the Codex CLI once.
+
+    Codex counts one request against every general window at once, so there is
+    no set of models to work out the way there is for Claude: one request does
+    the whole job. A model-scoped Codex window is left alone. The payload names
+    it only by a display name, so there is no model slug to ask for, and a
+    request to the wrong model would start nothing.
+    """
+    acct = load_codex_account(name, force=True)
+    if not acct.signed_in:
+        return False, acct.error or "not signed in"
+    stopped = [lim for lim in acct.limits
+               if not lim.resets_at and not lim.scope
+               and (not weekly_only or lim.span == 604800)]
+    if acct.limits and not stopped:
+        if weekly_only:
+            return True, "every weekly window is already running"
+        return True, "every window is already running"
+    ok, why = codex.poke(acct.slot)
+    if not ok:
+        return False, why
+    forget_usage(usage_key(acct))
+    return True, "1 window group(s) started"
+
+
+def usage_key(acct: Account) -> str:
+    """Where an account's cached usage and attempts live.
+
+    Names are unique within a provider and the cache is shared by both, so a
+    Claude account and a Codex account with one name would read and overwrite
+    each other's entry. The Codex side carries a prefix, as `load_codex_account`
+    already writes it.
+    """
+    return f"codex:{acct.name}" if acct.is_codex else acct.name
+
+
 def stopped_weekly(acct: Account) -> list[Limit]:
-    """Find weekly windows that can start on this signed-in Claude account."""
-    if acct.is_codex or not acct.signed_in or not acct.reading:
+    """Find weekly windows that can start on this signed-in account."""
+    if not acct.signed_in or not acct.reading:
         return []
     return [lim for lim in acct.limits if lim.span == 604800 and not lim.resets_at]
 
 
 def auto_start_due(accts: Iterable[Account], now: float,
                    attempts: dict[str, float]) -> list[str]:
-    return [acct.name for acct in accts if stopped_weekly(acct)
-            and now - attempts.get(acct.name, 0) >= AUTO_START_RETRY]
+    """The accounts due a start, by usage key rather than by bare name."""
+    return [usage_key(acct) for acct in accts if stopped_weekly(acct)
+            and now - attempts.get(usage_key(acct), 0) >= AUTO_START_RETRY]
 
 
 def auto_start_attempts() -> dict[str, float]:
@@ -1493,9 +1534,9 @@ def auto_start_attempts() -> dict[str, float]:
             if "auto_start_at" in entry}
 
 
-def note_auto_start(name: str, now: float) -> None:
+def note_auto_start(key: str, now: float) -> None:
     store = _cache_read()
-    store.setdefault(name, {})["auto_start_at"] = now
+    store.setdefault(key, {})["auto_start_at"] = now
     _cache_write(store)
 
 
@@ -1505,19 +1546,22 @@ def auto_start(accts: Iterable[Account]) -> list[tuple[str, bool, str]]:
     Starting a 5-hour window while idle gains nothing, so only stopped weekly
     windows count. The request starts the 5-hour window too. Attempts stay an
     hour apart per account so a failure does not send a request every refresh.
-    This sends real requests on the user's behalf. Automatic start stays off
-    unless they turn it on.
+    Codex accounts come through here as well, and their request is the Codex
+    CLI's own. This sends real requests on the user's behalf. Automatic start
+    stays off unless they turn it on.
     """
     results: list[tuple[str, bool, str]] = []
     try:
         if not pref(AUTO_START_PREF, False):
             return results
         now = time.time()
-        names = auto_start_due(accts, now, auto_start_attempts())
-        for name in names:
+        for key in auto_start_due(accts, now, auto_start_attempts()):
+            # The attempt is remembered under the usage key, which is what
+            # keeps two providers apart; the account is poked by its own name.
+            name = key.split(":", 1)[1] if key.startswith(f"{codex.PROVIDER}:") else key
             try:
                 # Count the attempt even if the process stops during the request.
-                note_auto_start(name, time.time())
+                note_auto_start(key, time.time())
                 ok, msg = poke(name, weekly_only=True)
             except Exception as e:
                 ok, msg = False, str(e)

@@ -21,6 +21,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import uuid
@@ -504,6 +505,44 @@ def spendable_credits(details: dict) -> list[dict]:
            if isinstance(c, dict) and c.get("status") == "available"
            and c.get("is_supported_by_plan", True)]
     return sorted(out, key=lambda c: c.get("expires_at") or "")
+
+
+def _last_line(text: str) -> str:
+    """The last line that says something, which is where the CLI puts why."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def poke(home: str) -> tuple[bool, str]:
+    """Spend a few tokens on this login to start the windows that have no clock.
+
+    The request goes out through the CLI rather than the usage endpoint, so it
+    is exactly the request Codex itself would send and the server counts it the
+    way it counts real work. It runs read only, in a throwaway directory that
+    is no repository, so the model has nothing to read and nothing to change.
+
+    Returns (True, "") when the request landed, else why not, short enough to
+    put in a menu row.
+    """
+    work = tempfile.mkdtemp(prefix="ccm-poke-")
+    try:
+        r = subprocess.run(
+            ["codex", "exec", "-C", work, "--skip-git-repo-check", "-s", "read-only",
+             "-o", "/dev/null", "Reply with only the word ok."],
+            capture_output=True, text=True, timeout=120,
+            stdin=subprocess.DEVNULL, env={**os.environ, "CODEX_HOME": home})
+    except subprocess.TimeoutExpired:
+        return False, "the Codex CLI did not answer within two minutes"
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)[:160] or "the Codex CLI could not be run"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if r.returncode == 0:
+        return True, ""
+    # A rate limit is the answer the user most wants to read, and the CLI
+    # prints it as its last line ("You've hit your usage limit...").
+    why = _last_line(r.stderr) or _last_line(r.stdout)
+    return False, (why or f"the Codex CLI exited {r.returncode}")[:160]
 
 
 def short_name(name: str) -> str:

@@ -18,6 +18,7 @@ the query fails fast, and this backs off rather than prompting every second.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import time
@@ -227,12 +228,81 @@ return "no tab"''',
 }
 
 
+# Quitting the Codex TUI and starting it again on the same thread. ctrl+D on
+# an empty prompt quits at once, where ctrl+C only asks for a second ctrl+C.
+#
+# iTerm2 writes into the session that holds the tty, which needs no focus at
+# all. Terminal has no such command, so its two lines go through System Events,
+# which types into whatever is in front: the tab has to be there first, and
+# still be there a moment later, or the resume lands in another app.
+ITERM_QUIT = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          tell s to write text (ASCII character 4) newline false
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no tab"'''
+
+ITERM_RESUME = '''
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if tty of s is "{tty}" then
+          tell s to write text "codex resume {thread}"
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no tab"'''
+
+TERMINAL_QUIT = 'tell application "System Events" to key code 2 using control down'
+
+TERMINAL_RESUME = ('tell application "System Events" to '
+                   'keystroke "codex resume {thread}" & return')
+
+# Codex thread ids are uuids out of Codex's own database. Nothing else is ever
+# typed into a terminal: the shape is checked before the id reaches a script.
+THREAD_ID = re.compile(r"^[0-9a-f-]{36}$")
+
+# How long the TUI gets to leave before the resume line is typed. Typing into
+# a Codex that is still shutting down would put the line nowhere.
+RESTART_WAIT = 1.5
+
+
 def bundle_for_program(term_program: str) -> str:
     """The bundle id behind a TERM_PROGRAM value, so a session names its app."""
     for bundle, (program, _script) in TERMINALS.items():
         if program and program == term_program:
             return bundle
     return ""
+
+
+def _run_script(script: str, wants_ok: bool = False) -> str:
+    """One AppleScript: "" when it worked, else why not, in the menu's words."""
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "could not reach the terminal"
+    if r.returncode != 0:
+        return (r.stderr.strip().splitlines() or ["AppleScript refused"])[-1][:120]
+    if wants_ok and r.stdout.strip() != "ok":
+        return "that tab is gone"
+    return ""
+
+
+def _tty_path(tty: str) -> str:
+    return tty if tty.startswith("/dev/") else "/dev/" + tty
 
 
 def reveal_tab(bundle_id: str, tty: str) -> str:
@@ -245,12 +315,42 @@ def reveal_tab(bundle_id: str, tty: str) -> str:
     script = REVEAL.get(bundle_id)
     if not script or not tty:
         return "that terminal cannot be scripted"
-    path = tty if tty.startswith("/dev/") else "/dev/" + tty
-    try:
-        r = subprocess.run(["osascript", "-e", script.format(tty=path)],
-                           capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return "could not reach the terminal"
-    if r.returncode != 0:
-        return (r.stderr.strip().splitlines() or ["AppleScript refused"])[-1][:120]
-    return "" if r.stdout.strip() == "ok" else "that tab is gone"
+    return _run_script(script.format(tty=_tty_path(tty)), wants_ok=True)
+
+
+def restart_codex(bundle_id: str, tty: str, thread_id: str, busy: bool) -> str:
+    """Quit the Codex in a tab and start it again on the same thread.
+
+    A running Codex keeps the login it read at start, so a rule that names
+    another account only reaches it through a restart. The thread is what
+    makes that cheap: `codex resume` comes back to the same conversation, on
+    the account the rule now names. Returns "" on success, else why not, the
+    way `reveal_tab` does.
+    """
+    if not THREAD_ID.match(thread_id or ""):
+        return "that session has no thread to resume"
+    err = reveal_tab(bundle_id, tty)
+    if err:
+        return err
+    if busy:
+        # ctrl+D in the middle of a turn throws away what the turn has done.
+        # The row stays in the menu, so waiting costs one more click.
+        return "that session is in the middle of a turn; wait for it to finish"
+    if bundle_id == "com.googlecode.iterm2":
+        err = _run_script(ITERM_QUIT.format(tty=_tty_path(tty)), wants_ok=True)
+        if err:
+            return err
+        time.sleep(RESTART_WAIT)
+        return _run_script(
+            ITERM_RESUME.format(tty=_tty_path(tty), thread=thread_id), wants_ok=True)
+    if bundle_id == "com.apple.Terminal":
+        if frontmost_bundle_id() != "com.apple.Terminal":
+            return "the terminal did not come to the front"
+        err = _run_script(TERMINAL_QUIT)
+        if err:
+            return err
+        time.sleep(RESTART_WAIT)
+        if frontmost_bundle_id() != "com.apple.Terminal":
+            return "the terminal did not stay in front, so nothing was typed"
+        return _run_script(TERMINAL_RESUME.format(thread=thread_id))
+    return "that terminal cannot be scripted"
