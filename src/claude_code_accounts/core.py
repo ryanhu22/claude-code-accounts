@@ -54,6 +54,9 @@ POKE_MODEL = "claude-haiku-4-5-20251001"
 POKE_MODEL_SCOPED = {"fable": "claude-fable-5-1"}
 AUTO_START_PREF = "auto_start_weekly"
 AUTO_START_RETRY = 3600.0
+# Usage fetched this recently proves the network answered; a wake pass with
+# Wi-Fi still down serves a cached payload whose usage_at is older.
+AUTO_START_FRESH = 300.0
 
 _UA: str | None = None
 
@@ -1687,8 +1690,9 @@ def stopped_weekly(acct: Account) -> list[Limit]:
 
 def auto_start_due(accts: Iterable[Account], now: float,
                    attempts: dict[str, float]) -> list[str]:
-    """The accounts due a start, by usage key rather than by bare name."""
+    """Accounts due by usage key, requiring fresh usage as proof the network answered."""
     return [usage_key(acct) for acct in accts if stopped_weekly(acct)
+            and acct.usage_at and now - acct.usage_at <= AUTO_START_FRESH
             and now - attempts.get(usage_key(acct), 0) >= AUTO_START_RETRY]
 
 
@@ -1712,6 +1716,9 @@ def auto_start(accts: Iterable[Account]) -> list[tuple[str, bool, str]]:
     Codex accounts come through here as well, and their request is the Codex
     CLI's own. This sends real requests on the user's behalf. Automatic start
     stays off unless they turn it on.
+    An account whose usage is not fresh is skipped rather than counted as an
+    attempt, so a wake with the network still down costs nothing and the next
+    pass tries again.
     """
     results: list[tuple[str, bool, str]] = []
     try:

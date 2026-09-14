@@ -82,6 +82,7 @@ def codex_account(weekly=None, name="cx"):
     """A Codex account as `load_codex_account` builds one, windows and all."""
     return core.Account(
         provider="codex", name=name, slot=f"/homes/{name}", email=f"{name}@example.com",
+        usage_at=core.time.time(),
         limits=[
             core.Limit(kind="weekly_all", label="7d", percent=0, resets_at=weekly,
                        span=604800),
@@ -133,9 +134,9 @@ def test_poke_passes_on_what_the_codex_cli_said(monkeypatch, codex_cli):
 
 
 def test_codex_account_is_due_and_keyed_apart_from_a_claude_one():
-    acct = codex_account()
-    assert [lim.label for lim in core.stopped_weekly(acct)] == ["7d", "spark"]
     now = 10000.0
+    acct = replace(codex_account(), usage_at=now)
+    assert [lim.label for lim in core.stopped_weekly(acct)] == ["7d", "spark"]
     assert core.auto_start_due([acct], now, {}) == ["codex:cx"]
     assert core.auto_start_due([acct], now, {"codex:cx": now}) == []
     # An account of the same name on the other side has its own attempt.
@@ -160,14 +161,33 @@ def test_auto_start_pokes_both_providers_under_their_own_keys(fake_api, monkeypa
 
 
 def test_auto_start_due_obeys_hourly_cap(fake_api):
-    acct = known("a", fake_api)
-    running = known("b", fake_api, payload(weekly=RUNNING))
     now = 10000.0
+    acct = replace(known("a", fake_api), usage_at=now)
+    running = replace(known("b", fake_api, payload(weekly=RUNNING)), usage_at=now)
     attempts = {"a": now - core.AUTO_START_RETRY + 1}
     assert core.auto_start_due(iter([acct, running]), now, attempts) == []
     assert attempts == {"a": now - core.AUTO_START_RETRY + 1}
     assert core.auto_start_due([acct, running], now + 1, attempts) == ["a"]
     assert core.auto_start_due([acct, running], now, {}) == ["a"]
+
+
+def test_auto_start_skips_an_account_whose_usage_is_not_fresh(fake_api, requests, monkeypatch):
+    now = core.time.time()
+    monkeypatch.setattr(core.time, "time", lambda: now)
+    acct = replace(known("a", fake_api), usage_at=now - core.AUTO_START_FRESH - 1)
+    assert core.stopped_weekly(acct)
+    assert core.auto_start_due([acct], now, {}) == []
+    fresh = replace(acct, usage_at=now - core.AUTO_START_FRESH)
+    assert core.auto_start_due([fresh], now, {}) == ["a"]
+    assert core.auto_start_due([replace(acct, usage_at=0)], now, {}) == []
+
+    core.set_pref(core.AUTO_START_PREF, True)
+    assert core.auto_start([acct]) == []
+    assert requests.calls == []
+    assert core.auto_start_attempts() == {}
+    assert core.auto_start([fresh]) == [("a", True, "1 window group(s) started")]
+    assert requests.calls == [("a@example.com", core.POKE_MODEL)]
+    assert core.auto_start_attempts() == {"a": now}
 
 
 def test_auto_start_defaults_off(fake_api, requests):
@@ -215,6 +235,7 @@ def test_auto_start_retries_failure_after_one_hour(fake_api, requests, monkeypat
     assert core.auto_start_attempts() == {"a": now}
     assert core.auto_start([acct]) == []
     now += core.AUTO_START_RETRY - 1
+    acct = replace(acct, usage_at=now)
     assert core.auto_start([acct]) == []
     assert len(requests.calls) == 1
 
