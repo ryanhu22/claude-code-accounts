@@ -141,6 +141,199 @@ def words(item):
     return "".join(text for text, *_ in item.segments)
 
 
+@pytest.fixture
+def budget_snap(snap, monkeypatch):
+    """Three known windows leave no fetch note competing with the columns."""
+    monkeypatch.setattr(core, "pref", lambda name, default=None: default)
+    for acct in snap.accounts:
+        acct.limits = [
+            core.Limit("session", "5h", 0, None, span=18000),
+            core.Limit("weekly_all", "7d", 0, None, span=604800),
+            core.Limit("weekly_scoped", "spark" if acct.is_codex else "fable",
+                       0, None, span=604800, scope="model"),
+        ]
+    snap.sessions = [replace(sess, name="Investigate the account routing rules",
+                             context_pct=42, status="busy")
+                     for sess in snap.sessions]
+    return snap
+
+
+def cells(segments):
+    return sum(2 if tone == "glyph" else len(text) for text, tone, *_ in segments)
+
+
+@pytest.mark.parametrize("width", [1080.0, 1728.0, 1440.0])
+def test_menu_budget_leaves_room_for_the_gutters(menubar, width):
+    assert menubar._menu_budget(width) == 0.6 * width - 52
+
+
+def test_row_width_measures_the_styled_row(menubar, monkeypatch):
+    segments = [("  ", "dim"), *menubar._chip("ryantrycallie", menubar.NAME_W)]
+    styled = Mock(return_value=SimpleNamespace(
+        size=lambda: SimpleNamespace(width=cells(segments) * 7.418)))
+    monkeypatch.setattr(menubar, "_styled", styled)
+    assert menubar._row_width(segments) == cells(segments) * 7.418
+    styled.assert_called_once_with(segments)
+
+
+def test_menu_budget_falls_back_to_the_main_screen(menubar, monkeypatch):
+    screen = SimpleNamespace(frame=lambda: SimpleNamespace(size=SimpleNamespace(width=1080)))
+    monkeypatch.setitem(sys.modules, "AppKit", SimpleNamespace(
+        NSScreen=SimpleNamespace(mainScreen=lambda: screen)))
+    assert menubar._menu_budget() == 0.6 * 1080 - 52
+
+
+@pytest.mark.parametrize("width", [None, "no screen width"])
+def test_menu_budget_keeps_every_column_when_measurement_fails(menubar, width):
+    assert menubar._menu_budget(width) == 1e9
+
+
+@pytest.mark.parametrize("family", ["accounts", "sessions", "both"])
+def test_layout_for_checks_the_widest_full_row(rows, picker, budget_snap, monkeypatch, family):
+    monkeypatch.setattr(rows, "_row_width", cells)
+    snap = budget_snap
+    accts = snap.accounts if family != "sessions" else []
+    live = snap.sessions if family != "accounts" else []
+    segments = [rows.ManagerApp._account_segments(picker, acct, snap) for acct in accts]
+    name = "fable" if accts else ""
+    segments += [[("  ", "dim"), *rows._session_segments(sess, name)] for sess in live]
+    widest = max(cells(row) for row in segments)
+    # Measuring a new screen must not mistake yesterday's compact rows for full ones.
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    assert rows._layout_for(widest, accts, live) is rows.FULL
+    assert rows._layout_for(widest - 1, accts, live) is rows.COMPACT
+    assert rows._LAYOUT is rows.COMPACT
+
+
+def test_layout_for_an_empty_menu_is_full(menubar, monkeypatch):
+    monkeypatch.setattr(menubar, "_row_width", cells)
+    monkeypatch.setattr(menubar, "_LAYOUT", menubar.COMPACT)
+    assert menubar._layout_for(0, [], []) is menubar.FULL
+    assert menubar._LAYOUT is menubar.COMPACT
+
+
+def test_layout_for_restores_the_layout_if_a_builder_fails(rows, snap, monkeypatch):
+    monkeypatch.setattr(rows, "_row_width", cells)
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    monkeypatch.setattr(rows, "_session_segments", Mock(side_effect=RuntimeError("no row")))
+    with pytest.raises(RuntimeError, match="no row"):
+        rows._layout_for(83, [], snap.sessions)
+    assert rows._LAYOUT is rows.COMPACT
+
+
+@pytest.mark.parametrize("when", ["unused", "45m", "4h", "34h", "3d", ""])
+def test_compact_buckets_keep_their_columns(rows, monkeypatch, when):
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    monkeypatch.setattr(rows, "_compact_reset", lambda iso: when)
+    monkeypatch.setattr(rows, "_gauge", Mock(side_effect=AssertionError("compact gauge")))
+    lim = core.Limit("session", "5h", 42, None)
+    normal = rows._bucket("5h", lim)
+    assert normal[0] == ("     5h ", "dim")
+    assert normal[1] == (" 42%", "ok")
+    reset = "new" if when == "unused" else when
+    assert normal[-1][0] == f" {reset:<3}"
+    assert len(normal[-1][0][1:]) == rows.COMPACT.reset_w
+    variants = [normal, rows._bucket("5h", lim, show_reset=False),
+                rows._blank_bucket("5h"), rows._bucket("5h", None)]
+    assert {sum(len(text) for text, *_ in row) for row in variants} == {16}
+    assert all("[" not in text and "]" not in text for row in variants for text, *_ in row)
+
+
+def test_compact_bucket_text_fits_sixteen_cells(rows, monkeypatch):
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    unused = core.Limit("session", "5h", 0, None)
+    assert "".join(text for text, *_ in rows._bucket("5h", unused)) == "     5h   0% new"
+    assert "".join(text for text, *_ in rows._bucket("5h", None)) == "     5h    -    "
+    assert "".join(text for text, *_ in rows._blank_bucket("5h")) == "     5h none    "
+    monkeypatch.setattr(rows, "_compact_reset", lambda iso: "2h")
+    lim = core.Limit("session", "5h", 78, None)
+    assert "".join(text for text, *_ in rows._bucket("5h", lim)) == "     5h  78% 2h "
+    lim.percent = 100
+    assert "".join(text for text, *_ in rows._bucket("5h", lim)) == "     5h 100% 2h "
+
+
+def test_compact_account_row_leaves_four_cells_of_headroom(rows, budget_snap, monkeypatch):
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    acct = replace(budget_snap.accounts[0], name="ryantrycallie")
+    row = [("  ", "dim"), *rows._chip(acct.name, rows.NAME_W),
+           ("  ", "dim"), *rows._lamps([]), *rows._account_buckets(acct)]
+    assert cells(row) == 73
+    assert cells(row) <= 76
+
+
+def test_compact_session_row_leaves_four_cells_of_headroom(rows, budget_snap, monkeypatch):
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    sess = replace(budget_snap.sessions[0], cwd="/repos/twelve-chars")
+    assert len(sess.repo) == 12
+    assert len(sess.detail) > rows.COMPACT.detail_w
+    row = [("  ", "dim"), *rows._session_segments(sess, "ryantrycallie")]
+    assert cells(row) == 74
+    assert cells(row) <= 76
+
+
+def test_full_bucket_keeps_its_original_segments(rows, monkeypatch):
+    monkeypatch.setattr(rows, "_LAYOUT", rows.FULL)
+    lim = core.Limit("session", "5h", 0, None)
+    assert rows._bucket("5h", lim) == [
+        ("     5h ", "dim"), ("[", "dim"), ("", "ok"),
+        (rows.TICK * 5, "dim"), ("]", "dim"), ("   0%", "ok"), (" (unused)", "dim")]
+    assert rows._blank_bucket("5h") == [
+        ("     5h ", "dim"), (" " * 7, "dim"), (" none", "dim"), (" " * 9, "dim")]
+
+
+def test_compact_session_keeps_context_status_and_age(rows, budget_snap, monkeypatch):
+    sess = budget_snap.sessions[1]
+    full = rows._session_segments(sess, "cx")
+    detail = sess.detail or sess.label
+    assert (rows._fit(detail, 35), "text") in full
+    assert rows._spent_cell(sess) in full
+    monkeypatch.setattr(rows, "_LAYOUT", rows.COMPACT)
+    compact = rows._session_segments(sess, "cx")
+    assert (rows._fit(detail, 16), "text") in compact
+    assert rows._spent_cell(sess) not in compact
+    assert "tok" not in "".join(text for text, *_ in compact)
+    assert "ctx " not in "".join(text for text, *_ in compact)
+    assert compact[-2] == ("  busy ", rows._status_tone(sess.status, sess.logged_out))
+    assert compact[-1] == full[-1]
+    context = rows._context_bar(sess, named=False)
+    assert compact[-2 - len(context):-2] == context
+
+
+@pytest.mark.parametrize("status_screen", [1080, 1728, None, "missing"])
+def test_rebuild_uses_the_status_items_screen(rows, picker, budget_snap, monkeypatch,
+                                            status_screen):
+    picker._snapshot = budget_snap
+    picker.menu = Menu()
+    picker._refresh_item = None
+    screen = (SimpleNamespace(frame=lambda: SimpleNamespace(
+        size=SimpleNamespace(width=status_screen))) if isinstance(status_screen, int) else None)
+    if status_screen != "missing":
+        picker._nsapp = SimpleNamespace(nsstatusitem=SimpleNamespace(button=lambda:
+            SimpleNamespace(window=lambda: SimpleNamespace(screen=lambda: screen))))
+    monkeypatch.setattr(rows, "_LAYOUT", rows.FULL)
+    monkeypatch.setattr(rows, "_row_width", lambda segments: cells(segments) * 7.418)
+    budget = Mock(return_value=596 if status_screen == 1080 else 1e9)
+    monkeypatch.setattr(rows, "_menu_budget", budget)
+    rows.ManagerApp._rebuild(picker)
+    budget.assert_called_once_with(status_screen if isinstance(status_screen, int) else None)
+    assert rows._LAYOUT is (rows.COMPACT if status_screen == 1080 else rows.FULL)
+    if status_screen == 1080:
+        assert all("tok" not in words(item) for item, _ in picker._session_rows.values())
+        widths = {pid: len(words(item)) for pid, (item, _) in picker._session_rows.items()}
+        # A poll paints fresh readings into the open menu, using its existing columns.
+        budget.reset_mock()
+        budget.return_value = 1e9
+        picker._menu_open = True
+        picker._fresh_sessions = (
+            [replace(sess, context_pct=85, status="idle") for sess in budget_snap.sessions],
+            budget_snap.running_on)
+        rows.ManagerApp._take_sessions(picker)
+        rows.ManagerApp._repaint(picker)
+        budget.assert_not_called()
+        assert rows._LAYOUT is rows.COMPACT
+        assert {pid: len(words(item)) for pid, (item, _) in picker._session_rows.items()} == widths
+
+
 def test_codex_session_row_reads_the_codex_rules(rows, picker, snap):
     snap.rules.codex_sessions["T2"] = "cx-night"
     item = rows.ManagerApp._session_item(picker, snap.sessions[1], snap)

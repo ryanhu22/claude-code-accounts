@@ -19,6 +19,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import NamedTuple
 
 import rumps
 
@@ -60,7 +61,46 @@ CTX_BAR_W = 6
 PROFILE_W = 16
 PROJ_W = 12                # "12 projects" is the widest this gets
 RUN_W = 11                 # "12 running"
+# macOS gives a menu at most this share of its screen: 648 of 1080 and
+# 1036 of 1728 points, measured on macOS 26.
+MENU_WIDTH_SHARE = 0.6
+# Text starts about 22 points in, and the submenu arrow gutter keeps 30 more.
+MENU_CHROME = 52.0
 _CODEX_NAMES: set[str] = set()
+
+
+class Layout(NamedTuple):
+    bars: bool
+    parens: bool
+    reset_w: int
+    number_w: int
+    detail_w: int
+    spent: bool
+    ctx_named: bool
+    status_gap: int
+
+
+FULL = Layout(bars=True, parens=True, reset_w=8, number_w=5,
+              detail_w=DETAIL_W, spent=True, ctx_named=True, status_gap=4)
+COMPACT = Layout(bars=False, parens=False, reset_w=3, number_w=4,
+                 detail_w=16, spent=False, ctx_named=False, status_gap=2)
+_LAYOUT = FULL
+
+
+def _row_width(segments) -> float:
+    return _styled(segments).size().width
+
+
+def _menu_budget(screen_width: float | None = None) -> float:
+    """Leave room for the menu's gutters before measuring rows in points."""
+    try:
+        if screen_width is None:
+            import AppKit
+            screen_width = AppKit.NSScreen.mainScreen().frame().size.width
+        return MENU_WIDTH_SHARE * screen_width - MENU_CHROME
+    except Exception:
+        # A failed measurement says nothing about space, so keep every column.
+        return 1e9
 
 
 def _provider_of(name: str) -> str:
@@ -683,6 +723,7 @@ def _window_cell(label: str, lim) -> list[tuple[str, str, str]]:
 
 def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list[tuple[str, str]]:
     """One usage window: its name, how much is used, and when it comes back."""
+    layout = _LAYOUT
     # The list fills as the window is spent, so the squares are the usage and
     # the number beside them is the same figure. The menu bar battery is the
     # other way round on purpose: a battery is a level, and a level is what is
@@ -706,9 +747,11 @@ def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list
     # percentage as from the next window's name, so it read as belonging to
     # whichever one the eye reached first. The row is the same width either
     # way; the space just moved to where it separates instead of joins.
-    out = [(f"  {label:>5} ", "dim"), *_gauge(spent, BAR_W, tone),
-           # Four wide, so a full window keeps its gap from the track.
-           ("    -" if spent is None else f"{spent:4.0f}%", tone)]
+    out = [(f"  {label:>5} ", "dim"),
+           *(_gauge(spent, BAR_W, tone) if layout.bars else []),
+           # The full row keeps a gap from the track, even at 100%.
+           (f"{'-':>{layout.number_w}}" if spent is None
+            else f"{spent:{layout.number_w - 1}.0f}%", tone)]
     if show_reset:
         # B. A middle dot, not the ↻ used in the menu bar image: SF Mono has no
         # ↻, so it came from a fallback font at a different width and drew as a
@@ -716,12 +759,17 @@ def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list
         # number is, so a separator is enough.
         when = "" if spent is None else (
             _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
+        if not layout.parens and when == "unused":
+            when = "new"
+        # The countdown from _compact_reset fits three cells, as does "new".
         # Left aligned in a fixed field, so it hugs the number it belongs to
         # and the slack falls on the far side, before the next window.
-        out.append((f" {'(' + when + ')':<8}" if when else "         ",
+        reset = '(' + when + ')' if layout.parens else when
+        out.append((f" {reset:<{layout.reset_w}}"
+                    if when else " " * (layout.reset_w + 1),
                     _reset_tone(lim)))
     else:
-        out.append(("         ", "dim"))
+        out.append((" " * (layout.reset_w + 1), "dim"))
     return out
 
 
@@ -731,8 +779,30 @@ def _blank_bucket(label: str) -> list[tuple[str, str]]:
     The word says the plan has no such window, rather than that nothing is
     known. The blank track includes the two cells used by its brackets.
     """
-    return [(f"  {label:>5} ", "dim"), (" " * (BAR_W + 2), "dim"),
-            (" none", "dim"), (" " * 9, "dim")]
+    layout = _LAYOUT
+    return [(f"  {label:>5} ", "dim"),
+            *([(" " * (BAR_W + 2), "dim")] if layout.bars else []),
+            (f"{'none':>{layout.number_w}}", "dim"),
+            (" " * (layout.reset_w + 1), "dim")]
+
+
+def _account_buckets(acct: core.Account) -> list:
+    """Share the windows with the width check so neither can miss a column."""
+    if not acct.reading:
+        # Nothing usable came back. Empty would claim the allowance is known.
+        return [segment
+                for label in ("5h", "7d", "model" if acct.is_codex else "fable")
+                for segment in _bucket(label, None)]
+    segments = (_blank_bucket("5h")
+                if acct.is_codex and acct.extras.get("has_5h") is False
+                else _bucket("5h", acct.limit("session")))
+    segments += _bucket("7d", acct.limit("weekly_all"))
+    # Repeating a countdown is easier to scan than a hole whose meaning
+    # depends on knowing that the model and weekly windows roll over together.
+    scoped = _scoped(acct)
+    if scoped:
+        segments += _bucket(scoped.label, scoped)
+    return segments
 
 
 def _pct(v: float | None) -> str:
@@ -848,25 +918,51 @@ def _session_segments(sess: sessions.Session, running_on: str) -> list[tuple[str
     without rebuilding the menu, which would drop an open menu from under the
     pointer.
     """
+    layout = _LAYOUT
     return [
         *_chip(running_on, NAME_W),
         ("  ", "dim"),
         (_fit(sess.repo, REPO_W), "dim"),
         (" ", "dim"),
-        (_fit(sess.detail or sess.label, DETAIL_W), "text"),
-        *_context_bar(sess),
-        _spent_cell(sess),
-        # Four spaces before the status and one after it. The status used to
-        # sit two from the token count and four from its own age, so it read
+        (_fit(sess.detail or sess.label, layout.detail_w), "text"),
+        *_context_bar(sess, named=layout.ctx_named),
+        *([_spent_cell(sess)] if layout.spent else []),
+        # Four spaces before the status in the full row, two in the compact
+        # row where the token count is gone. The status used to sit two from
+        # the token count and four from its own age, so it read
         # as part of the tokens rather than as the state of a session that has
         # been in it for that long. "busy 3m" is one fact.
         # A logged-out session is neither working nor waiting, so it takes the
         # column rather than sitting in it as "idle", which is what a session
         # waiting for you looks like.
-        ("    " + _fit("out" if sess.logged_out else (sess.status or sess.kind), 5),
+        (" " * layout.status_gap
+         + _fit("out" if sess.logged_out else (sess.status or sess.kind), 5),
          _status_tone(sess.status, sess.logged_out)),
         (f"{_age(sess.idle_for):>3}", "dim"),
     ]
+
+
+def _layout_for(budget_points: float, accts, sessions) -> Layout:
+    """Choose once so a repaint keeps the same columns as its neighbours."""
+    global _LAYOUT
+    previous = _LAYOUT
+    try:
+        _LAYOUT = FULL
+        widest = 0
+        for acct in accts:
+            segments = [("  ", "dim"), *_chip(acct.name, NAME_W),
+                        ("  ", "dim"), *_lamps([]), *_account_buckets(acct)]
+            widest = max(widest, _row_width(segments))
+        # The snapshot owns the routing map. Use the widest available chip
+        # here so a session on any of these accounts has room for its name.
+        name = max((a.name for a in accts),
+                   key=lambda n: _row_width(_chip(n, NAME_W)), default="")
+        for sess in sessions:
+            segments = [("  ", "dim"), *_session_segments(sess, name)]
+            widest = max(widest, _row_width(segments))
+        return FULL if widest == 0 or widest <= budget_points else COMPACT
+    finally:
+        _LAYOUT = previous
 
 
 def _reason(snap: Snapshot, sess: sessions.Session) -> str:
@@ -1284,6 +1380,18 @@ class ManagerApp(rumps.App):
         self._style_refresh_row(snap)
         self._apply_title(snap)
 
+    def _status_screen_width(self) -> float | None:
+        """Width of the display whose menu bar holds the status item now.
+
+        None when there is no window yet, which _menu_budget reads as the
+        main screen.
+        """
+        try:
+            screen = self._nsapp.nsstatusitem.button().window().screen()
+            return screen.frame().size.width if screen is not None else None
+        except Exception:
+            return None
+
     def _on_menu_open(self) -> None:
         """Make the durations in the menu true at the moment they are read.
 
@@ -1304,6 +1412,14 @@ class ManagerApp(rumps.App):
                     or any(not sessions.alive(s.pid) for s in shown if s.is_codex)):
                 self._poll_sessions()
                 self._take_sessions()
+            # The menu opens on whichever display's menu bar was clicked, and
+            # the rows were laid out for the display the status item sat on
+            # at the last rebuild. A portrait monitor beside a laptop gets a
+            # different answer, so ask again for the screen under the click.
+            snap = self._snapshot
+            if _layout_for(_menu_budget(self._status_screen_width()),
+                           snap.accounts, snap.sessions) != _LAYOUT:
+                self._rebuild_pending = True
             if self._rebuild_pending:
                 self._rebuild()
         except Exception:
@@ -1639,10 +1755,12 @@ class ManagerApp(rumps.App):
             self._rebuild_pending = True
             self._repaint()
             return
-        global _CODEX_NAMES
+        global _CODEX_NAMES, _LAYOUT
         self._rebuild_pending = False
         snap = self._snapshot
         _CODEX_NAMES = {a.name for a in snap.accounts if a.is_codex}
+        _LAYOUT = _layout_for(_menu_budget(self._status_screen_width()),
+                              snap.accounts, snap.sessions)
         chip_width = max((_styled(_chip(a.name), mono=False).size().width
                           for a in snap.accounts if not a.is_codex and a.signed_in), default=0.0)
         self._pick_tabs = _picker_tabs(chip_width)
@@ -1870,7 +1988,6 @@ class ManagerApp(rumps.App):
         # sign-in is there to fix, and while the browser tab is open the news
         # is that it is being fixed, not what was wrong.
         pending = acct.name in self._signing_in
-        scoped = _scoped(acct)
         # The account the menu bar is showing gets the mark the front session
         # gets. The numbers in the menu bar belong to exactly one of these
         # five rows, and until now nothing on the row said which, so the
@@ -1882,29 +1999,13 @@ class ManagerApp(rumps.App):
         segments = [(f"{FOCUS_MARK} ", "ok" if sure else "warn")
                     if shown else ("  ", "dim"),
                     *_chip(acct.name, NAME_W), ("  ", "dim"), *_lamps(here)]
+        segments += _account_buckets(acct)
         if not acct.reading:
-            # Nothing usable came back. Every window draws as unknown rather
-            # than as empty, because empty is a claim and this is the absence
-            # of one, and the note below says the fetch is still trying.
-            for label in ("5h", "7d", "model" if acct.is_codex else "fable"):
-                segments += _bucket(label, None)
             # Says the app is still trying, because a row of dashes on its own
             # reads as broken rather than as pending.
             segments.append(SIGNING_TAIL if pending
                             else (f"   {acct.error or 'asking again'}", "dim"))
             return segments
-        weekly = acct.limit("weekly_all")
-        segments += (_blank_bucket("5h")
-                     if acct.is_codex and acct.extras.get("has_5h") is False
-                     else _bucket("5h", acct.limit("session")))
-        segments += _bucket("7d", weekly)
-        # The model window usually rolls over with the weekly one, and its
-        # countdown was hidden when the two matched to avoid saying the same
-        # thing twice. That traded a repeated word for a hole in the row: the
-        # only way to read the blank was to know the rule that made it, and
-        # scanning a column of resets is easier when every window has one.
-        if scoped:
-            segments += _bucket(scoped.label, scoped)
         if pending:
             segments.append(SIGNING_TAIL)
         elif acct.mismatch:
