@@ -2242,8 +2242,17 @@ class ManagerApp(rumps.App):
                 # saying it twice reads as two separate problems.
                 how = []
             elif not sess.is_codex:
-                how = ["It reads its account once at launch, so restart this tab:",
-                       "press ctrl+C twice, then run  claude -c"]
+                own = core.session_dir(sess.term_id) if sess.term_id else ""
+                routed = bool(own) and os.path.abspath(own) == os.path.abspath(sess.env_config_dir)
+                # The wrapper did not run, so this session reads a dir ccm never
+                # writes to. exec zsh reloads the wrapper before the relaunch.
+                if not routed:
+                    how = ["This tab started Claude outside ccm, so no rule can reach it. "
+                           "Restart it:",
+                           "press ctrl+C twice, then run  exec zsh  then  claude -c"]
+                else:
+                    how = ["It reads its account once at launch, so restart this tab:",
+                           "press ctrl+C twice, then run  claude -c"]
             elif sess.kind == "bg":
                 # A `codex exec` run cannot be resumed and it ends on its own,
                 # so there is nothing to restart here. Saying how to restart it

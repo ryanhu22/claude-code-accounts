@@ -116,6 +116,9 @@ def snap(rows, monkeypatch):
     snapshot.sessions = [claude, codex]
     snapshot.running_on = {"/dirs/fable": "fable", CODEX_HOME: "cx"}
     snapshot.rules = profiles.Rules(default_account="fable", codex_default_account="cx")
+    monkeypatch.setattr(
+        rows.core, "session_dir",
+        lambda term_id: "/dirs/fable" if term_id == "T1" else f"/dirs/ctx-{term_id}")
     monkeypatch.setattr(rows, "_CODEX_NAMES", {"cx"})
     return snapshot
 
@@ -387,9 +390,34 @@ def test_claude_session_row_keeps_its_own_restart_line(rows, picker, snap):
     snap.rules.sessions["T1"] = "sonnet"
     item = rows.ManagerApp._session_item(picker, snap.sessions[0], snap)
     said = titles(item)
+    assert "It reads its account once at launch, so restart this tab:" in said
     assert "press ctrl+C twice, then run  claude -c" in said
     assert not any("codex resume" in line for line in said)
     assert [line for line in said if line.startswith("session:T1:")] == ["session:T1:fable"]
+
+
+def test_an_unrouted_claude_row_says_the_wrapper_did_not_run(rows, picker, snap):
+    sess = replace(snap.sessions[0], env_config_dir="/home/.claude")
+    snap.running_on["/home/.claude"] = "fable"
+    snap.rules.sessions["T1"] = "sonnet"
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    said = titles(item)
+    assert "Spending fable; pinned here says sonnet" in said
+    assert "This tab started Claude outside ccm, so no rule can reach it. Restart it:" in said
+    assert "press ctrl+C twice, then run  exec zsh  then  claude -c" in said
+    assert "press ctrl+C twice, then run  claude -c" not in said
+    assert "tab:21" in said
+
+
+def test_a_claude_row_without_a_terminal_id_gets_the_unrouted_lines(rows, picker, snap):
+    sess = replace(snap.sessions[0], term_id="")
+    snap.rules.projects[profiles.tilde(core.project_root(sess.cwd))] = "sonnet"
+    item = rows.ManagerApp._session_item(picker, sess, snap)
+    said = titles(item)
+    assert "This tab started Claude outside ccm, so no rule can reach it. Restart it:" in said
+    assert "press ctrl+C twice, then run  exec zsh  then  claude -c" in said
+    assert "press ctrl+C twice, then run  claude -c" not in said
+    assert "tab:21" in said
 
 
 def test_logged_out_claude_row_says_so_instead_of_promising_a_switch(rows, picker, snap):
