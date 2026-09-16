@@ -22,6 +22,8 @@ def isolated_home(monkeypatch, tmp_path):
     for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "TERM_SESSION_ID"):
         monkeypatch.delenv(name, raising=False)
     redirect_home(str(home), monkeypatch.setattr)
+    monkeypatch.setattr(core, "ROTATION_PAUSED", False)
+    monkeypatch.setattr(core, "_REFUSED", {})
     # The machine running the tests may have Codex open. Sessions are found by
     # asking ps, so without this the real ones would walk into the fake home.
     monkeypatch.setattr(codex_sessions, "processes", list)

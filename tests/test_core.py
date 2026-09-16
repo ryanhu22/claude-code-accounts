@@ -1,10 +1,46 @@
 import datetime as dt
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from claude_code_accounts import __version__, cli, codex, core
+
+
+@pytest.mark.parametrize(("stdout", "returncode", "expected"), [
+    ("Current System Capabilities are: CPU Graphics Audio Network\n", 0, False),
+    ("System Capabilities are: CPU Graphics Audio Network\n"
+     "  Current System Capabilities are: CPU Network\n", 0, True),
+    ("System Capabilities are: CPU Network\n", 0, False),
+    ("", 0, False),
+    ("Current System Capabilities are: CPU Network\n", 1, False),
+])
+def test_dark_wake_requires_current_capabilities(monkeypatch, stdout, returncode, expected):
+    """Only a successful current capabilities report can justify pausing rotation."""
+    def run(args, *, capture_output, text, timeout):
+        assert args == ["pmset", "-g", "systemstate"]
+        assert capture_output is True
+        assert text is True
+        assert timeout == 2
+        return SimpleNamespace(stdout=stdout, returncode=returncode)
+
+    monkeypatch.setattr(core.subprocess, "run", run)
+    assert core.dark_wake() is expected
+
+
+@pytest.mark.parametrize("error", [
+    OSError("pmset is unavailable"),
+    subprocess.TimeoutExpired(["pmset", "-g", "systemstate"], 2),
+    RuntimeError("capabilities cannot be read"),
+])
+def test_dark_wake_assumes_full_wake_after_an_exception(monkeypatch, error):
+    """An uncertain check must preserve the previous full wake behavior."""
+    def run(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(core.subprocess, "run", run)
+    assert core.dark_wake() is False
 
 
 @pytest.fixture

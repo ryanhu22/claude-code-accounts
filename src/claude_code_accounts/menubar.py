@@ -1556,8 +1556,12 @@ class ManagerApp(rumps.App):
         gap = now - self._last_tick if self._last_tick else 0.0
         self._last_tick = now
         if gap > WAKE_GAP_SECONDS:
-            # Timers do not fire while the Mac sleeps, so a gap this long is a
-            # wake, and it is the only signal when the notification is missed.
+            # The gap is the only wake signal when the notification is missed,
+            # but a dark wake produces the same gap and must not count.
+            if core.dark_wake():
+                core.ROTATION_PAUSED = True
+                core.log.info("dark wake")
+                return
             self._on_wake()
             return
         self._credential_pass(answers=True)
@@ -1575,6 +1579,9 @@ class ManagerApp(rumps.App):
         back late, so it must be safe to run twice: the pass it starts refuses
         to overlap with one already running.
         """
+        # The timer gap fallback also comes here, so a missed wake cannot leave
+        # rotation paused indefinitely.
+        core.ROTATION_PAUSED = False
         core.log.info("wake")
         self._credential_pass(then_refresh=True)
         for delay in WAKE_BURST:
@@ -1598,13 +1605,22 @@ class ManagerApp(rumps.App):
         and comes back nine hours later wakes every copy of it expired at once.
         Rotating everything under seven hours here costs one request per
         account at most, and makes a short sleep cross no expiry at all.
+        This notification proves the Mac is awake, so clear any stale pause
+        before rotating.
 
-        On a thread, because macOS is waiting for this notification to return
-        before it sleeps, and the rotation waits on the network.
+        macOS waits for this notification to return before it sleeps, so we
+        deliberately wait up to twenty seconds for the rotation thread. A
+        request still in flight when the Mac sleeps can spend its single-use
+        token with no reply, leaving no successor to store. Once the wait ends,
+        pause rotation so a dark wake cannot start another request.
         """
+        core.ROTATION_PAUSED = False
         core.log.info("sleep")
-        threading.Thread(target=lambda: core.refresh_slots(ahead=SLEEP_AHEAD),
-                         daemon=True).start()
+        worker = threading.Thread(target=lambda: core.refresh_slots(ahead=SLEEP_AHEAD),
+                                  daemon=True)
+        worker.start()
+        worker.join(timeout=20)
+        core.ROTATION_PAUSED = True
 
     def _credential_pass(self, *, answers: bool = False,
                          then_refresh: bool = False) -> None:
@@ -1621,6 +1637,9 @@ class ManagerApp(rumps.App):
 
         def work() -> None:
             try:
+                # A tick while ROTATION_PAUSED is set is a dark wake, so
+                # live_blob refuses to rotate. Keychain and local file syncs
+                # still run because they do not spend refresh tokens.
                 core.refresh_slots()
                 core.sync_credentials(
                     [s for s in self._snapshot.sessions if not s.is_codex])

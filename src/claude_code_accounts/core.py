@@ -235,6 +235,36 @@ def fingerprint(blob: dict | None) -> str | None:
 # refresh for its sessions.
 SOLE_REFRESHER = False
 
+# Dark wakes can tick the timers without a wake notification, so every caller
+# must leave refresh tokens alone until the app believes the Mac is awake.
+ROTATION_PAUSED = False
+
+# A refused generation cannot recover by retrying, but a new login or a peer's
+# successor changes its fingerprint and deserves another attempt.
+_REFUSED: dict[str, str] = {}
+
+
+def dark_wake() -> bool:
+    """Check for a maintenance wake so sleeping Macs leave refresh tokens alone.
+
+    A dark wake can fire timers while the lid is closed, but its current
+    system capabilities do not include Graphics. Only a capabilities line
+    without Graphics proves a dark wake. If the command fails, raises an
+    exception, or omits that line, assume a full wake so an uncertain check
+    costs no more than the previous behavior.
+    """
+    try:
+        result = subprocess.run(["pmset", "-g", "systemstate"], capture_output=True,
+                                text=True, timeout=2)
+        if result.returncode != 0:
+            return False
+        for line in result.stdout.splitlines():
+            if "Current System Capabilities" in line:
+                return "Graphics" not in line
+    except Exception:
+        return False
+    return False
+
 
 def session_copy(blob: dict) -> dict:
     """A login as a session dir may hold it: usable, and unable to rotate.
@@ -489,14 +519,27 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
 
     Returns None only when there is nothing usable: no credential at all, or a
     refresh the server rejected. A network failure returns the stored blob,
-    because it is probably still valid.
+    because it is probably still valid. A refused generation stays refused
+    until the stored credential changes, so every timer tick cannot retry it.
+    While rotation is paused for sleep, return the stored blob without a
+    request, just as when the caller disables refreshing.
     """
     blob = keychain.read_credentials(config_dir)
-    if not blob or not allow_refresh or not expiring(blob, margin):
+    if not blob or not allow_refresh or ROTATION_PAUSED:
+        return blob
+    path = os.path.abspath(config_dir)
+    if path in _REFUSED and _REFUSED[path] == fingerprint(blob):
+        return None
+    if not expiring(blob, margin):
         return blob
     try:
         with locks.credentials(config_dir):
             current = keychain.read_credentials(config_dir) or blob
+            # Sleep or another refresh may have finished while we waited.
+            if ROTATION_PAUSED:
+                return current
+            if path in _REFUSED and _REFUSED[path] == fingerprint(current):
+                return None
             # A successor from a write that failed earlier: the stored token is
             # already spent, so use it before trying to exchange it again.
             saved = _take_stash(config_dir, current)
@@ -512,9 +555,11 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
                 # invalid_grant means this copy is stranded, not that the
                 # account is gone: a peer dir may hold the live successor.
                 if err == "invalid_grant":
+                    _REFUSED[path] = spent
                     log.info("invalid_grant %s %s", _where(config_dir), _mark(spent))
                     return None
                 return current
+            _REFUSED.pop(path, None)
             rotated = _apply(current, resp)
             if not _persist(config_dir, rotated, spent):
                 return rotated

@@ -21,6 +21,7 @@ def test_split_code(pasted, expected):
 def test_attempt_url(redirect, hint):
     attempt = oauth.Attempt("verifier", "state", "work", redirect, hint)
     url = urlsplit(attempt.url)
+    assert oauth.AUTHORIZE_URL.startswith("https://claude.com/")
     assert f"{url.scheme}://{url.netloc}{url.path}" == oauth.AUTHORIZE_URL
     challenge = base64.urlsafe_b64encode(hashlib.sha256(b"verifier").digest())
     expected = {

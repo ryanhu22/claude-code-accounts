@@ -422,10 +422,21 @@ def test_an_ordinary_claude_row_is_untouched(rows, picker, snap):
     assert ("    idle ", "dim") in rows._session_segments(sess, "fable")
 
 
-def test_credential_tick_after_a_sleep_runs_the_wake_burst(rows, app, monkeypatch):
-    """A gap longer than two intervals is a wake, notification or not."""
+@pytest.mark.parametrize("notification", [False, True])
+def test_credential_tick_after_a_sleep_runs_the_wake_burst(
+        rows, app, monkeypatch, notification):
+    """A full wake must catch credentials up even if its notification is missed."""
     order, armed = [], []
-    monkeypatch.setattr(core, "refresh_slots", lambda: order.append("refresh") or [])
+    monkeypatch.setattr(core, "ROTATION_PAUSED", True)
+    monkeypatch.setattr(core, "dark_wake", lambda: False)
+    app._on_wake = Mock(wraps=app._on_wake)
+
+    def refresh():
+        assert not core.ROTATION_PAUSED
+        order.append("refresh")
+        return []
+
+    monkeypatch.setattr(core, "refresh_slots", refresh)
     monkeypatch.setattr(core, "sync_credentials", lambda live: order.append("sync") or [])
     monkeypatch.setattr(core, "sync_answers", lambda: order.append("answers") or [])
     monkeypatch.setattr(rows, "threading", SimpleNamespace(
@@ -435,7 +446,12 @@ def test_credential_tick_after_a_sleep_runs_the_wake_burst(rows, app, monkeypatc
     app._syncing = False
     app._done = []
     app._last_tick = time.time() - 200
-    rows.ManagerApp._on_credential_tick(app, None)
+    if notification:
+        app._on_wake()
+    else:
+        app._on_credential_tick(None)
+    app._on_wake.assert_called_once_with()
+    assert not core.ROTATION_PAUSED
     # Rotate first, hand out second: the other order strands the copies.
     assert order == ["refresh", "sync"]
     assert [delay for delay, _ in armed] == list(rows.WAKE_BURST) == [5.0, 10.0, 20.0]
@@ -451,14 +467,68 @@ def test_credential_tick_after_a_sleep_runs_the_wake_burst(rows, app, monkeypatc
     assert order == []
 
 
-def test_the_sleep_notification_rotates_everything_with_hours_left(rows, app, monkeypatch):
+@pytest.mark.parametrize("paused", [False, True])
+def test_the_sleep_notification_rotates_everything_with_hours_left(rows, app, monkeypatch, paused):
     """A Mac that sleeps on fresh tokens cannot wake past their expiry."""
     asked = []
-    monkeypatch.setattr(core, "refresh_slots", lambda ahead: asked.append(ahead) or [])
+    monkeypatch.setattr(core, "ROTATION_PAUSED", paused)
+
+    def refresh(ahead):
+        assert not core.ROTATION_PAUSED
+        asked.append(ahead)
+
+    def join(timeout):
+        assert asked == [rows.SLEEP_AHEAD]
+        assert not core.ROTATION_PAUSED
+        asked.append(timeout)
+
+    monkeypatch.setattr(core, "refresh_slots", refresh)
+    monkeypatch.setattr(rows, "threading", SimpleNamespace(
+        Thread=lambda target, daemon: SimpleNamespace(start=target, join=join)))
+    rows.ManagerApp._on_sleep(app)
+    assert asked == [7 * 3600, 20] == [rows.SLEEP_AHEAD, 20]
+    assert core.ROTATION_PAUSED
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_dark_wake_gap_pauses_rotation_without_running_a_pass(app, monkeypatch, paused):
+    """A maintenance wake must pause rotation even if the sleep notification was missed."""
+    monkeypatch.setattr(core, "ROTATION_PAUSED", paused)
+    monkeypatch.setattr(core, "dark_wake", lambda: True)
+    log = Mock()
+    monkeypatch.setattr(core.log, "info", log)
+    app._last_tick = time.time() - 200
+    app._on_wake = Mock()
+    app._credential_pass = Mock()
+
+    app._on_credential_tick(None)
+
+    app._on_wake.assert_not_called()
+    app._credential_pass.assert_not_called()
+    assert core.ROTATION_PAUSED
+    log.assert_called_once_with("dark wake")
+
+
+def test_dark_wake_tick_keeps_syncing_local_state(rows, app, monkeypatch):
+    """Pausing rotation must still let credentials and local answers catch up."""
+    monkeypatch.setattr(core, "ROTATION_PAUSED", True)
+    order = []
+
+    def refresh():
+        assert core.ROTATION_PAUSED
+        order.append("refresh")
+
+    monkeypatch.setattr(core, "refresh_slots", refresh)
+    monkeypatch.setattr(core, "sync_credentials", lambda live: order.append("sync"))
+    monkeypatch.setattr(core, "sync_answers", lambda: order.append("answers"))
     monkeypatch.setattr(rows, "threading", SimpleNamespace(
         Thread=lambda target, daemon: SimpleNamespace(start=target)))
-    rows.ManagerApp._on_sleep(app)
-    assert asked == [7 * 3600] == [rows.SLEEP_AHEAD]
+    app._syncing = False
+    app._last_tick = time.time()
+    app._on_credential_tick(None)
+    assert order == ["refresh", "sync", "answers"]
+    assert core.ROTATION_PAUSED
+    assert not app._syncing
 
 
 def test_quit_gives_the_refresh_tokens_back_first(rows, picker, snap, monkeypatch):

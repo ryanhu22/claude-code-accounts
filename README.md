@@ -418,8 +418,10 @@ table still works.
 
 ### A credential is never invented
 
-Signing in is an OAuth PKCE flow against `platform.claude.com`, asking for the
-same scopes a real Claude Code login carries. Every field of the stored
+Signing in is an OAuth PKCE flow with its sign-in page on `claude.com`, the same
+page Claude Code's "Claude account with subscription" option opens. The token
+endpoint stays on `platform.claude.com`, and the flow asks for the same scopes
+a real Claude Code login carries. Every field of the stored
 credential comes from the token response or from `/api/oauth/profile`, and the
 result is checked against the live API before it is written.
 

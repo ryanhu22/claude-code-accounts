@@ -1,8 +1,10 @@
 """Signing an account in, the way Claude Code does.
 
-An OAuth PKCE flow against platform.claude.com. The user's browser does the
-signing in; we exchange the resulting code for a token pair and write it where
-that account lives.
+An OAuth PKCE flow with its sign-in page on claude.com, the same page Claude
+Code's "Claude account with subscription" option opens. The token endpoint
+stays on platform.claude.com. The user's browser does the signing in; we
+exchange the resulting code for a token pair and write it where that account
+lives.
 
 The one rule here is that a credential is never invented. Every field of the
 stored blob either comes from the token response or from `/api/oauth/profile`,
@@ -22,7 +24,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 
-AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
+AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
 CALLBACK_URL = "https://platform.claude.com/oauth/code/callback"
 
 # The scope set a real Claude Code login carries. Ask for exactly these: a

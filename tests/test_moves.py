@@ -311,10 +311,80 @@ def test_live_blob_refresh_and_failures(fake_keychain, fake_api, monkeypatch):
         raise OSError("offline")
 
     monkeypatch.setattr(core, "_post", offline)
-    # 2 slot reads for a transient failure; the stored copy remains usable.
+    # A different generation can fail transiently; the refused one stays dead.
+    newer = fake_api.blob("a@example.com", gen=3, expires_in=60)
+    keychain.write_credentials(slot, newer)
     with budget(fake_keychain, 2):
-        assert core.live_blob(slot) == old
+        assert core.live_blob(slot) == newer
+    assert stored(fake_keychain, slot) == newer
+
+
+def test_live_blob_leaves_expiring_tokens_alone_until_wake(
+        fake_keychain, fake_api, monkeypatch):
+    """A dark wake must not spend a token whose reply could be lost to sleep."""
+    slot = known("a", "a@example.com", fake_api, fake_keychain, fresh=False)
+    old = stored(fake_keychain, slot)
+    monkeypatch.setattr(core, "ROTATION_PAUSED", True)
+    assert core.live_blob(slot) == old
+    assert core.load_account("a", with_usage=False).email == "a@example.com"
+    assert fake_api.refresh_calls == 0
     assert stored(fake_keychain, slot) == old
+
+    monkeypatch.setattr(core, "ROTATION_PAUSED", False)
+    rotated = core.live_blob(slot)
+    assert fake_api.refresh_calls == 1
+    assert rotated["refreshToken"] != old["refreshToken"]
+    assert stored(fake_keychain, slot) == rotated
+
+
+def test_refused_generation_is_quiet_until_a_different_credential_arrives(
+        fake_keychain, fake_api, monkeypatch, caplog):
+    """Only a new generation can recover, so repeated passes must stay quiet."""
+    monkeypatch.setattr(core, "_REFUSED", {})
+    slot = known("a", "a@example.com", fake_api, fake_keychain, fresh=False)
+    old = stored(fake_keychain, slot)
+    fake_api._spent.add(old["refreshToken"])
+    with caplog.at_level("INFO", logger=core.log.name):
+        assert core.live_blob(slot) is None
+        assert fake_api.refresh_calls == 1
+        assert core._REFUSED == {os.path.abspath(slot): core.fingerprint(old)}
+        assert sum("invalid_grant" in r.message for r in caplog.records) == 1
+        caplog.clear()
+        # The same directory spelled relatively must share the refusal.
+        assert core.live_blob(os.path.relpath(slot)) is None
+        assert fake_api.refresh_calls == 1
+        assert caplog.records == []
+
+    assert core.identity(slot, None)[1] in core.GONE
+    assert core.load_account("a", with_usage=False).error == "login expired"
+    assert fake_api.refresh_calls == 1
+    newer = fake_api.blob("a@example.com", gen=2, expires_in=60)
+    keychain.write_credentials(slot, newer)
+    rotated = core.live_blob(slot)
+    assert fake_api.refresh_calls == 2
+    assert rotated["refreshToken"] == "a@example.com-refresh3"
+    assert stored(fake_keychain, slot) == rotated
+    assert core._REFUSED == {}
+
+
+def test_refused_slot_can_heal_from_a_peer(fake_keychain, fake_api, monkeypatch):
+    """Remembering a refusal must leave the peer recovery path open."""
+    slot = known("a", "a@example.com", fake_api, fake_keychain, fresh=False)
+    Path(slot, ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"emailAddress": "a@example.com"}}))
+    fake_api._spent.add(stored(fake_keychain, slot)["refreshToken"])
+    assert core.live_blob(slot) is None
+    path = core.session_dir("term")
+    Path(path).mkdir(parents=True)
+    newer = fake_api.blob("a@example.com", gen=2, expires_in=7200)
+    keychain.write_credentials(path, newer)
+    monkeypatch.setattr(sessions, "discover_config_dirs", lambda home: [path])
+    acct = core.load_account("a", with_usage=False)
+    assert acct.email == "a@example.com"
+    assert acct.error is None
+    assert stored(fake_keychain, slot) == newer
+    assert core.live_blob(slot) == newer
+    assert fake_api.refresh_calls == 1
 
 
 def test_load_account_heals_rejected_slot(fake_keychain, fake_api, monkeypatch):
