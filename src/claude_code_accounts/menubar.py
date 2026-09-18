@@ -3062,8 +3062,29 @@ class ManagerApp(rumps.App):
                 return
             ok, msg = core.rename_account(account, resp.text)
             rumps.notification("Claude Code Accounts", "Renamed" if ok else "Rename failed", msg)
+            if ok:
+                self._reflect_rename(account, core.clean_account_name(resp.text))
             self.refresh_now(None)
         return handler
+
+    def _reflect_rename(self, old: str, new: str) -> None:
+        """Redraw with the new name now, before the poll that confirms it.
+
+        A rename moves a slot and rewrites rules, and the writer knows both, so
+        nothing has to come back from a poll to draw it. Waiting for one meant
+        the menu kept the old name until a full pass of usage, sessions and
+        credentials had run, and twice that when one was already in flight.
+        The session poll in between also matched sessions against the old
+        slot path, so their rows went blank until the pass landed.
+        """
+        snap = self._snapshot
+        for acct in snap.accounts:
+            if acct.name == old:
+                acct.name = new
+                acct.slot = codex.slot_dir(new) if acct.is_codex else core.slot_dir(new)
+        snap.running_on = {d: new if a == old else a for d, a in snap.running_on.items()}
+        snap.rules = core.rules()
+        self._rebuild()
 
     def _make_recolor(self, account: str, index: int):
         def handler(_sender):

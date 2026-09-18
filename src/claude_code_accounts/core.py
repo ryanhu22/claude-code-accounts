@@ -1348,6 +1348,11 @@ def set_chip_index(name: str, index: int) -> None:
         pass
 
 
+def clean_account_name(text: str) -> str:
+    """The account name a rename would give: letters, digits, - and _ only."""
+    return "".join(c for c in text.strip() if c.isalnum() or c in "-_")
+
+
 def rename_account(old: str, new: str) -> tuple[bool, str]:
     """Rename a slot, moving its credentials with it.
 
@@ -1358,7 +1363,7 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     """
     global _CHIPS
     import shutil
-    new = "".join(c for c in new.strip() if c.isalnum() or c in "-_")
+    new = clean_account_name(new)
     if not new:
         return False, "name must contain letters, digits, - or _"
     if new == old:
@@ -1410,6 +1415,8 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     except (OSError, ValueError):
         pass
     _CHIPS = (-1.0, {})
+    if pref("bar_account", "") == old:       # the menu bar keeps showing it
+        set_pref("bar_account", new)
     return True, f"{old} is now {new}"
 
 

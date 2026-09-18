@@ -409,3 +409,28 @@ def test_menu_toggle_refreshes_only_when_enabled(menu_app):
     assert core.pref(core.AUTO_START_PREF, False) is False
     assert menu_app.refreshes == [True]
     assert len(rebuilds) == 2
+
+
+def test_reflect_rename_redraws_before_the_poll(monkeypatch, isolated_home):
+    """A rename is drawn from what the writer knows, not from the next poll."""
+    from claude_code_accounts import codex
+    from claude_code_accounts.menubar import ManagerApp
+
+    snap = SimpleNamespace(
+        accounts=[core.Account(name="a", slot=core.slot_dir("a")),
+                  core.Account(name="cx", slot=codex.slot_dir("cx"), provider="codex"),
+                  core.Account(name="b", slot=core.slot_dir("b"))],
+        running_on={"/d1": "a", "/d2": "b"}, rules=None)
+    app = SimpleNamespace(_snapshot=snap, rebuilds=[])
+    app._rebuild = lambda: app.rebuilds.append(True)
+    sentinel = object()
+    monkeypatch.setattr(core, "rules", lambda: sentinel)
+
+    ManagerApp._reflect_rename(app, "a", "renamed")
+    assert [x.name for x in snap.accounts] == ["renamed", "cx", "b"]
+    assert snap.accounts[0].slot == core.slot_dir("renamed")
+    assert snap.running_on == {"/d1": "renamed", "/d2": "b"}
+    assert snap.rules is sentinel and app.rebuilds == [True]
+
+    ManagerApp._reflect_rename(app, "cx", "cx2")
+    assert snap.accounts[1].name == "cx2" and snap.accounts[1].slot == codex.slot_dir("cx2")

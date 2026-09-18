@@ -492,10 +492,12 @@ def test_rename_account_carries_rules_and_identity(fake_keychain, fake_api):
     core.save_rules(all_rules("a"))
     core._cache_write({"a": {"keep": True}})
     core.set_chip_index("a", 3)
+    core.set_pref("bar_account", "a")
     fake_api.reset()
     # 1 old slot read + 1 new slot write + 1 old service delete.
     with budget(fake_keychain, 1, 1, 1):
         assert core.rename_account("a", "renamed")[0]
+    assert core.pref("bar_account") == "renamed"   # the menu bar keeps showing it
     new = core.slot_dir("renamed")
     assert not Path(slot).exists() and Path(new).is_dir()
     assert keychain.service_for(slot) not in fake_keychain.store
