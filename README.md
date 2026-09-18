@@ -16,13 +16,68 @@ Status: early, macOS only, used daily by its author. Expect rough edges.
   <img src="docs/images/menu.png" width="900"
        alt="The menu: every subscription with its usage windows, every running session and what it spends, and the rules that decide which account each project uses">
 </p>
+
+This is what it looks like in your macOS menu bar:
+
 <p align="center">
   <img src="docs/images/menubar.png" width="360"
        alt="The menu bar item: the chosen account's 5-hour, 7-day and model windows, with the time until each resets">
 </p>
 
-The screenshots come from `scripts/demo.py`, which runs the app on made-up
-accounts. Nothing in them is a real account, email address or path.
+## Install with an agent
+
+To have Claude Code, Codex or another coding agent do the install for you,
+paste the prompt below into the agent. It works on macOS only. Windows and
+Linux are not supported: credentials live in the macOS keychain, the menu bar
+app is macOS only, and autostart uses a macOS launch agent.
+
+The prompt stops before the sign-in step. Signing in opens a browser on your
+own account, so that step is yours.
+
+````text
+Install claude-code-accounts on this Mac. It is a tool that keeps several
+Claude Code subscriptions signed in at once and picks which one each project
+uses. Repository: https://github.com/ryanhu22/claude-code-accounts
+
+Do these steps in order. Stop and tell me if a check fails.
+
+1. Check the requirements:
+   - macOS 13 or newer (`sw_vers -productVersion`). If this is not a Mac,
+     stop: the tool does not support Windows or Linux.
+   - Python 3.10 or newer (`python3 --version`).
+   - `uv` on PATH (`uv --version`). If it is missing, install it with
+     `curl -LsSf https://astral.sh/uv/install.sh | sh` and open a new shell.
+   - Claude Code 2.1.224 or newer (`claude --version`).
+
+2. Install the tool with the menu bar app:
+   uv tool install "claude-code-accounts[menubar] @ git+https://github.com/ryanhu22/claude-code-accounts"
+   Then confirm `ccm --help` runs. If `ccm` is not found, run `uv tool
+   update-shell` and open a new shell.
+
+3. Add the shell hook. Append this line to ~/.zshrc if it is not already
+   there, then tell me to open a new terminal:
+   eval "$(ccm shell-init)"
+   This defines `claude` and `codex` functions that pick the right config
+   directory before launching the real binaries.
+
+4. Start the menu bar app at login:
+   ccm menubar install
+   Confirm it runs with `launchctl list | grep claude-code-accounts`.
+
+5. Do not sign any account in. For each account I want, run
+   `ccm add <name>` and show me the command it prints. I will run those
+   commands myself, because each one opens a browser on my own account.
+   Do not run `ccm login` or `ccm poke`.
+
+6. When you are done, print: the output of `ccm --version`, the line you
+   added to ~/.zshrc, and the `ccm add` commands for me to run. Then tell me to run
+   `ccm list` after I have signed in, to see every subscription's usage.
+````
+
+The agent needs permission to run `uv`, edit `~/.zshrc` and run
+`ccm menubar install`. Review what it changed before you open a new terminal.
+
+To install by hand instead, see [Quick start](#quick-start).
 
 ## Read this first
 
@@ -57,7 +112,7 @@ Know what you are running:
   prints the command), and do not use `ccm login` or `ccm poke` for Claude
   accounts.
 
-You use this software at your own risk. See the MIT license.
+You use this software at your own risk. See the license.
 
 ## Why
 
@@ -181,59 +236,6 @@ ccm list                          # usage for every account
 ccm use work                      # this repository uses work
 ccm where                         # what this directory resolves to, and why
 ```
-
-### Let an agent install it
-
-To have Claude Code, Codex or another coding agent do the install for you,
-paste the prompt below into the agent. It works on macOS only. Windows and
-Linux are not supported: credentials live in the macOS keychain, the menu bar
-app is macOS only, and autostart uses a macOS launch agent.
-
-The prompt stops before the sign-in step. Signing in opens a browser on your
-own account, so that step is yours.
-
-````text
-Install claude-code-accounts on this Mac. It is a tool that keeps several
-Claude Code subscriptions signed in at once and picks which one each project
-uses. Repository: https://github.com/ryanhu22/claude-code-accounts
-
-Do these steps in order. Stop and tell me if a check fails.
-
-1. Check the requirements:
-   - macOS 13 or newer (`sw_vers -productVersion`). If this is not a Mac,
-     stop: the tool does not support Windows or Linux.
-   - Python 3.10 or newer (`python3 --version`).
-   - `uv` on PATH (`uv --version`). If it is missing, install it with
-     `curl -LsSf https://astral.sh/uv/install.sh | sh` and open a new shell.
-   - Claude Code 2.1.224 or newer (`claude --version`).
-
-2. Install the tool with the menu bar app:
-   uv tool install "claude-code-accounts[menubar] @ git+https://github.com/ryanhu22/claude-code-accounts"
-   Then confirm `ccm --help` runs. If `ccm` is not found, run `uv tool
-   update-shell` and open a new shell.
-
-3. Add the shell hook. Append this line to ~/.zshrc if it is not already
-   there, then tell me to open a new terminal:
-   eval "$(ccm shell-init)"
-   This defines `claude` and `codex` functions that pick the right config
-   directory before launching the real binaries.
-
-4. Start the menu bar app at login:
-   ccm menubar install
-   Confirm it runs with `launchctl list | grep claude-code-accounts`.
-
-5. Do not sign any account in. For each account I want, run
-   `ccm add <name>` and show me the command it prints. I will run those
-   commands myself, because each one opens a browser on my own account.
-   Do not run `ccm login` or `ccm poke`.
-
-6. When you are done, print: the output of `ccm --version`, the line you
-   added to ~/.zshrc, and the `ccm add` commands for me to run. Then tell me to run
-   `ccm list` after I have signed in, to see every subscription's usage.
-````
-
-The agent needs permission to run `uv`, edit `~/.zshrc` and run
-`ccm menubar install`. Review what it changed before you open a new terminal.
 
 ## Which account a session uses
 
@@ -482,21 +484,6 @@ This tool keeps every account signed in at once, decides per project, profile
 or terminal, moves sessions that are already running, and never mints a
 credential, so every session keeps its real plan and rate-limit tier.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, the latency bench
-and pull requests. Tests run against a fake keychain and a fake API, so they
-never touch your accounts or the network. `scripts/demo.py menubar` runs the
-app on made-up accounts, so you can see every screen without signing anything
-in. `scripts/demo.py shots` regenerates the images above from the same data.
-
-The project was renamed from claude-code-manager. The command is still `ccm`,
-the rules still live in `~/.claude-manager`, and nothing on disk moved.
-
-## Security
-
-Report vulnerabilities privately. See [SECURITY.md](SECURITY.md).
-
 ## License
 
-MIT
+0BSD. Use it, copy it, change it, sell it. No attribution is required.
