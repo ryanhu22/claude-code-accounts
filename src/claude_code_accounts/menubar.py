@@ -1255,6 +1255,12 @@ class ManagerApp(rumps.App):
         self._lock = threading.Lock()
         self._busy = False
         self._syncing = False
+        # One apply pass walks the sessions at a time, because it trusts the
+        # rules it read when it started for its whole walk. Both fields are
+        # guarded by _lock, since the main and pass threads share them.
+        self._applying = False
+        # A rule change during a walk needs another pass to reach the sessions.
+        self._apply_again: str | None = None
         # Accounts with a browser tab open for a sign-in, keyed to the attempt
         # that opened it. Main thread only, like every other menu state.
         self._signing_in: dict[str, oauth.Attempt | codex.Attempt] = {}
@@ -2853,18 +2859,41 @@ class ManagerApp(rumps.App):
         doing this inline froze the menu bar item for as long as it took. The
         menu already shows the new rule; this is only the part that reaches
         into running sessions, and it reports back when it lands.
+
+        A second rule change while a pass is walking must not start another
+        walk: the first read rules that are now stale and would move sessions
+        back. Instead the running pass goes round again on the new rules, and
+        only that later round reports.
         """
-        def work() -> None:
+        with self._lock:
+            if self._applying:
+                self._apply_again = note
+                return
+            self._applying = True
+        threading.Thread(target=self._apply_pass, args=(note,), daemon=True).start()
+
+    def _apply_pass(self, note: str) -> None:
+        """Walk the sessions, and again if a rule changed under the walk."""
+        while True:
             try:
                 moved, applied, stuck = core.apply_now(self._snapshot.sessions)
             except Exception:
-                return        # the 45 second sync picks the sessions up anyway
-            if not applied:
-                return
-            done = note + core.applied_note(moved, stuck)
-            self._later(lambda: self._settle(done, applied))
-
-        threading.Thread(target=work, daemon=True).start()
+                # The 45 second sync picks the sessions up anyway.
+                moved, applied, stuck = [], {}, {}
+            with self._lock:
+                again, self._apply_again = self._apply_again, None
+                if again is None:
+                    self._applying = False
+            if again is not None:
+                # This walk read rules that were changed under it, so what it
+                # handed out may already be wrong. Say nothing; the next round
+                # reads the new rules and reports for both.
+                note = again
+                continue
+            if applied:
+                done = note + core.applied_note(moved, stuck)
+                self._later(lambda: self._settle(done, applied))
+            return
 
     def _settle(self, message: str, applied: dict) -> None:
         """Report a rule that has reached the sessions it applies to."""

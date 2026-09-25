@@ -392,6 +392,81 @@ def test_worker_drops_a_snapshot_read_before_a_local_edit(menu_app, monkeypatch)
     assert not app._busy and not app._again
 
 
+def test_apply_later_runs_one_pass_at_a_time(monkeypatch):
+    from claude_code_accounts.menubar import ManagerApp
+
+    threads, starts = [], []
+
+    def thread(*, target, args, daemon):
+        threads.append((target, args))
+        assert daemon is True
+        return SimpleNamespace(start=lambda: starts.append(True))
+
+    monkeypatch.setattr(threading, "Thread", thread)
+    app = SimpleNamespace(_lock=threading.Lock(), _applying=False, _apply_again=None)
+    app._apply_pass = lambda note: ManagerApp._apply_pass(app, note)
+
+    ManagerApp._apply_later(app, "first")
+    assert threads == [(app._apply_pass, ("first",))]
+    assert starts == [True]
+    assert app._applying is True
+
+    ManagerApp._apply_later(app, "second")
+    assert threads == [(app._apply_pass, ("first",))]
+    assert starts == [True]
+    assert app._apply_again == "second"
+
+
+def test_apply_pass_reruns_for_a_rule_written_mid_walk(monkeypatch):
+    from claude_code_accounts.menubar import ManagerApp
+
+    calls, settled = [], []
+    app = SimpleNamespace(
+        _lock=threading.Lock(), _applying=True, _apply_again=None,
+        _snapshot=SimpleNamespace(sessions=[]), _later=lambda fn: fn(),
+        _settle=lambda message, applied: settled.append((message, applied)))
+
+    def apply_now(sessions):
+        calls.append(sessions)
+        if len(calls) == 1:
+            ManagerApp._apply_later(app, "second rule")
+            return [], {"/d": "old"}, {}
+        return ["tab 2"], {"/d": "new"}, {}
+
+    monkeypatch.setattr(core, "apply_now", apply_now)
+    ManagerApp._apply_pass(app, "first rule")
+    assert calls == [app._snapshot.sessions, app._snapshot.sessions]
+    assert len(settled) == 1
+    message, applied = settled[0]
+    assert applied == {"/d": "new"}
+    assert message.startswith("second rule")
+    assert app._applying is False
+    assert app._apply_again is None
+
+
+def test_apply_pass_reports_an_undisturbed_walk(monkeypatch):
+    from claude_code_accounts.menubar import ManagerApp
+
+    calls, settled = [], []
+    app = SimpleNamespace(
+        _lock=threading.Lock(), _applying=True, _apply_again=None,
+        _snapshot=SimpleNamespace(sessions=[]), _later=lambda fn: fn(),
+        _settle=lambda message, applied: settled.append((message, applied)))
+
+    def apply_now(sessions):
+        calls.append(sessions)
+        return ["tab 1"], {"/d": "a"}, {}
+
+    monkeypatch.setattr(core, "apply_now", apply_now)
+    ManagerApp._apply_pass(app, "first rule")
+    assert calls == [app._snapshot.sessions]
+    assert len(settled) == 1
+    message, applied = settled[0]
+    assert applied == {"/d": "a"}
+    assert message.startswith("first rule")
+    assert app._applying is False
+
+
 def test_worker_keeps_snapshot_when_auto_start_raises(menu_app, monkeypatch):
     from claude_code_accounts.menubar import ManagerApp
 
