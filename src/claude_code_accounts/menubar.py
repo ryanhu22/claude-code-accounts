@@ -1248,6 +1248,9 @@ class ManagerApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Claude", title=f"{ICON} …", quit_button=None)
         self._snapshot = Snapshot()
+        # Counts local edits to the snapshot, so a poll that started before one
+        # knows it is older than the menu. Main thread writes, worker reads.
+        self._edits = 0
         self._pending: Snapshot | None = None
         self._lock = threading.Lock()
         self._busy = False
@@ -1470,22 +1473,28 @@ class ManagerApp(rumps.App):
 
     def _worker(self, force: bool = False) -> None:
         try:
+            edits = self._edits
             snap = self._collect(force)
-            try:
-                results = core.auto_start(snap.accounts)
-                for name, ok, msg in results:
-                    message = (f"{name}: weekly windows started automatically" if ok else
-                               f"{name}: could not start the weekly window. {msg}")
-                    self._later(lambda ok=ok, message=message: self._report(ok, message))
-                    if ok:
-                        self._again = True
-                        self._again_force = True
-                        threading.Timer(12.0, lambda name=name: self._later(
-                            lambda: self._poke_again(name))).start()
-            except Exception:
-                pass          # automatic start must not hide a usage reading
-            with self._lock:
-                self._pending = snap
+            if edits != self._edits:
+                # This read predates a local edit, so it is older than the menu.
+                # Publishing it would undo the edit until the next poll.
+                self._again = True
+            else:
+                try:
+                    results = core.auto_start(snap.accounts)
+                    for name, ok, msg in results:
+                        message = (f"{name}: weekly windows started automatically" if ok else
+                                   f"{name}: could not start the weekly window. {msg}")
+                        self._later(lambda ok=ok, message=message: self._report(ok, message))
+                        if ok:
+                            self._again = True
+                            self._again_force = True
+                            threading.Timer(12.0, lambda name=name: self._later(
+                                lambda: self._poke_again(name))).start()
+                except Exception:
+                    pass          # automatic start must not hide a usage reading
+                with self._lock:
+                    self._pending = snap
         finally:
             self._busy = False
         if self._again:
@@ -2875,6 +2884,7 @@ class ManagerApp(rumps.App):
         # logged-out dirs that core.landed adds beside them, not a directory.
         written = {d: a for d, a in (applied or {}).items() if isinstance(a, str)}
         snap.running_on = {**snap.running_on, **written}
+        self._edits += 1
         self._rebuild()
 
     def _make_reveal(self, sess: sessions.Session):
@@ -3084,6 +3094,7 @@ class ManagerApp(rumps.App):
                 acct.slot = codex.slot_dir(new) if acct.is_codex else core.slot_dir(new)
         snap.running_on = {d: new if a == old else a for d, a in snap.running_on.items()}
         snap.rules = core.rules()
+        self._edits += 1
         self._rebuild()
 
     def _make_recolor(self, account: str, index: int):

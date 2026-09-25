@@ -325,7 +325,7 @@ def menu_app(monkeypatch):
     from claude_code_accounts.menubar import ManagerApp
 
     app = SimpleNamespace(_busy=True, _again=False, _again_force=False,
-                          _lock=threading.Lock(), _done=[], _pending=None)
+                          _lock=threading.Lock(), _done=[], _pending=None, _edits=0)
     app._later = lambda fn: ManagerApp._later(app, fn)
     app.flashes, app.refreshes, app.delayed, app.rechecks = [], [], [], []
     app._report = lambda ok, message: app.flashes.append((ok, message))
@@ -370,6 +370,26 @@ def test_worker_reports_on_main_thread_and_forces_followup(menu_app, monkeypatch
     for callback in app._done:
         callback()
     assert app.rechecks == ["a", "c"]
+
+
+def test_worker_drops_a_snapshot_read_before_a_local_edit(menu_app, monkeypatch):
+    from claude_code_accounts.menubar import ManagerApp
+
+    app = menu_app
+    snapshot = SimpleNamespace(accounts=[])
+    starts = []
+
+    def collect(force):
+        app._edits += 1
+        return snapshot
+
+    app._collect = collect
+    monkeypatch.setattr(core, "auto_start", lambda accts: starts.append(accts))
+    ManagerApp._worker(app)
+    assert starts == []
+    assert app._pending is None
+    assert app.refreshes == [False]
+    assert not app._busy and not app._again
 
 
 def test_worker_keeps_snapshot_when_auto_start_raises(menu_app, monkeypatch):
@@ -421,7 +441,7 @@ def test_reflect_rename_redraws_before_the_poll(monkeypatch, isolated_home):
                   core.Account(name="cx", slot=codex.slot_dir("cx"), provider="codex"),
                   core.Account(name="b", slot=core.slot_dir("b"))],
         running_on={"/d1": "a", "/d2": "b"}, rules=None)
-    app = SimpleNamespace(_snapshot=snap, rebuilds=[])
+    app = SimpleNamespace(_snapshot=snap, rebuilds=[], _edits=0)
     app._rebuild = lambda: app.rebuilds.append(True)
     sentinel = object()
     monkeypatch.setattr(core, "rules", lambda: sentinel)
@@ -434,3 +454,4 @@ def test_reflect_rename_redraws_before_the_poll(monkeypatch, isolated_home):
 
     ManagerApp._reflect_rename(app, "cx", "cx2")
     assert snap.accounts[1].name == "cx2" and snap.accounts[1].slot == codex.slot_dir("cx2")
+    assert app._edits == 2
