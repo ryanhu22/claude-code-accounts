@@ -234,6 +234,31 @@ def test_newer_session_survives_until_sync(fake_keychain, fake_api):
     assert stored(fake_keychain, slot) == newer
 
 
+def test_sync_skips_a_session_whose_rule_moved_mid_pass(
+        fake_keychain, fake_api, monkeypatch):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    other = known("b", "b@example.com", fake_api, fake_keychain)
+    live = session("term", "/repo", "b")
+    calls = 0
+
+    def moved_rule(cwd, term_id):
+        nonlocal calls
+        assert (cwd, term_id) == (live.cwd, live.term_id)
+        calls += 1
+        return ("a" if calls == 1 else "b", "session")
+
+    monkeypatch.setattr(core, "resolve", moved_rule)
+    healed = core.sync_credentials([live])
+    assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, other)
+    assert live.config_dir not in healed
+
+    # A rule that still names this account must repair the other account's copy.
+    monkeypatch.setattr(core, "resolve", lambda cwd, term_id: ("a", "session"))
+    healed = core.sync_credentials([live])
+    assert stored(fake_keychain, live.config_dir) == stored(fake_keychain, slot)
+    assert live.config_dir in healed
+
+
 def test_sync_reads_each_copy_once(fake_keychain, fake_api):
     slots = {n: known(n, f"{n}@example.com", fake_api, fake_keychain) for n in ("a", "b")}
     core.save_rules(profiles.Rules(projects={"/a": "a", "/b": "b"}))

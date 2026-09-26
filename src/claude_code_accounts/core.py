@@ -2146,6 +2146,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
     """
     # account_names stays Claude-only; Codex homes never enter the keychain pass.
     groups: dict[str, list[str]] = {n: [] for n in account_names()}
+    owners_of: dict[str, sessions.Session] = {}
     for sess in live:
         if not sess.term_id:
             continue
@@ -2155,6 +2156,7 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         account, _ = resolve(sess.cwd, sess.term_id)
         if account in groups and path not in groups[account]:
             groups[account].append(path)
+            owners_of[path] = sess
 
     healed: list[str] = []
     for account, session_paths in groups.items():
@@ -2200,6 +2202,12 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
             # again next pass. A copy confirmed to be another account's is a
             # dir that has not caught up with a rule change, and is replaced.
             if ahead.get(path) == "unknown":
+                continue
+            # Grouping reflects the rules at the start of the pass. A later pin
+            # may already have been handed out by the apply pass, and writing
+            # this account's credential over it would undo that pin.
+            sess = owners_of[path]
+            if resolve(sess.cwd, sess.term_id)[0] != account:
                 continue
             if adopt(path, master, email=want, keep_newer=True):
                 healed.append(path)
