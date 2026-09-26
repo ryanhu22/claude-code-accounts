@@ -1242,6 +1242,8 @@ class Snapshot:
         self.rules: core.profiles.Rules = core.profiles.Rules()
         self.running_on: dict[str, str] = {}   # config dir -> account name
         self.taken_at: float = 0.0
+        # This is the app's edit counter when the snapshot was read.
+        self.edits: int = 0
 
 
 class ManagerApp(rumps.App):
@@ -1500,6 +1502,7 @@ class ManagerApp(rumps.App):
                 except Exception:
                     pass          # automatic start must not hide a usage reading
                 with self._lock:
+                    snap.edits = edits
                     self._pending = snap
         finally:
             self._busy = False
@@ -1532,6 +1535,10 @@ class ManagerApp(rumps.App):
                 pass          # one failed follow-up must not stop the rest
         with self._lock:
             snap, self._pending = self._pending, None
+        if snap is not None and snap.edits != self._edits:
+            # An edit while this snapshot waited must survive the sync tick.
+            snap = None
+            self._on_refresh_tick(None)
         if snap is not None:
             changed = _shape(snap) != _shape(self._snapshot)
             added = {s.pid for s in snap.sessions} - {s.pid for s in self._snapshot.sessions}
@@ -1694,6 +1701,7 @@ class ManagerApp(rumps.App):
         threading.Thread(target=work, daemon=True).start()
 
     def _poll_sessions(self) -> None:
+        edits = self._edits
         # Serialize polls so an older worker cannot overwrite the opening poll.
         with self._session_poll_lock:
             live = core.all_sessions(with_git=True, with_transcript=True)
@@ -1713,7 +1721,7 @@ class ManagerApp(rumps.App):
                 dirs, known, self._owner_prints, self._snapshot.accounts, fresh=fresh)
             self._owner_prints = prints
             with self._lock:
-                self._fresh_sessions = (live, owners)
+                self._fresh_sessions = (live, owners, edits)
 
     def _take_sessions(self) -> None:
         """Apply a polled session list, rebuilding only if the set changed."""
@@ -1721,7 +1729,10 @@ class ManagerApp(rumps.App):
             fresh, self._fresh_sessions = self._fresh_sessions, None
         if fresh is None:
             return
-        live, owners = fresh
+        live, owners, edits = fresh
+        # A poll read before a local edit must not restore the old owners.
+        if edits != self._edits:
+            return
         snap = self._snapshot
         added = {s.pid for s in live} - {s.pid for s in snap.sessions}
         structural = ([s.pid for s in live] != [s.pid for s in snap.sessions]
@@ -2982,7 +2993,7 @@ class ManagerApp(rumps.App):
                 return
             name = resp.text.strip()
             applied: dict[str, str] = {}
-            ok, msg = core.add_profile(name)
+            ok, msg = core.add_profile(name, live=[], applied_out=applied)
             if ok and root:
                 ok, msg = core.profile_add_repo(name, root,
                                                 live=[], applied_out=applied)

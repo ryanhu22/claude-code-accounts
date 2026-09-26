@@ -33,6 +33,7 @@ def menubar(monkeypatch):
 def app(menubar):
     app = menubar.ManagerApp.__new__(menubar.ManagerApp)
     app._snapshot = menubar.Snapshot()
+    app._edits = 0
     app._lock = threading.Lock()
     app._session_poll_lock = threading.Lock()
     app._fresh_sessions = None
@@ -329,7 +330,7 @@ def test_rebuild_uses_the_status_items_screen(rows, picker, budget_snap, monkeyp
         picker._menu_open = True
         picker._fresh_sessions = (
             [replace(sess, context_pct=85, status="idle") for sess in budget_snap.sessions],
-            budget_snap.running_on)
+            budget_snap.running_on, picker._edits)
         rows.ManagerApp._take_sessions(picker)
         rows.ManagerApp._repaint(picker)
         budget.assert_not_called()
@@ -797,7 +798,8 @@ def test_open_menu_inserts_sessions_and_defers_removals(
     built.clear()
     monkeypatch.setattr(menubar, "_apply_style", Mock())
     monkeypatch.setattr(menubar, "_session_segments", lambda *args: [])
-    app._fresh_sessions = ([sessions.Session(pid=pid, config_dir="") for pid in live], {})
+    app._fresh_sessions = (
+        [sessions.Session(pid=pid, config_dir="") for pid in live], {}, app._edits)
     app._take_sessions()
     assert list(app.menu) == [app._sessions_heading, *map(str, expected), "PROFILES"]
     assert built == [pid for pid in live if pid not in old]

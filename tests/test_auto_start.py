@@ -343,6 +343,7 @@ def test_worker_reports_on_main_thread_and_forces_followup(menu_app, monkeypatch
     from claude_code_accounts.menubar import ManagerApp
 
     app = menu_app
+    app._edits = 2
     snapshot = SimpleNamespace(accounts=[])
     app._collect = lambda force: snapshot
     monkeypatch.setattr(core, "auto_start", lambda accts: [
@@ -352,6 +353,7 @@ def test_worker_reports_on_main_thread_and_forces_followup(menu_app, monkeypatch
     ])
     ManagerApp._worker(app)
     assert app._pending is snapshot
+    assert snapshot.edits == app._edits
     assert app.flashes == []
     assert app.refreshes == [True]
     assert not app._busy and not app._again and not app._again_force
@@ -390,6 +392,69 @@ def test_worker_drops_a_snapshot_read_before_a_local_edit(menu_app, monkeypatch)
     assert app._pending is None
     assert app.refreshes == [False]
     assert not app._busy and not app._again
+
+
+def test_take_sessions_drops_a_poll_read_before_a_local_edit():
+    from claude_code_accounts.menubar import ManagerApp
+
+    live = [SimpleNamespace(pid=1)]
+    owners = {"/d": "old"}
+    previous = [SimpleNamespace(pid=1)]
+    rebuilds, tracked = [], []
+    app = SimpleNamespace(
+        _lock=threading.Lock(), _edits=1, _fresh_sessions=(live, owners, 0),
+        _snapshot=SimpleNamespace(sessions=previous, running_on={"/d": "new"}),
+        _tracker=SimpleNamespace(update_sessions=tracked.append),
+        _rebuild=lambda: rebuilds.append(True), _menu_open=False)
+
+    ManagerApp._take_sessions(app)
+    assert app._snapshot.running_on == {"/d": "new"}
+    assert app._snapshot.sessions is previous
+    assert app._fresh_sessions is None
+    assert rebuilds == [] and tracked == []
+
+    app._fresh_sessions = (live, owners, 1)
+    ManagerApp._take_sessions(app)
+    assert app._snapshot.running_on is owners
+    assert app._snapshot.sessions is live
+    assert app._fresh_sessions is None
+    assert rebuilds == [True] and tracked == [live]
+
+
+def test_sync_tick_drops_a_pending_snapshot_older_than_an_edit():
+    from claude_code_accounts.menubar import ManagerApp, Snapshot
+
+    previous, pending = Snapshot(), Snapshot()
+    previous.running_on = {"/d": "new"}
+    pending.running_on = {"/d": "old"}
+    pending.edits = 1
+    refreshes, rebuilds, repaints, tracked, takes, polls = [], [], [], [], [], []
+    app = SimpleNamespace(
+        _lock=threading.Lock(), _done=[], _edits=2, _pending=pending,
+        _snapshot=previous, _menu_open=False,
+        _on_refresh_tick=refreshes.append,
+        _rebuild=lambda: rebuilds.append(True),
+        _repaint=lambda: repaints.append(True),
+        _take_sessions=lambda: takes.append(True),
+        _tracker=SimpleNamespace(update_sessions=tracked.append,
+                                 poll=lambda: polls.append(True)))
+
+    ManagerApp._on_sync_tick(app, None)
+    assert app._snapshot is previous
+    assert app._pending is None
+    assert refreshes == [None]
+    assert rebuilds == [] and repaints == [] and tracked == []
+    assert takes == [True] and polls == [True]
+
+    pending.edits = 2
+    app._pending = pending
+    ManagerApp._on_sync_tick(app, None)
+    assert app._snapshot is pending
+    assert app._pending is None
+    assert refreshes == [None]
+    assert rebuilds == [True] and repaints == []
+    assert tracked == [pending.sessions]
+    assert takes == [True, True] and polls == [True, True]
 
 
 def test_apply_later_runs_one_pass_at_a_time(monkeypatch):
