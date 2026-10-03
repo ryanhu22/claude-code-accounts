@@ -2,6 +2,7 @@
 and sign-ins that go wrong."""
 import json
 import os
+import re
 import socket
 from urllib.error import HTTPError
 
@@ -97,6 +98,25 @@ def test_no_network(sandbox, fake_server, run_ccm):
     assert r.stdout.strip() == \
         "gpt: could not read the reset credits ([Errno 61] Connection refused)"
     assert fake_server.resets == []
+
+
+def test_log_records_a_refresh_with_fingerprints_and_no_tokens(sandbox, fake_server, run_ccm):
+    from claude_code_accounts import keychain
+
+    fake_server.add_claude("r@example.com")
+    before = sandbox.seed_claude("r", "r@example.com")
+    sandbox._put_item(keychain.service_for(sandbox.slot("r")),
+                      json.dumps({"claudeAiOauth": {**before, "expiresAt": 1000}}))
+    assert run_ccm("list").returncode == 0
+    after = sandbox.blob(sandbox.slot("r"))
+    r = run_ccm("log")
+    assert r.returncode == 0
+    (line,) = r.stdout.splitlines()
+    assert re.search(r" refresh r [0-9a-f]{8}->[0-9a-f]{8} refresh-token-life 30\.0d$", line), line
+    for secret in (before["accessToken"], before["refreshToken"], after["accessToken"],
+                   after["refreshToken"]):
+        assert secret not in line
+    assert run_ccm("log", "-n", "1").stdout == r.stdout
 
 
 def test_a_denied_sign_in_stores_nothing(sandbox, fake_server):

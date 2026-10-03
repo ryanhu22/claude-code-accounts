@@ -66,7 +66,9 @@ menu bar code run in-process against the same sandbox.
   callback, and returns the `CompletedProcess`. With `paste=True` it feeds
   the hosted `code#state` on stdin instead.
 - `sign_in_codex(name)`: the same for `ccm login <name> --codex`. Binds port
-  1455, as Codex does; skip when it is busy (see the smoke test).
+  1455, as Codex does; skip when it is busy (see the smoke test). A refusal
+  because another sign-in holds the port for a moment is retried for up to
+  the timeout, since tests beside this one may use the port too.
 - `seed_session(config_dir, cwd, term_id=TERM_ID, name="", status="idle")`:
   a Claude Code session running right now, for `ccm sessions`. Writes the
   registry file Claude Code keeps under `<config dir>/sessions/`, starts a

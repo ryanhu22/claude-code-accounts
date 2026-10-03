@@ -310,11 +310,24 @@ class Sandbox:
         return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
     def sign_in_codex(self, name: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
-        """`ccm login <name> --codex` end to end. Needs port 1455, as Codex does."""
+        """`ccm login <name> --codex` end to end. Needs port 1455, as Codex does.
+
+        Another sign-in on this machine (a test running beside this one) can
+        hold the port for a moment, so a refusal for that reason is retried
+        for up to `timeout` seconds before it counts.
+        """
         args = ["login", name, "--codex"]
-        seen = len(self.opened_urls())
-        proc = self.popen(*args)
-        url = self.wait_for_url(proc, seen, timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            seen = len(self.opened_urls())
+            proc = self.popen(*args)
+            try:
+                url = self.wait_for_url(proc, seen, timeout)
+                break
+            except RuntimeError as e:
+                if "port 1455 is in use" not in str(e) or time.monotonic() > deadline:
+                    raise
+                time.sleep(1)
         self.approve(url)
         out, err = proc.communicate(timeout=timeout)
         return subprocess.CompletedProcess(args, proc.returncode, out, err)
