@@ -1134,7 +1134,8 @@ def _waiting(entry: dict, now: float) -> str | None:
 
 
 def _usage(name: str, fetch, force: bool = False,
-           who: str = "", parse=_parse_limits) -> tuple[list[Limit], float, str | None]:
+           who: str = "", parse=_parse_limits,
+           host: str = "Anthropic") -> tuple[list[Limit], float, str | None]:
     """Usage for one account: cached, and backed off after a 429.
 
     /api/oauth/usage is rate limited per account, and every running Claude Code
@@ -1197,7 +1198,9 @@ def _usage(name: str, fetch, force: bool = False,
                 return [], 0.0, note
         if cached:
             return parse(cached), at, None
-        return [], 0.0, f"usage HTTP {code}" if code else str(e)[:60]
+        # No status means the request never got an answer: the same words
+        # the account row uses when it cannot ask who a login belongs to.
+        return [], 0.0, f"usage HTTP {code}" if code else f"can't reach {host}"
     store[name] = {"data": data, "at": now, "retry_after": 0,
                    "who": who, "tried_at": now}
     # A usage refresh must not make automatic start due again.
@@ -1565,7 +1568,7 @@ def load_codex_account(name: str, with_usage: bool = True, force: bool = False) 
         key = f"codex:{name}"
         acct.limits, acct.usage_at, acct.error = _usage(
             key, lambda: codex.fetch_usage(auth), force, acct.email.lower(),
-            parse=codex.parse_limits)
+            parse=codex.parse_limits, host="OpenAI")
         entry = _cache_read().get(key) or {}
         data = entry.get("data")
         # A slot may have changed hands outside the manager. Never put the old
@@ -1935,6 +1938,10 @@ def _describe(e: Exception) -> str:
         except Exception:  # noqa: BLE001 - an unreadable body still has a code
             pass
         return f"HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        # The reason is the whole story ("[Errno 61] Connection refused");
+        # str(e) wraps it in "<urlopen error ...>", which is noise.
+        return str(e.reason) or "no answer"
     return str(e) or e.__class__.__name__
 
 
@@ -2009,7 +2016,7 @@ def poke(name: str, *, weekly_only: bool = False) -> tuple[bool, str]:  # noqa: 
                 pass
             failed.append(f"{model}: {detail or f'HTTP {e.code}'}")
         except Exception as e:
-            failed.append(f"{model}: {str(e)[:60]}")
+            failed.append(f"{model}: {_describe(e)[:60]}")
     if started:
         forget_usage(name)
     if failed and not started:

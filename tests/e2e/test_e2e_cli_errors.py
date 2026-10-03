@@ -83,10 +83,19 @@ def test_no_network(sandbox, fake_server, run_ccm):
     out = plain(r.stdout)
     assert "never  can't reach Anthropic\n  (ccm add never)\n" in out
     assert "work  work@example.com · Max 5x\n" in out and "58.0%" in out
+    # Known accounts with no usage on hand say the same thing, in the same words.
+    os.remove(os.path.join(sandbox.home, ".claude-accts", ".usage-cache.json"))
+    out = plain(run_ccm("list", env=NO_NETWORK).stdout)
+    assert "work  work@example.com · Max 5x  can't reach Anthropic\n" in out
+    assert "gpt codex  gpt@example.com · Pro Lite  <- default  can't reach OpenAI\n" in out
+    assert "urlopen" not in out
     r = run_ccm("reset", "work", "-y", env=NO_NETWORK)
-    assert r.returncode == 1 and r.stdout.startswith("work: could not read the resets (")
+    assert r.returncode == 1
+    assert r.stdout.strip() == "work: could not read the resets ([Errno 61] Connection refused)"
     r = run_ccm("reset", "gpt", "-y", env=NO_NETWORK)
-    assert r.returncode == 1 and r.stdout.startswith("gpt: could not read the reset credits (")
+    assert r.returncode == 1
+    assert r.stdout.strip() == \
+        "gpt: could not read the reset credits ([Errno 61] Connection refused)"
     assert fake_server.resets == []
 
 
