@@ -119,6 +119,39 @@ def test_a_project_rule_from_a_session_row(sandbox, fake_server, menu):
     assert text(after[2]).strip() == "Remove this rule"
 
 
+def test_a_codex_session_row_moves_between_codex_accounts(sandbox, fake_server, menu):
+    """A Codex row is offered Codex accounts alone, and a pin is a Codex rule."""
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_codex("gpt", "gpt@example.com", plan="plus")
+    sandbox.seed_codex("night", "night@example.com", plan="plus")
+    cwd = os.path.join(sandbox.home, "repos", "acme")
+    pid = menu.start_codex_session("gpt", "T2", cwd, name="acme-fixtures")
+    menu.refresh()
+    assert "RUNNING SESSIONS · 1" in menu.texts()
+    row = menu.session_row(pid)
+    assert "￼gpt " in text(row) and "fixtures" in text(row)
+    assert menu.texts(row)[0] == "  Spending gpt, by the default"
+    picks = [r for r in menu.items(row) if text(r).startswith(" ￼")]
+    assert [text(r).split(" ")[1] for r in picks] == ["￼gpt", "￼night"] * 2
+    assert "￼main" not in "".join(menu.texts(row))
+    assert "○ 1" in text(menu.account_row("gpt"))
+    click(picks[1])
+    rules = core.rules()
+    assert rules.codex_sessions["T2"] == "night" and rules.sessions == {}
+    assert menu.flash() == ("this session now uses night. Codex reads its login when it "
+                            "starts, so restart codex in that terminal")
+    menu.settle()
+    # The home now links to night's login, for the next Codex that starts there.
+    assert os.path.realpath(os.path.join(core.codex.session_home("T2"), "auth.json")) == \
+        os.path.realpath(os.path.join(sandbox.codex_slot("night"), "auth.json"))
+    said = menu.texts(menu.session_row(pid))
+    assert said[0] == "  Spending gpt; pinned here says night"
+    assert said[1] == "  Codex reads its login when it starts, so restart it in this tab:"
+    assert said[2] == "  press ctrl+C, then run  codex resume --last"
+    assert "  Restart Codex in that tab now" in said and "  Take me to that tab" in said
+    assert "Spending night" not in "".join(said)
+
+
 def test_a_session_started_outside_ccm_is_told_to_restart(sandbox, fake_server, menu):
     sandbox.seed_claude("main", "main@example.com")
     sandbox.seed_claude("spare", "spare@example.com")

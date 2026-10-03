@@ -18,12 +18,13 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import rumps
 
-from claude_code_accounts import core, focus, menubar, oauth, sessions
+from claude_code_accounts import codex, codex_sessions, core, focus, menubar, oauth, sessions
 
 SETTLE_TIMEOUT = 30.0
 # What a terminal tab's environment carries. The sandbox's `ps` answers with
@@ -124,6 +125,7 @@ class Menu:
         self.delayed = delayed
         self.quits = quits
         self.threads = threads
+        self.codex_sessions: list[sessions.Session] = []
 
     def fire_delayed(self) -> None:
         """Run every one-shot timer the app armed, then settle."""
@@ -192,6 +194,33 @@ class Menu:
             {"TERM_SESSION_ID": term_id, "TERM_PROGRAM": TERMINAL, "CLAUDE_CONFIG_DIR": path},
             tty)
         return proc.pid
+
+    def start_codex_session(self, account: str, term_id: str, cwd: str, *, name: str = "",
+                            status: str = "idle", kind: str = "interactive",
+                            tty: str = "ttys002") -> int:
+        """A live Codex session, in the per-terminal home ccm would have given it.
+
+        Codex keeps no registry; the real reader asks `ps` and `lsof`, which
+        the sandbox answers with nothing, so the session is handed to the app
+        through `codex_sessions.live` instead, for as long as its process runs.
+        """
+        home = codex.prepare_session(term_id, account)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        self.procs.append(proc)
+        os.makedirs(cwd, exist_ok=True)
+        now = time.time()
+        self.codex_sessions.append(sessions.Session(
+            pid=proc.pid, config_dir=home, env_config_dir=home, provider="codex",
+            session_id="0199c0f4-4c4b-7b52-9e1e-f0b1b4d0a4e1", cwd=cwd,
+            name=name or os.path.basename(cwd), name_source="user" if name else "derived",
+            kind=kind, status=status, started_at=now, updated_at=now, term_id=term_id,
+            term_program=TERMINAL, tty=tty))
+        return proc.pid
+
+    def live_codex(self, with_git: bool = False) -> list[sessions.Session]:
+        return [replace(s) for s in self.codex_sessions if sessions.alive(s.pid)]
 
     # ------------------------------------------------------------- reading
 
@@ -360,6 +389,7 @@ def menu(sandbox, monkeypatch, dialogs, tabs, procs, tmp_path):
     monkeypatch.setattr(core, "SOLE_REFRESHER", False)
     app = menubar.ManagerApp()
     m = Menu(app, sandbox, tabs, procs, timers, delayed, quits, threads)
+    monkeypatch.setattr(codex_sessions, "live", m.live_codex)
     m.settle()
     yield m
     for p in procs:
