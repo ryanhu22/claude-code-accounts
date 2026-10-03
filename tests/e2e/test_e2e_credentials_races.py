@@ -8,7 +8,6 @@ and never write an older generation over a newer one. Quitting hands the
 refresh tokens back, and the next start takes them off again.
 """
 import threading
-import time
 
 from claude_code_accounts import core, keychain
 from e2e.lifecycle import (
@@ -223,11 +222,15 @@ def test_quit_hands_the_tokens_back_and_the_next_start_takes_them_again(
     assert len(refreshes(fake_server)) == sent
 
 
-def test_hand_back_leaves_a_copy_on_another_generation_alone(sandbox, fake_server, fleet,
-                                                             monkeypatch):
-    """A copy that missed the last rotation is not the slot's generation, so
-    the slot's refresh token is not its to have."""
+def test_hand_back_gives_a_copy_that_missed_a_rotation_the_slots_login(
+        sandbox, fake_server, fleet, monkeypatch):
+    """A copy that missed the last rotation (its lock was busy) is still this
+    account's. Left out at quit it holds an access token alone and stops
+    within the hour, so it gets the slot's whole login like the others."""
     one_account(sandbox, fake_server)
+    # As in the app: the account is read before any terminal is handed a
+    # copy, so each hand-out records whose copy it is.
+    core.load_account("a", with_usage=False)
     live = [fleet.start("term-1"), fleet.start("term-2")]
     app_starts(monkeypatch)
     core.sync_credentials(live)
@@ -237,7 +240,33 @@ def test_hand_back_leaves_a_copy_on_another_generation_alone(sandbox, fake_serve
     from claude_code_accounts import locks
     with locks.credentials(live[1].config_dir):
         assert core.refresh_slots() == ["a"]
-        given = core.hand_back_refresh_tokens()
-    assert given == [live[0].config_dir]
+    assert sandbox.blob(live[1].config_dir) == stale       # missed it
+    given = core.hand_back_refresh_tokens()
+    assert sorted(given) == sorted(s.config_dir for s in live)
+    slot = sandbox.blob(core.slot_dir("a"))
+    for s in live:
+        assert sandbox.blob(s.config_dir) == slot
+    assert fake_server.reused_refresh_tokens == []
+
+
+def test_hand_back_leaves_a_copy_it_cannot_name_alone(sandbox, fake_server, fleet,
+                                                      monkeypatch):
+    """A stale copy whose owner the cache does not know may be another
+    account's, so the slot's refresh token is not its to have."""
+    one_account(sandbox, fake_server)
+    # As in the app: the account is read before any terminal is handed a
+    # copy, so each hand-out records whose copy it is.
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1"), fleet.start("term-2")]
+    app_starts(monkeypatch)
+    core.sync_credentials(live)
+    expire_in(sandbox, core.slot_dir("a"), 20 * 60)
+    stale = sandbox.blob(live[1].config_dir)
+    from claude_code_accounts import locks
+    with locks.credentials(live[1].config_dir):
+        assert core.refresh_slots() == ["a"]
+    store = core._cache_read(core.IDENTITY_CACHE)
+    store.pop(core.os.path.abspath(live[1].config_dir), None)
+    core._cache_write(store, core.IDENTITY_CACHE)
+    assert core.hand_back_refresh_tokens() == [live[0].config_dir]
     assert sandbox.blob(live[1].config_dir) == stale
-    assert time.time() > 0

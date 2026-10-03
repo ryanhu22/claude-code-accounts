@@ -2698,6 +2698,23 @@ def _session_dirs() -> list[str]:
     return [path for path in out if os.path.isdir(path)]
 
 
+def _handed_back(copy: dict | None, path: str, master: dict, owner: str) -> bool:
+    """Whether a copy is a stripped copy of this login: its generation or one behind.
+
+    A copy can miss a rotation (its lock was busy) and still be this
+    account's. Left out at quit, it keeps an access token alone and stops
+    within the hour. It is given the slot's login only when the cache says it
+    is this account's and it is not ahead of the slot, so another account's
+    copy, or one nobody has named, is never written.
+    """
+    if not copy or copy.get("refreshToken"):
+        return False
+    if fingerprint(copy) == fingerprint(master):
+        return True
+    return bool(owner and _cached_email(path).lower() == owner
+                and (copy.get("expiresAt") or 0) <= (master.get("expiresAt") or 0))
+
+
 def hand_back_refresh_tokens() -> list[str]:
     """Give every session copy its refresh token back, on the app's way out.
 
@@ -2713,18 +2730,18 @@ def hand_back_refresh_tokens() -> list[str]:
     given: list[str] = []
     dirs = _session_dirs()
     for name in account_names():
-        master = keychain.read_credentials(slot_dir(name), max_age=keychain.RECENT)
+        slot = slot_dir(name)
+        master = keychain.read_credentials(slot, max_age=keychain.RECENT)
         if not master or not master.get("refreshToken"):
             continue
-        mine = fingerprint(master)
+        owner = (_cached_email(slot) or recorded_email(slot)).lower()
         for path in dirs:
             copy = keychain.read_credentials(path, max_age=keychain.RECENT)
-            if not copy or copy.get("refreshToken") or fingerprint(copy) != mine:
+            if not _handed_back(copy, path, master, owner):
                 continue
             try:
                 with locks.credentials(path, timeout=3.0):
-                    cur = keychain.read_credentials(path)
-                    if not cur or cur.get("refreshToken") or fingerprint(cur) != mine:
+                    if not _handed_back(keychain.read_credentials(path), path, master, owner):
                         continue   # it moved on while we waited
                     keychain.write_credentials(path, master)
                     given.append(path)
