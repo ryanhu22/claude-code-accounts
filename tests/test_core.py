@@ -194,3 +194,15 @@ def test_cli_version(capsys):
         cli.main(["--version"])
     assert result.value.code == 0
     assert capsys.readouterr().out == f"ccm {__version__}\n"
+
+
+@pytest.mark.parametrize(("path", "expected"), [
+    ("/Users/me", "~"), ("/Users/me/repo", "~/repo"),
+    ("/Users/me-old/repo", "/Users/me-old/repo"),
+    ("/Volumes/backup/Users/me/repo", "/Volumes/backup/Users/me/repo"),
+    ("/private/Users/me/repo", "/private/Users/me/repo"),
+])
+def test_tilde_shortens_only_a_path_under_home(monkeypatch, path, expected):
+    """`ccm where` once printed "/private~/repo" for a path that merely contained HOME."""
+    monkeypatch.setattr(core, "HOME", "/Users/me")
+    assert core.tilde(path) == expected

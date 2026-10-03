@@ -130,17 +130,17 @@ def cmd_where(_args) -> int:
     cwd = os.getcwd()
     account, reason = core.resolve(cwd, term)
     acct = core.load_account(account, with_usage=False) if account else None
-    print(cwd.replace(core.HOME, "~"))
+    print(core.tilde(cwd))
     email = f"  {D}{acct.email}{X}" if acct and acct.email else ""
     print(f"  account : {G}{account or 'none'}{X}" + email)
     print(f"  because : {D}{_why(reason)}{X}")
-    directory = core.account_dir(account).replace(core.HOME, "~") if account else "-"
+    directory = core.tilde(core.account_dir(account)) if account else "-"
     print(f"  dir     : {D}{directory}{X}")
     if core.codex_account_names():
         # The same three answers for the other provider. Only shown when there
         # are Codex accounts, so nobody reads about a tool they do not use.
         account, reason = core.resolve(cwd, term, provider="codex")
-        home = codex.slot_dir(account).replace(core.HOME, "~") if account else "-"
+        home = core.tilde(codex.slot_dir(account)) if account else "-"
         print(f"\n  {D}codex{X}")
         print(f"  account : {G}{account or 'none'}{X}")
         print(f"  because : {D}{_why(reason)}{X}")
@@ -308,7 +308,7 @@ def cmd_sessions(_args) -> int:
         status = "out" if s.logged_out else (s.status or s.kind)
         pin_mark = "\u25cf" if pinned else " "
         print(f"{pin_mark} {s.label[:24]:<25} {status:<7} "
-              f"{s.cwd.replace(core.HOME, '~')[:44]:<45} {running_on or '?':<15}"
+              f"{core.tilde(s.cwd)[:44]:<45} {running_on or '?':<15}"
               f"{D}{reason}{X}{drift}")
     print(f"\n{D}\u25cf = has a rule of its own. `ccm use <account> --session` pins the "
           f"terminal you run it in.{X}")

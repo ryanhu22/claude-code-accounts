@@ -95,6 +95,18 @@ def set_pref(key, value):
         pass
 
 
+def tilde(path: str) -> str:
+    """A path with the home directory shortened to ~, when that is where it starts.
+
+    Only a prefix counts. Replacing the string anywhere turned a sibling such
+    as ~-old/x into "~-old/x" with the wrong home, and a path under a mounted
+    volume that happened to contain the home path into "/Volumes/x~/y".
+    """
+    if path == HOME or path.startswith(HOME + os.sep):
+        return "~" + path[len(HOME):]
+    return path
+
+
 def user_agent() -> str:
     """What to call ourselves, at the version of the CLI that is installed."""
     global _UA

@@ -2414,7 +2414,7 @@ class ManagerApp(rumps.App):
                              callback=self._make_open(sess.cwd)), "folder")
         # The path names the session, and it is the one string here that is
         # not a sentence, so it keeps the monospaced face.
-        where = sess.cwd.replace(core.HOME, "~") or "?"
+        where = core.tilde(sess.cwd) or "?"
         note_item = rumps.MenuItem(f"note:{sess.pid}", callback=None)
         _apply_style(note_item, [("  ", "dim"), (_fit(where, 60).rstrip(), "dim")],
                      mono=False)
@@ -2493,7 +2493,7 @@ class ManagerApp(rumps.App):
                 row = rumps.MenuItem(f"add:{prof.name}:{root}",
                                      callback=self._make_join(prof.name, root))
                 _apply_style(row, [("    ", "dim"),
-                                   (root.replace(core.HOME, "~"), "text")])
+                                   (core.tilde(root), "text")])
                 item.add(row)
         if prof.repos:
             drop = rumps.MenuItem(f"drophead:{prof.name}")
