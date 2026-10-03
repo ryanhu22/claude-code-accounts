@@ -35,7 +35,9 @@ def fake_server():
 
 @pytest.fixture
 def sandbox(tmp_path, fake_server):
-    return Sandbox(tmp_path / "sandbox", fake_server)
+    box = Sandbox(tmp_path / "sandbox", fake_server)
+    yield box
+    box.close()
 
 
 @pytest.fixture

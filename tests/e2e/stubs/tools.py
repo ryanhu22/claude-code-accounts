@@ -9,12 +9,15 @@ line, and the ones a test asks about get a file of their own:
   named `codex-exec.fail` makes the next run fail with that file's text.
 - `launchctl`: a tripwire. ccm must never reach it from a test, so a call
   lands in `tripwire.log` and fails.
-- `ps`, `lsof`: answer with nothing, so the real machine's processes never
-  walk into the sandbox. `ps eww -p PID` answers for a pid listed in the
-  sandbox's `ps.json` (`{"PID": {"tty": "ttys001", "env": {...}}}`), which
-  is how a test gives a stand-in process the environment of a Claude Code
-  session.
+- `ps`: answers from the sandbox's `ps.json`
+  (`{"PID": {"tty": "ttys001", "env": {...}, "command": "claude"}}`), the
+  processes a test registered (`Sandbox.seed_session`, `lifecycle.Fleet`),
+  so the real machine's processes never walk into the sandbox. That is how a
+  stand-in process gets the environment of a Claude Code session. `lsof`
+  answers with nothing.
 - `claude`, `codex --version`: a version, so the User-Agent is deterministic.
+- `open -a <app>`: fails for an app that is not Google Chrome or Safari, as
+  macOS does for a browser that is not installed.
 - `pmset`: a full wake, or a dark wake (no Graphics) while a file named
   `pmset.dark` exists in the sandbox. `osascript`: fails, as it would with
   no terminal app.
@@ -22,6 +25,8 @@ line, and the ones a test asks about get a file of their own:
 import json
 import os
 import sys
+
+BROWSERS = ("Google Chrome", "Safari")
 
 CLAUDE_VERSION = "2.1.261"
 CODEX_VERSION = "0.153.0"
@@ -38,6 +43,43 @@ def _sandbox() -> str:
 def _log(name: str, line: dict) -> None:
     with open(os.path.join(_sandbox(), name), "a") as f:
         f.write(json.dumps(line) + "\n")
+
+
+def _ps(argv: list[str]) -> int:
+    """`ps` over the processes in `ps.json`: {pid: {env, tty, command, lstart}}.
+
+    The three forms src/ runs: `ps eww -p PID` (one process, its environment
+    on the line), `ps -axo pid=,command=` and `ps -axo pid=,lstart=,command=`.
+    A process registered without a command is a Claude Code session.
+    """
+    try:
+        with open(os.path.join(_sandbox(), "ps.json")) as f:
+            procs = json.load(f)
+    except (OSError, ValueError):
+        procs = {}
+    if argv[:1] == ["eww"] and argv[1:2] == ["-p"]:
+        print("  PID TTY           TIME CMD")
+        proc = procs.get(argv[2] if len(argv) > 2 else "")
+        if proc is None:
+            return 1
+        env = " ".join(f"{k}={v}" for k, v in (proc.get("env") or {}).items())
+        command = proc.get("command") or "claude"
+        print(f"{argv[2]} {proc.get('tty') or '??'}  0:00.01 {command} {env}")
+        return 0
+    if argv[:1] == ["-axo"]:
+        fields = argv[1].split(",") if len(argv) > 1 else []
+        for pid, proc in procs.items():
+            cols = []
+            for field in fields:
+                if field.startswith("pid"):
+                    cols.append(pid)
+                elif field.startswith("lstart"):
+                    cols.append(proc.get("lstart") or "Thu Jan  1 00:00:00 2026")
+                elif field.startswith("command"):
+                    cols.append(proc.get("command") or "claude")
+            print(" ".join(cols))
+        return 0
+    return 0
 
 
 def main(tool: str, argv: list[str]) -> int:
@@ -68,24 +110,18 @@ def main(tool: str, argv: list[str]) -> int:
         return 1
     if tool == "open":
         if argv[:1] == ["-Ra"]:
-            return 0 if argv[1:2] in (["Google Chrome"], ["Safari"]) else 1
+            return 0 if argv[1:2] in [[b] for b in BROWSERS] else 1
+        if argv[:1] == ["-a"] and argv[1:2] not in [[b] for b in BROWSERS]:
+            sys.stderr.write(f"Unable to find application named '{argv[1:2] or ['']}'\n")
+            return 1
         url = argv[-1] if argv else ""
         if url:
             with open(os.path.join(_sandbox(), "open-urls.log"), "a") as f:
                 f.write(url + "\n")
         return 0
-    if tool == "ps" and argv[:2] == ["eww", "-p"] and len(argv) == 3:
-        try:
-            with open(os.path.join(_sandbox(), "ps.json")) as f:
-                proc = json.load(f).get(argv[2])
-        except (OSError, ValueError):
-            proc = None
-        print("  PID TTY           TIME CMD")
-        if proc:
-            words = " ".join(f"{k}={v}" for k, v in (proc.get("env") or {}).items())
-            print(f"{argv[2]:>5} {proc.get('tty') or '??':<8} 0:00.00 claude {words}")
-        return 0
-    if tool in ("ps", "lsof"):
+    if tool == "ps":
+        return _ps(argv)
+    if tool == "lsof":
         return 0
     if tool == "pmset":
         if os.path.exists(os.path.join(_sandbox(), "pmset.dark")):

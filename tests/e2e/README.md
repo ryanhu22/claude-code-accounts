@@ -21,8 +21,9 @@ They run as part of the normal suite and take under a second each.
   `~/.claude-manager`, `~/.claude-ctx`, `~/.codex`, `~/.codex-accts` all land
   here.
 - `bin/`: first on PATH. A fake `security` backed by `keychain.json`
-  (`stubs/security.py`), and stubs for `claude`, `codex`, `open`, `ps`,
-  `lsof`, `pmset`, `osascript` and `launchctl` (`stubs/tools.py`). The
+  (`stubs/security.py`), stubs for `claude`, `codex`, `open`, `ps`,
+  `lsof`, `pmset`, `osascript` and `launchctl` (`stubs/tools.py`), and
+  `ccm` itself, so the generated shell resolver finds it by name. The
   rest of PATH is `/usr/bin:/bin`.
 - An environment (`sandbox.env`) with HOME, PATH, USER=e2e, a fixed
   TERM_SESSION_ID, the CCM_* URL overrides for the fake server, and
@@ -66,9 +67,16 @@ menu bar code run in-process against the same sandbox.
   the hosted `code#state` on stdin instead.
 - `sign_in_codex(name)`: the same for `ccm login <name> --codex`. Binds port
   1455, as Codex does; skip when it is busy (see the smoke test).
+- `seed_session(config_dir, cwd, term_id=TERM_ID, name="", status="idle")`:
+  a Claude Code session running right now, for `ccm sessions`. Writes the
+  registry file Claude Code keeps under `<config dir>/sessions/`, starts a
+  `sleep` to own its pid, and tells the fake `ps` (via `ps.json`,
+  `register_process`) what environment that pid has. `close()` kills the
+  sleeps; the fixture does that for you.
 - `blob(config_dir)`: the credential a config dir holds, from the fake
   keychain. `keychain()`, `keychain_log()`.
 - `opened_urls()`, `tool_calls(tool)`, `codex_execs()`, `tripwire()`.
+- `harness.plain(text)` strips the colour codes from an output.
 - `slot(name)`, `codex_slot(name)`, `default_config`.
 - `apply_in_process(setenv, setattr)`: what the autouse fixture calls.
 

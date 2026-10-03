@@ -32,6 +32,14 @@ DEAD_PROXY = "http://127.0.0.1:9"
 TERM_ID = "E2E00000-0000-4000-8000-000000000001"
 
 
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(text: str) -> str:
+    """The text without its colour codes, as a person reads it."""
+    return ANSI.sub("", text)
+
+
 def ccm_command() -> list[str]:
     """The installed `ccm` entry point of the interpreter running the tests."""
     exe = os.path.join(os.path.dirname(sys.executable), "ccm")
@@ -60,6 +68,7 @@ class Sandbox:
         self.home = os.path.join(self.root, "home")
         self.bin = os.path.join(self.root, "bin")
         self.keychain_file = os.path.join(self.root, "keychain.json")
+        self._children: list[subprocess.Popen] = []
         for d in (self.home, self.bin, os.path.join(self.root, "tmp"),
                   os.path.join(self.home, ".claude"), os.path.join(self.home, ".codex")):
             os.makedirs(d, exist_ok=True)
@@ -86,6 +95,12 @@ class Sandbox:
             with open(path, "w") as f:
                 f.write(f'#!/bin/sh\nexec "{python}" "{script}"{arg} "$@"\n')
             os.chmod(path, 0o755)
+        # `ccm` itself, for the shell wrapper: the generated resolver calls it
+        # by name, the way a user's shell does.
+        path = os.path.join(self.bin, "ccm")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\nexec " + " ".join(f'"{c}"' for c in ccm_command()) + ' "$@"\n')
+        os.chmod(path, 0o755)
 
     # ------------------------------------------------------------- paths
 
@@ -201,6 +216,53 @@ class Sandbox:
         with open(self.keychain_file, "w") as f:
             json.dump(items, f)
 
+    def seed_session(self, config_dir: str, cwd: str, term_id: str | None = TERM_ID,
+                     name: str = "", status: str = "idle", kind: str = "interactive",
+                     env_config_dir: str | None = None) -> int:
+        """A Claude Code session that is running right now, as ccm sees one.
+
+        Claude Code registers a session as `<config dir>/sessions/<id>.json`
+        with its pid, and ccm asks `ps` for that process's environment. The
+        process is a `sleep` started here (killed by `close()`), and the fake
+        `ps` answers for it from `ps.json` with the CLAUDE_CONFIG_DIR and
+        TERM_SESSION_ID given. Returns the pid.
+        """
+        proc = subprocess.Popen(["/bin/sleep", "600"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._children.append(proc)
+        now = int(time.time() * 1000)
+        sid = f"e2e-{proc.pid}"
+        os.makedirs(os.path.join(config_dir, "sessions"), exist_ok=True)
+        with open(os.path.join(config_dir, "sessions", sid + ".json"), "w") as f:
+            json.dump({"pid": proc.pid, "sessionId": sid, "cwd": cwd, "name": name,
+                       "kind": kind, "status": status, "startedAt": now, "updatedAt": now,
+                       "entrypoint": "cli", "nameSource": "user" if name else "derived"}, f)
+        env = {"CLAUDE_CONFIG_DIR": env_config_dir or config_dir, "TERM_PROGRAM": "iTerm.app"}
+        if term_id:
+            env["TERM_SESSION_ID"] = term_id
+        self.register_process(proc.pid, env, command="claude", tty="ttys001")
+        return proc.pid
+
+    def register_process(self, pid: int, env: dict[str, str], command: str = "",
+                         tty: str = "??") -> None:
+        """Tell the fake `ps` about a process (see stubs/tools.py)."""
+        path = os.path.join(self.root, "ps.json")
+        try:
+            with open(path) as f:
+                procs = json.load(f)
+        except (OSError, ValueError):
+            procs = {}
+        procs[str(pid)] = {"env": env, "command": command, "tty": tty}
+        with open(path, "w") as f:
+            json.dump(procs, f)
+
+    def close(self) -> None:
+        """Kill the processes `seed_session` started."""
+        for proc in self._children:
+            proc.kill()
+            proc.wait()
+        self._children.clear()
+
     # ------------------------------------------------------------- the real sign-in
 
     def wait_for_url(self, proc: subprocess.Popen, seen: int, timeout: float) -> str:
@@ -283,4 +345,5 @@ class Sandbox:
         setattr(codex, "_UA", None)
 
     def remove(self) -> None:
+        self.close()
         shutil.rmtree(self.root, ignore_errors=True)
