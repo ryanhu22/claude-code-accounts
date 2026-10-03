@@ -385,6 +385,8 @@ def cmd_login(args) -> int:
         finally:
             cb.close()
         print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+        if ok:
+            core.bootstrap()
         return 0 if ok else 1
     cb = None
     if not args.paste:
@@ -425,6 +427,11 @@ def cmd_login(args) -> int:
         return 1
     ok, msg = core.sign_in_finish(attempt, pasted)
     print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+    if ok:
+        # The first account signed in is the default until a rule says
+        # otherwise, so the shell wrapper launches on it from now on rather
+        # than in ~/.claude until some other command starts the rules.
+        core.bootstrap()
     return 0 if ok else 1
 
 

@@ -2,6 +2,7 @@
 where, resolve, and the shell wrapper that `shell-init` prints, run in zsh."""
 import json
 import os
+import socket
 import subprocess
 
 import pytest
@@ -12,6 +13,16 @@ RESTART_HINT = ("A session started before it had a directory of its own keeps it
                 "until it restarts: ctrl+C twice, then `claude -c`.")
 GIT_ENV = {"GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@example.com",
            "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@example.com"}
+
+
+def _port_free(port: int) -> bool:
+    with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
 
 
 def rules(sandbox) -> dict:
@@ -289,3 +300,27 @@ def test_the_codex_restart_hint_is_said_once_and_only_when_codex_ran(sandbox, ru
     r = run_ccm("pin", "gpt")
     assert plain(r.stdout) == ("this session now uses gpt. Codex reads its login when it "
                                "starts, so restart codex in that terminal\n")
+
+
+def test_the_first_sign_in_becomes_the_default(sandbox, fake_server, run_ccm):
+    """Right after `ccm login`, the shell wrapper launches on that account."""
+    fake_server.add_claude("work@example.com")
+    assert sandbox.sign_in("work").returncode == 0
+    assert run_ccm("resolve", env={"TERM_SESSION_ID": ""}).stdout.strip() == sandbox.slot("work")
+    assert rules(sandbox)["default_account"] == "work"
+    out = plain(run_ccm("where").stdout)
+    assert "account : work  work@example.com" in out and "the default applies" in out
+    # A second sign-in does not take the default over.
+    fake_server.add_claude("personal@example.com")
+    fake_server.browser = "personal@example.com"
+    assert sandbox.sign_in("personal").returncode == 0
+    assert rules(sandbox)["default_account"] == "work"
+
+
+@pytest.mark.skipif(not _port_free(1455), reason="port 1455 is in use (a Codex sign-in?)")
+def test_the_first_codex_sign_in_becomes_the_codex_default(sandbox, fake_server, run_ccm):
+    fake_server.add_codex("c@example.com")
+    assert sandbox.sign_in_codex("gpt").returncode == 0
+    assert run_ccm("resolve", "--codex", env={"TERM_SESSION_ID": ""}).stdout.strip() \
+        == sandbox.codex_slot("gpt")
+    assert rules(sandbox)["codex_default_account"] == "gpt"
