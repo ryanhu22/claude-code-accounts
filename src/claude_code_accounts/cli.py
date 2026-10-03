@@ -363,6 +363,9 @@ def cmd_login(args) -> int:
         try:
             attempt = core.sign_in_begin_codex(args.account)
             cb.expect(attempt.state)
+            # The exchange runs before the browser tab is answered, so the
+            # tab reports what happened rather than guessing.
+            cb.finish = lambda code, state: core.sign_in_finish_codex(attempt, code, state)
             err = oauth.open_in(attempt.url, args.browser or "")
             if err:
                 print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
@@ -370,11 +373,10 @@ def cmd_login(args) -> int:
             else:
                 print(f"Signing in as “{args.account}”. A browser is opening.")
             print(f"{D}Waiting for the browser…{X}")
-            if cb.wait(300) and cb.code:
-                ok, msg = core.sign_in_finish_codex(attempt, cb.code, cb.state)
+            if cb.wait(300) and cb.result is not None:
+                ok, msg = cb.result
             else:
-                ok = False
-                msg = cb.error or "no code returned within five minutes; try signing in again"
+                ok, msg = False, "no code returned within five minutes; try signing in again"
         finally:
             cb.close()
         print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
@@ -391,27 +393,31 @@ def cmd_login(args) -> int:
         # the port, so tell it now which sign-in it is waiting for. Anything on
         # this machine can reach that port.
         cb.expect(attempt.state)
+        cb.finish = lambda code, state: core.sign_in_finish(attempt, f"{code}#{state}")
     err = oauth.open_in(attempt.url, args.browser or "")
     if err:
         print(f"could not open a browser: {err}\n\nOpen this yourself:\n{attempt.url}",
               file=sys.stderr)
     else:
         print(f"Signing in as “{args.account}”. A browser is opening.")
-    pasted = ""
     if cb:
         print(f"{D}Waiting for the browser…{X}")
-        if cb.wait(300) and cb.code:
-            pasted = f"{cb.code}#{cb.state}"
-        elif cb.error:
-            print(f"{Y}{cb.error}{X}", file=sys.stderr)
+        done = cb.wait(300)
         cb.close()
-    if not pasted:
-        print(f"{D}Paste the code the page shows.{X}")
-        try:
-            pasted = input("code: ")
-        except EOFError:
-            print("\nno code given; nothing changed", file=sys.stderr)
-            return 1
+        if done and cb.result is not None:
+            # The redirect came back: the tab already shows this outcome. A
+            # refusal is final; asking for a pasted code after it would be
+            # asking for a code the page never showed.
+            ok, msg = cb.result
+            print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+            return 0 if ok else 1
+        print(f"{Y}No code came back within five minutes.{X}", file=sys.stderr)
+    print(f"{D}Paste the code the page shows.{X}")
+    try:
+        pasted = input("code: ")
+    except EOFError:
+        print("\nno code given; nothing changed", file=sys.stderr)
+        return 1
     ok, msg = core.sign_in_finish(attempt, pasted)
     print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1

@@ -3231,6 +3231,11 @@ class ManagerApp(rumps.App):
         # now. Anything on this machine can reach that port; without this it
         # would take a redirect meant for some other sign-in.
         cb.expect(attempt.state)
+        # The exchange runs before the browser tab is answered, so the tab
+        # reports the outcome instead of claiming a sign-in that may fail.
+        cb.finish = (lambda code, state: core.sign_in_finish_codex(attempt, code, state)
+                     if provider == "codex" else
+                     core.sign_in_finish(attempt, f"{code}#{state}"))
         err = oauth.open_in(attempt.url, app)
         if err:
             cb.close()
@@ -3252,12 +3257,10 @@ class ManagerApp(rumps.App):
             try:
                 if not cb.wait(300):
                     outcome = (False, f"Signing in as “{name}” timed out. Try again.")
-                elif cb.error or not cb.code:
-                    outcome = (False, f"Sign-in was refused: {cb.error or 'no code came back'}")
+                elif cb.result is not None:
+                    outcome = cb.result
                 else:
-                    outcome = (core.sign_in_finish_codex(attempt, cb.code, cb.state)
-                               if provider == "codex" else
-                               core.sign_in_finish(attempt, f"{cb.code}#{cb.state}"))
+                    outcome = (False, f"Sign-in was refused: {cb.error or 'no code came back'}")
             except Exception as e:
                 outcome = (False, f"Signing in as “{name}” failed: {e}")
             finally:

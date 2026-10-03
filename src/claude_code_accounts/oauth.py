@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import http.server
 import os
 import secrets
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # The test harness points this at a page of its own (tests/e2e). Unset, it is
@@ -37,23 +39,49 @@ SCOPES = ("user:profile", "user:inference", "user:sessions:claude_code",
           "user:mcp_servers", "user:file_upload")
 
 
-_PAGE_STYLE = b"font:15px -apple-system,sans-serif;margin:4rem auto;max-width:28rem"
+_PAGE_STYLE = ("font:15px -apple-system,sans-serif;line-height:1.5;"
+               "margin:4rem auto;max-width:28rem;padding:0 1rem")
 
-DONE_PAGE = (b"<!doctype html><meta charset=utf-8>"
-             b"<title>Signed in</title>"
-             b"<body style=\"" + _PAGE_STYLE + b"\">"
-             b"<h2>Signed in.</h2><p>You can close this tab and go back to the app.</p>")
 
-WRONG_SIGN_IN_PAGE = (b"<!doctype html><meta charset=utf-8>"
-                      b"<title>Wrong sign-in</title>"
-                      b"<body style=\"" + _PAGE_STYLE + b"\">"
-                      b"<h2>This page does not belong to the sign-in in progress.</h2>"
-                      b"<p>To sign in, go back to the app and start again.</p>")
+def page(title: str, heading: str, *paragraphs: str) -> bytes:
+    """A page the browser lands on: plain HTML, no script, nothing fetched.
 
-NOT_FOUND_PAGE = (b"<!doctype html><meta charset=utf-8>"
-                  b"<title>Not found</title>"
-                  b"<body style=\"" + _PAGE_STYLE + b"\">"
-                  b"<h2>Not found.</h2>")
+    Text is escaped, because a paragraph may carry a message a server sent.
+    `color-scheme` lets the browser draw the page in the colours of the
+    system theme, so it reads the same in dark mode as in light.
+    """
+    body = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
+    return (f"<!doctype html><meta charset=utf-8>"
+            f"<meta name=\"color-scheme\" content=\"light dark\">"
+            f"<title>{html.escape(title)}</title>"
+            f"<body style=\"{_PAGE_STYLE}\">"
+            f"<h2>{html.escape(heading)}</h2>{body}").encode()
+
+
+_GO_BACK = "You can close this tab and go back to the app."
+_TRY_AGAIN = "To try again, go back to the app and start the sign-in again."
+
+DONE_PAGE = page("Signed in", "Signed in.", _GO_BACK)
+WRONG_SIGN_IN_PAGE = page("Wrong sign-in", "This page does not belong to the sign-in in progress.",
+                          "To sign in, go back to the app and start again.")
+NOT_FOUND_PAGE = page("Not found", "Not found.")
+
+
+def done_page(message: str) -> bytes:
+    return page("Signed in", "Signed in.", message, _GO_BACK)
+
+
+def failed_page(message: str) -> bytes:
+    return page("Sign-in did not finish", "The sign-in did not finish.", message, _TRY_AGAIN)
+
+
+def describe_error(error: str, description: str) -> str:
+    """What the sign-in page said instead of a code, in a sentence."""
+    if error == "access_denied":
+        return "The sign-in page reported that the request was not allowed."
+    detail = description or error
+    return f"The sign-in page sent an error instead of a code: {detail}."
+
 
 CALLBACK_PATH = "/callback"
 
@@ -74,11 +102,22 @@ class Callback:
     one that is pending. Without it, `finish()` still rejects a code whose
     state does not match, so the worst a stray request can do is waste the
     attempt, not swap in a code of its own.
+
+    The page the browser gets is the outcome, not a promise. With `finish`
+    set (a callable taking the code and state and returning `(ok, message)`),
+    the redirect runs the exchange before it is answered, so the tab says
+    "Signed in." only once the credential is stored, and says what went wrong
+    otherwise: a code the token endpoint refused, a profile that could not be
+    read, or the sign-in page sending an error instead of a code. `result`
+    then holds the same `(ok, message)` for the caller. Without `finish`, the
+    redirect is only recorded in `code`, `state` and `error`.
     """
 
     def __init__(self, port: int = 0, path: str = CALLBACK_PATH) -> None:
         self.code = self.state = self.error = ""
         self.expected_state = ""
+        self.finish: Callable[[str, str], tuple[bool, str]] | None = None
+        self.result: tuple[bool, str] | None = None
         self.path = path
         outer = self
 
@@ -97,13 +136,24 @@ class Callback:
                     return
                 if outer._done.is_set():
                     # A reload of the tab, or a late arrival. The caller may
-                    # be reading `code` right now, so nothing is overwritten.
-                    self._reply(200, DONE_PAGE)
+                    # be reading `code` right now, so nothing is overwritten;
+                    # the tab gets the outcome it saw the first time.
+                    self._reply(*outer._outcome_page())
                     return
                 outer.code = (got.get("code") or [""])[0]
                 outer.state = state
-                outer.error = (got.get("error_description") or got.get("error") or [""])[0]
-                self._reply(200, DONE_PAGE)
+                error = (got.get("error") or [""])[0]
+                description = (got.get("error_description") or [""])[0]
+                outer.error = description or error
+                if outer.error or not outer.code:
+                    outer.result = (False, describe_error(error, description) if error
+                                    else "The sign-in page sent no code.")
+                elif outer.finish is not None:
+                    try:
+                        outer.result = outer.finish(outer.code, outer.state)
+                    except Exception as e:  # the page must still answer
+                        outer.result = (False, f"The sign-in could not be finished: {e}")
+                self._reply(*outer._outcome_page())
                 outer._done.set()
 
             def _reply(self, status: int, page: bytes) -> None:
@@ -120,6 +170,13 @@ class Callback:
         self._done = threading.Event()
         self.port = self._server.server_address[1]
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def _outcome_page(self) -> tuple[int, bytes]:
+        """What the tab shows once the redirect has been handled."""
+        if self.result is None:
+            return 200, DONE_PAGE          # no `finish`: the caller exchanges the code
+        ok, message = self.result
+        return 200, (done_page(message) if ok else failed_page(message))
 
     @property
     def redirect_uri(self) -> str:
