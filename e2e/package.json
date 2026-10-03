@@ -1,0 +1,15 @@
+{
+  "name": "ccm-browser-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "e2e run",
+    "list": "e2e list"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "^4.0.83",
+    "@e2e-dev/web": "^0.11.2",
+    "ai": "^7.0.127",
+    "e2e": "^0.16.0"
+  }
+}

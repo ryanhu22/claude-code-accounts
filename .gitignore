@@ -12,3 +12,7 @@ build/
 .pytest_cache/
 .ruff_cache/
 *.log
+
+# the browser suite under e2e/: its Node packages and run output
+e2e/node_modules/
+e2e/.e2e/
