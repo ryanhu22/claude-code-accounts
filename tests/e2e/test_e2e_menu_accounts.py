@@ -6,6 +6,7 @@ items, and a click runs the row's own callback.
 """
 import json
 import os
+import threading
 import time
 
 from claude_code_accounts import core, keychain
@@ -217,16 +218,16 @@ def test_rename_moves_the_login_and_redraws_at_once(sandbox, fake_server, menu, 
     dialogs.answers.append((1, "office"))
     click(menu.find("Rename…", menu.account_row("main")))
     assert dialogs.windows[-1]["title"] == "Rename main"
+    assert menu.flash() == "Renaming “main”…"
+    menu.settle()
     assert dialogs.notifications[-1]["subtitle"] == "Renamed"
     assert dialogs.notifications[-1]["message"] == "main is now office"
-    # The menu is redrawn from what the rename wrote, before any poll lands.
     assert menu.account_names() == ["office", "spare"]
     assert sandbox.blob(sandbox.slot("office"))
     assert sandbox.blob(sandbox.slot("main")) is None
     assert not os.path.exists(sandbox.slot("main"))
     assert core.rules().default_account == "office"
     assert menu.title().startswith("⇄ office")
-    menu.settle()
     assert " 58%" in text(menu.account_row("office"))
 
 
@@ -237,9 +238,11 @@ def test_rename_to_a_taken_name_fails_without_moving_anything(
     menu.refresh()
     dialogs.answers.append((1, "spare"))
     click(menu.find("Rename…", menu.account_row("main")))
+    menu.settle()
     assert dialogs.notifications[-1]["subtitle"] == "Rename failed"
     assert dialogs.notifications[-1]["message"] == "spare already exists"
-    menu.settle()
+    assert menu.flash() == "spare already exists"
+    assert menu.account_names() == ["main", "spare"]
     assert sandbox.blob(sandbox.slot("main")) and sandbox.blob(sandbox.slot("spare"))
 
 
@@ -258,6 +261,43 @@ def test_remove_deletes_the_login_after_a_confirmation(sandbox, fake_server, men
     menu.settle()
     assert sandbox.blob(sandbox.slot("spare")) is None
     assert not os.path.exists(sandbox.slot("spare"))
+    assert menu.account_names() == ["main"]
+
+
+def test_rename_and_remove_keep_the_keychain_off_the_drawing_thread(
+        sandbox, fake_server, menu, dialogs, monkeypatch):
+    """A `security` call can take seconds on a slow keychain, and AppKit
+    draws on the thread that would be waiting for it."""
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_claude("spare", "spare@example.com")
+    menu.refresh()
+    on_main: list[bool] = []
+    run = keychain._run
+
+    def spy(args, stdin=None):
+        on_main.append(threading.current_thread() is threading.main_thread())
+        return run(args, stdin)
+
+    monkeypatch.setattr(keychain, "_run", spy)
+    dialogs.answers.append((1, "office"))
+    click(menu.find("Rename…", menu.account_row("spare")))
+    assert menu.flash() == "Renaming “spare”…"
+    menu.settle()
+    assert on_main and not any(on_main)
+    assert menu.account_names() == ["main", "office"]
+    assert sandbox.blob(sandbox.slot("office")) and sandbox.blob(sandbox.slot("spare")) is None
+    assert menu.flash() == "spare is now office"
+    assert dialogs.notifications[-1]["subtitle"] == "Renamed"
+    on_main.clear()
+    dialogs.answers.append(1)
+    click(menu.find("Remove account…", menu.account_row("office")))
+    assert menu.flash() == "Removing “office”…"
+    # Gone from the menu at once, before the poll that would confirm it.
+    assert menu.account_names() == ["main"]
+    menu.settle()
+    assert on_main and not any(on_main)
+    assert sandbox.blob(sandbox.slot("office")) is None
+    assert menu.flash() == "“office” removed"
     assert menu.account_names() == ["main"]
 
 

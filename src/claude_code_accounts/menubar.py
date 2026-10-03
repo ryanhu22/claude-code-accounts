@@ -3171,12 +3171,28 @@ class ManagerApp(rumps.App):
             resp = win.run()
             if resp.clicked != 1:
                 return
-            ok, msg = core.rename_account(account, resp.text)
-            rumps.notification("Claude Code Accounts", "Renamed" if ok else "Rename failed", msg)
-            if ok:
-                self._reflect_rename(account, core.clean_account_name(resp.text))
-            self.refresh_now(None)
+            # A rename moves the login in the keychain: a read, a write and a
+            # delete, each a `security` call that a slow keychain answers in
+            # seconds. AppKit draws on the thread that would be waiting, so
+            # the move runs off it, shaped like a poke: the click is
+            # acknowledged first and the result reported when it lands.
+            self._report(True, f"Renaming “{account}”…")
+            threading.Thread(target=self._rename, args=(account, resp.text),
+                             daemon=True).start()
         return handler
+
+    def _rename(self, account: str, wanted: str) -> None:
+        ok, msg = core.rename_account(account, wanted)
+        self._later(lambda: self._renamed(account, core.clean_account_name(wanted), ok, msg))
+
+    def _renamed(self, account: str, new: str, ok: bool, message: str) -> None:
+        rumps.notification("Claude Code Accounts", "Renamed" if ok else "Rename failed", message)
+        self._flash = (message, "ok" if ok else "hot", time.time())
+        if ok:
+            self._reflect_rename(account, new)
+        else:
+            self._rebuild()
+        self.refresh_now(None)
 
     def _reflect_rename(self, old: str, new: str) -> None:
         """Redraw with the new name now, before the poll that confirms it.
@@ -3219,10 +3235,37 @@ class ManagerApp(rumps.App):
                     message = ("This deletes its login file. Your subscription is untouched, "
                                "and you can add it back with a sign-in.")
             confirm = rumps.alert(title=title, message=message, ok="Remove", cancel="Cancel")
-            if confirm == 1:
-                core.remove_account(account)
-                self.refresh_now(None)
+            if confirm != 1:
+                return
+            # The menu drops the account now: the writer knows what it is
+            # about to delete, and waiting for a poll kept the row on screen
+            # for a refresh after the person had said to remove it. The
+            # keychain delete runs off the drawing thread, as a rename does.
+            self._flash = (f"Removing “{account}”…", "ok", time.time())
+            self._reflect_remove(account)
+            threading.Thread(target=self._remove, args=(account,), daemon=True).start()
         return handler
+
+    def _reflect_remove(self, account: str) -> None:
+        snap = self._snapshot
+        snap.accounts = [a for a in snap.accounts if a.name != account]
+        snap.running_on = {d: "" if a == account else a for d, a in snap.running_on.items()}
+        snap.rules = core.rules()
+        self._edits += 1
+        self._rebuild()
+
+    def _remove(self, account: str) -> None:
+        ok = core.remove_account(account)
+        self._later(lambda: self._removed(account, ok))
+
+    def _removed(self, account: str, ok: bool) -> None:
+        # The rules that named the account were rewritten with it, so a
+        # snapshot read before that is older than the menu.
+        self._snapshot.rules = core.rules()
+        self._edits += 1
+        self._report(ok, f"“{account}” removed" if ok
+                     else f"Could not remove “{account}”. Its login may still be stored.")
+        self.refresh_now(None)
 
     def _make_add(self, name: str = ""):
         def handler(_sender):
