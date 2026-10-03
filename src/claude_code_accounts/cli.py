@@ -229,17 +229,17 @@ def cmd_profile(args) -> int:
 def _after_use(account: str) -> None:
     """What the user has to do for the change to reach a running session.
 
-    The two tools differ, so the hint does. Claude Code re-reads its
-    credential about every half minute; Codex reads its login once, when it
-    starts, so nothing reaches a Codex that is already running.
+    Claude Code re-reads its credential about every half minute, so only a
+    session with no directory of its own is left behind, and that caveat is
+    general. Codex reads its login once, when it starts, and the rule's own
+    message already says to restart it when a Codex ran in that terminal,
+    so nothing is added here: saying it again, or when nothing ran, is noise.
     """
     try:
         provider = core.resolve_any(account)[0]
     except core.UnknownAccount:
         provider = "claude"
-    if provider == "codex":
-        print(f"{D}Codex reads its login when it starts: restart codex in that terminal.{X}")
-    else:
+    if provider == "claude":
         print(f"{D}A session started before it had a directory of its own keeps its account "
               "until it restarts: "
               f"ctrl+C twice, then `claude -c`.{X}")

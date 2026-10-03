@@ -1207,7 +1207,8 @@ def test_codex_cli_round_trip(fake_keychain, fake_api, monkeypatch, capsys, tmp_
     assert cli.main(["use", "cx"]) == 0
     output = capsys.readouterr().out
     assert "now uses cx" in output
-    assert "restart codex in that terminal" in output
+    # No Codex ran in this terminal, so there is nothing to restart and no hint.
+    assert "restart codex" not in output
     assert core.rules().codex_projects == {str(repo): "cx"}
     assert core.rules().projects == {}
     # Where prints the claude answer, then the same three lines for codex.

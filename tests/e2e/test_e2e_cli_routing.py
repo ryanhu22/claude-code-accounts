@@ -10,7 +10,6 @@ from e2e.harness import TERM_ID, plain
 
 RESTART_HINT = ("A session started before it had a directory of its own keeps its account "
                 "until it restarts: ctrl+C twice, then `claude -c`.")
-CODEX_HINT = "Codex reads its login when it starts: restart codex in that terminal."
 GIT_ENV = {"GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@example.com",
            "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@example.com"}
 
@@ -189,7 +188,7 @@ def test_codex_accounts_route_beside_claude_ones(sandbox, two_claude, run_ccm):
         "  dir     : ~/.codex-accts/gpt"]
     r = run_ccm("use", "gpt2")
     assert r.returncode == 0
-    assert plain(r.stdout).splitlines() == ["“home” now uses gpt2", CODEX_HINT]
+    assert plain(r.stdout).splitlines() == ["“home” now uses gpt2"]
     saved = rules(sandbox)
     assert saved["codex_projects"] == {"~": "gpt2"} and saved["codex_default_account"] == "gpt"
     assert saved["projects"] == {} and saved["default_account"] == "work", "Claude untouched"
@@ -275,3 +274,18 @@ def test_the_shell_wrapper_launches_each_tool_in_the_resolved_dir(sandbox, two_c
             assert codex["CODEX_HOME"] == sandbox.codex_slot("gpt"), cwd
     finally:
         os.rename(os.path.join(sandbox.bin, "ccm.off"), os.path.join(sandbox.bin, "ccm"))
+
+
+def test_the_codex_restart_hint_is_said_once_and_only_when_codex_ran(sandbox, run_ccm):
+    sandbox.seed_codex("gpt", "gpt@example.com")
+    sandbox.seed_codex("gpt2", "gpt2@example.com")
+    # No Codex has run in this terminal: nothing to restart, so no hint.
+    r = run_ccm("use", "gpt2")
+    assert plain(r.stdout) == "“home” now uses gpt2\n"
+    r = run_ccm("pin", "gpt2")
+    assert plain(r.stdout) == "this session now uses gpt2\n"
+    # The wrapper launched Codex here, so this terminal has a home of its own.
+    run_ccm("resolve", "--codex")
+    r = run_ccm("pin", "gpt")
+    assert plain(r.stdout) == ("this session now uses gpt. Codex reads its login when it "
+                               "starts, so restart codex in that terminal\n")
