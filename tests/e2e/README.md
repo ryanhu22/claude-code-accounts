@@ -173,9 +173,12 @@ It prints one JSON line as soon as ccm has asked for a browser:
 ```
 
 Open `authorize_url` in the browser, click `#authorize`, and the browser is
-redirected to `callback_url` with the code, where ccm serves "Signed in. You
-can close this tab and go back to the app." (`oauth.DONE_PAGE`). A reload
-of that tab shows the same page; a request with another state gets
+redirected to `callback_url` with the code. ccm exchanges the code before it
+answers that request, so the page is the outcome: "Signed in." with the
+account (`oauth.done_page`), or "The sign-in did not finish." with the
+reason (`oauth.failed_page`), when the token endpoint refused the code or
+the sign-in page sent `access_denied`. A reload of that tab, even during
+the exchange, shows the same page; a request with another state gets
 `WRONG_SIGN_IN_PAGE` with a 400. When ccm exits, or `--timeout` seconds
 (default 300) pass, the script prints a second line:
 
@@ -186,3 +189,56 @@ of that tab shows the same page; a request with another state gets
 and exits with ccm's status. The sandbox is removed unless `--keep` is
 passed. Nothing in it touches the real keychain or home directory, so it
 is safe to run on a machine with live logins.
+
+The failure modes are flags, and the same keywords on the `SignIn` class
+the script is built on:
+
+| flag | what happens |
+|---|---|
+| `--codex` | `ccm login --codex`, on port 1455 (`--plan` sets the fake plan) |
+| `--deny` | the Authorize press comes back as `access_denied` |
+| `--browser EMAIL` | the browser is signed in as another account |
+| `--seeded EMAIL` | the slot held that account before, so ccm says it changed hands |
+| `--expired-code` | the token endpoint refuses the code as expired |
+| `--slow-token SECONDS` | the exchange takes that long (reload the tab meanwhile) |
+| `--busy-port` | something holds port 1455 before ccm starts; ccm exits 1 |
+
+`test_e2e_signin_pages.py` runs these without a browser, so a regression in
+the pages is caught by the ordinary test run.
+
+## The browser suite
+
+`e2e/` at the repository root holds a suite that renders all of this in
+Chromium, with the [tester-army/e2e](https://github.com/tester-army/e2e)
+runner (`@e2e-dev/web`, Playwright underneath). It is separate from pytest
+because a few steps ask a model to judge the page:
+
+```sh
+npm --prefix e2e install                   # once
+(cd e2e && npx e2e login openai)           # once: the model behind agent steps
+npm --prefix e2e test                      # the whole suite
+npm --prefix e2e test -- --grep Codex --headed
+```
+
+The runner starts `tests/e2e/signin_service.py` as the app under test (one
+process for the run, stopped when the run ends) and each test asks it for a
+sandboxed sign-in over HTTP, with the same keywords as the table above plus
+`sandbox_of` to put a second account into the first one's home. Tests then
+open `authorize_url` in the runner's browser, press Authorize, and read
+ccm's page; `signins.outcome(id)` is how ccm ended, `signins.ccm(id,
+"list")` runs another command in that sandbox. The six Codex tests skip
+when port 1455 is busy, like the pytest ones.
+
+What it covers: the Claude and Codex sign-ins end to end (page, exit
+status, `ccm list`), a denied sign-in, a code the token endpoint refuses,
+a forged state and a stray request against the callback, the callback
+visited twice during the exchange and after ccm exited, a browser signed
+in to another account, a second account, port 1455 busy, and the pages
+themselves: no script, nothing fetched, the content in the HTML the server
+sends, readable in dark and light mode, short plain sentences with no em
+dashes or filler words.
+
+Agent steps use the ChatGPT subscription signed in with `npx e2e login
+openai` (model `gpt-6-luna`); three to four model calls per run, fewer once
+the replay cache under `e2e/.e2e/` (ignored by git) has recorded the one
+`agent.act`. Everything else is locators and `expect`.

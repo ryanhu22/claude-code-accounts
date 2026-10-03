@@ -171,6 +171,10 @@ class FakeServer:
         self.browser: str | None = None
         self.codex_browser: str | None = None
         self.deny_next_authorize = False
+        # Seconds to sit on a request whose path starts with the key, before
+        # answering it. A slow token exchange is how a browser test gets to
+        # reload the callback tab while ccm is still finishing.
+        self.hold: dict[str, float] = {}
         self.authorizations: list[dict] = []
         self._codes: dict[str, dict] = {}
         self._access: dict[str, str] = {}             # access token -> email
@@ -388,6 +392,9 @@ class FakeServer:
             else "anthropic"
         rec = Recorded(h.command, path, query, {k.lower(): v for k, v in h.headers.items()},
                        body, service)
+        for prefix, seconds in list(self.hold.items()):
+            if path.startswith(prefix):
+                time.sleep(seconds)
         with self._lock:
             self.requests.append(rec)
             scripted = next((s for s in self._scripted if s.prefix and path.startswith(s.prefix)
