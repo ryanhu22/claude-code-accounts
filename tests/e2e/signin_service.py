@@ -135,7 +135,7 @@ def serve(port: int) -> int:
                 self._json(200, self._route(method, url.path, query, body))
             except KeyError as e:
                 self._json(404, {"error": f"no such sign-in: {e}"})
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError, RuntimeError) as e:
                 self._json(400, {"error": str(e)})
             except Exception as e:  # noqa: BLE001 - the suite must see the reason, not a hang
                 self._json(500, {"error": repr(e)})

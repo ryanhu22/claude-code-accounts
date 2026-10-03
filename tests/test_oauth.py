@@ -202,7 +202,7 @@ def test_pages_are_plain_self_contained_html(page):
     text = page.decode()
     assert text.startswith("<!doctype html><meta charset=utf-8>")
     assert '<meta name="color-scheme" content="light dark">' in text
-    assert "<script" not in text and "http" not in text and "—" not in text
+    assert "<script" not in text and "http" not in text and "\u2014" not in text
 
 
 def test_callback_answers_a_second_visit_during_the_exchange_with_the_same_outcome(callback):

@@ -33,7 +33,7 @@ function contrast(a: string, b: string): { ratio: number; luminance: [number, nu
 }
 
 function checkCopy(text: string): void {
-  expect(text).not.toContain('—');
+  expect(text).not.toContain('\u2014');
   expect(text).not.toMatch(BANNED_WORDS);
   for (const sentence of sentences(text)) {
     expect(sentence.split(/\s+/).length).toBeLessThanOrEqual(20);

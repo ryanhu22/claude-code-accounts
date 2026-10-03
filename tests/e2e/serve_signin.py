@@ -102,7 +102,13 @@ class SignIn:
         if busy_port:
             self._busy = socket.socket()
             self._busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._busy.bind(("127.0.0.1", CODEX_PORT))
+            try:
+                self._busy.bind(("127.0.0.1", CODEX_PORT))
+            except OSError as e:
+                # Someone else holds it already: say so, and leave no sandbox
+                # behind for a sign-in that never starts.
+                self.close()
+                raise RuntimeError(f"port {CODEX_PORT} is already in use on this machine") from e
             self._busy.listen(1)
 
     def _add(self, email: str, tier: str, plan: str) -> None:

@@ -81,7 +81,7 @@ def test_success_page_names_the_account(signin):
     body = land(s, s.start())
     assert "<h2>Signed in.</h2>" in body
     assert "“work” is signed in as work@example.com" in body
-    assert "<script" not in body and "http" not in body and "—" not in body
+    assert "<script" not in body and "http" not in body and "\u2014" not in body
     assert '<meta name="color-scheme" content="light dark">' in body
     assert s.outcome()["signed_in"]
     assert "work  work@example.com" in ANSI.sub("", s.ccm("list")["stdout"])
@@ -134,3 +134,21 @@ def test_codex_busy_port_exits_before_a_browser(signin):
     first = s.start()
     assert first["exited"] and first["returncode"] == 1
     assert "port 1455 is in use" in first["stderr"]
+
+
+@needs_1455
+def test_a_sign_in_that_cannot_start_leaves_no_sandbox():
+    import glob
+    import os
+    import tempfile
+
+    before = set(glob.glob(os.path.join(tempfile.gettempdir(), "ccm-e2e-*")))
+    holder = socket.socket()
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("127.0.0.1", 1455))
+    try:
+        with pytest.raises(RuntimeError, match="1455 is already in use"):
+            SignIn(account="gpt", codex=True, busy_port=True)
+    finally:
+        holder.close()
+    assert set(glob.glob(os.path.join(tempfile.gettempdir(), "ccm-e2e-*"))) == before
