@@ -115,7 +115,7 @@ class Menu:
     """
 
     def __init__(self, app: menubar.ManagerApp, sandbox, tabs: Tabs, procs: list,
-                 timers: list, delayed: list, quits: list) -> None:
+                 timers: list, delayed: list, quits: list, threads: list) -> None:
         self.app = app
         self.sandbox = sandbox
         self.tabs = tabs
@@ -123,6 +123,7 @@ class Menu:
         self.timers = timers
         self.delayed = delayed
         self.quits = quits
+        self.threads = threads
 
     def fire_delayed(self) -> None:
         """Run every one-shot timer the app armed, then settle."""
@@ -141,7 +142,8 @@ class Menu:
             app._on_sync_tick(None)
             quiet = (not app._busy and not app._syncing and not app._polling
                      and not app._applying and app._pending is None and not app._done
-                     and app._fresh_sessions is None and not app._signing_in)
+                     and app._fresh_sessions is None and not app._signing_in
+                     and not any(t.is_alive() for t in self.threads))
             if quiet:
                 return
             if time.monotonic() > deadline:
@@ -333,8 +335,17 @@ def menu(sandbox, monkeypatch, dialogs, tabs, procs, tmp_path):
         def start(self):
             delayed.append((self.seconds, self.fn))
 
+    threads: list[threading.Thread] = []
+
+    class Tracked(threading.Thread):
+        """A thread the app started, so `settle` can wait for it."""
+
+        def start(self):
+            threads.append(self)
+            super().start()
+
     monkeypatch.setattr(menubar, "threading", SimpleNamespace(
-        Thread=threading.Thread, Lock=threading.Lock, Timer=Delayed))
+        Thread=Tracked, Lock=threading.Lock, Timer=Delayed))
     monkeypatch.setattr(rumps, "quit_application", lambda sender=None: quits.append(sender))
     monkeypatch.setattr(menubar.ManagerApp, "_hide_from_dock", staticmethod(lambda: None))
     monkeypatch.setattr(menubar.ManagerApp, "_watch_stop", lambda self: None)
@@ -348,7 +359,7 @@ def menu(sandbox, monkeypatch, dialogs, tabs, procs, tmp_path):
     monkeypatch.setattr(oauth, "_INSTALLED", None)
     monkeypatch.setattr(core, "SOLE_REFRESHER", False)
     app = menubar.ManagerApp()
-    m = Menu(app, sandbox, tabs, procs, timers, delayed, quits)
+    m = Menu(app, sandbox, tabs, procs, timers, delayed, quits, threads)
     m.settle()
     yield m
     for p in procs:
