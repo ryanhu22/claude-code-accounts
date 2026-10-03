@@ -174,3 +174,42 @@ def test_a_codex_account_offers_to_start_its_weekly_window(sandbox, fake_server,
     assert menu.flash() == "gpt: 1 window group(s) started"
     (ran,) = sandbox.codex_execs()
     assert ran["CODEX_HOME"] == sandbox.codex_slot("gpt")
+
+
+def test_an_action_that_lands_leaves_the_menu(sandbox, fake_server, menu, dialogs):
+    """A row that offers something already done is a row that lies."""
+    idle_account(fake_server, "main@example.com")
+    fake_server.add_claude("spare@example.com", grants=[dict(GRANT)])
+    fake_server.add_codex("gpt@example.com", plan="plus", credits=[dict(CREDIT)])
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_claude("spare", "spare@example.com")
+    sandbox.seed_codex("gpt", "gpt@example.com")
+    menu.refresh()
+    click(menu.find("Start the", menu.account_row("main")))
+    menu.settle()
+    assert menu.flash() == "main: 1 window group(s) started"
+    assert not any("Start the" in line for line in menu.texts(menu.account_row("main")))
+    reset = menu.find("Reset your limits now…", menu.account_row("spare"))
+    click(menu.find("Use your reset now", reset))
+    menu.settle()
+    assert menu.flash() == "spare: limits reset, that was the last reset"
+    assert not any("Reset your limits" in line for line in menu.texts(menu.account_row("spare")))
+    assert not any("resets\t" in line for line in menu.texts(menu.account_row("spare")))
+    reset = menu.find("Reset every window now…", menu.account_row("gpt"))
+    click(menu.find("Use 1 of 1 reset credit now", reset))
+    menu.settle()
+    assert menu.flash() == "gpt: windows reset, that was the last reset credit"
+    assert not any("Reset every window" in line for line in menu.texts(menu.account_row("gpt")))
+    assert "credits\tnone" in menu.texts(menu.account_row("gpt"))
+
+
+def test_usage_that_comes_back_fills_the_submenu_in(sandbox, fake_server, menu):
+    """A rate limit that clears must put the usage block back without a click."""
+    sandbox.seed_claude("busy", "busy@example.com")
+    fake_server.script("/api/oauth/usage", 429, {"error": "rate_limited"},
+                       headers={"Retry-After": "300"})
+    menu.refresh()
+    assert "  Usage" not in menu.texts(menu.account_row("busy"))
+    menu.refresh(force=False)
+    assert " 58%" in text(menu.account_row("busy"))
+    assert "  Usage" in menu.texts(menu.account_row("busy"))

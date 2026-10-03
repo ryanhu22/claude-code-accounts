@@ -1101,7 +1101,15 @@ def _shape(snap: Snapshot) -> tuple:
     """
     r = snap.rules
     return (
-        tuple((a.name, a.signed_in, a.error, a.mismatch) for a in snap.accounts),
+        # An account's menu offers to start the windows that have no clock
+        # and to spend the resets it holds. Those rows come and go with the
+        # usage, so a poke or a reset that landed used to leave its own row
+        # behind, offering again what it had just done, until something
+        # else happened to rebuild the menu.
+        tuple((a.name, a.signed_in, a.error, a.mismatch, a.reading, a.plan,
+               tuple(lim.label for lim in a.limits if not lim.resets_at),
+               a.extras.get("reset_credits", 0), a.extras.get("reset_credit_expires", ""))
+              for a in snap.accounts),
         # Logged out is part of the shape, not of the text: it adds a warning
         # line and a row to the session's menu, so noticing it needs a rebuild.
         tuple((s.pid, s.logged_out) for s in snap.sessions),
