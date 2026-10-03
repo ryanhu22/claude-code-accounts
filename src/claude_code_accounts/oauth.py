@@ -18,13 +18,16 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.server
+import os
 import secrets
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 
-AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+# The test harness points this at a page of its own (tests/e2e). Unset, it is
+# the real sign-in page.
+AUTHORIZE_URL = os.environ.get("CCM_AUTHORIZE_URL") or "https://claude.com/cai/oauth/authorize"
 CALLBACK_URL = "https://platform.claude.com/oauth/code/callback"
 
 # The scope set a real Claude Code login carries. Ask for exactly these: a

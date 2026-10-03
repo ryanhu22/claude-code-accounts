@@ -32,14 +32,18 @@ DEFAULT_HOME = os.path.join(HOME, ".codex")
 ACCOUNTS_DIR = os.environ.get("CCM_CODEX_ACCOUNTS_DIR", os.path.join(HOME, ".codex-accts"))
 SESSION_DIRS = os.path.join(HOME, ".codex-ctx")
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
-TOKEN_URL = "https://auth.openai.com/oauth/token"
+# The test harness points these two hosts at a server of its own (tests/e2e).
+# Unset, every request goes where it always did.
+_AUTH_BASE = os.environ.get("CCM_CODEX_AUTH_BASE") or "https://auth.openai.com"
+_API_BASE = os.environ.get("CCM_CODEX_API_BASE") or "https://chatgpt.com"
+AUTHORIZE_URL = _AUTH_BASE + "/oauth/authorize"
+TOKEN_URL = _AUTH_BASE + "/oauth/token"
 CALLBACK_PORT = 1455
 CALLBACK_PATH = "/auth/callback"
 REDIRECT_URI = "http://localhost:1455/auth/callback"
 SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
-USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+USAGE_URL = _API_BASE + "/backend-api/wham/usage"
+RESET_CREDITS_URL = _API_BASE + "/backend-api/wham/rate-limit-reset-credits"
 UA_FALLBACK_VERSION = "0.153.0"
 PROVIDER = "codex"
 

@@ -38,9 +38,12 @@ DEFAULT_CONFIG = os.path.join(HOME, ".claude")
 PREFS_FILE = os.path.join(profiles.CCM_HOME, "prefs.json")
 
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-TOKEN_URLS = ("https://platform.claude.com/v1/oauth/token",
-              "https://console.anthropic.com/v1/oauth/token")
-API = "https://api.anthropic.com"
+# The test harness points these at a server of its own (tests/e2e). Unset,
+# every request goes where it always did.
+TOKEN_URLS = ((os.environ["CCM_TOKEN_URL"],) if os.environ.get("CCM_TOKEN_URL")
+              else ("https://platform.claude.com/v1/oauth/token",
+                    "https://console.anthropic.com/v1/oauth/token"))
+API = os.environ.get("CCM_API_BASE") or "https://api.anthropic.com"
 # The server gates new models on the Claude Code version the client claims, so
 # a number pinned here goes stale and starts refusing models the installed CLI
 # can use. Ask the CLI instead, and keep a recent one for when it cannot be
