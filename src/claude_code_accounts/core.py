@@ -1815,6 +1815,12 @@ def sign_in_finish_codex(attempt: codex.Attempt, code: str, state: str) -> tuple
     if before.lower() != email.lower() or (cached_email and cached_email != email.lower()):
         store.pop(key, None)
         _cache_write(store)
+    if before and before.lower() != email.lower():
+        # The same trap as the Claude flow: the browser signs in as whoever
+        # it was already logged into.
+        return True, (f"“{attempt.account}” is now signed in as {email}, but it "
+                      f"used to be {before}. If that is wrong, sign in again in a "
+                      f"private window.")
     return True, f"“{attempt.account}” is signed in as {email}"
 
 
