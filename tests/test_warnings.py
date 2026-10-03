@@ -29,7 +29,7 @@ def test_no_warning_while_the_login_has_days_left():
 
 def test_warns_three_days_before_anthropic_ends_the_login():
     row, note = core.renewal_warning(blob(refreshTokenExpiresAt=at(2 * 86400)))
-    assert row.startswith("login ends on ")
+    assert row.startswith("ends ") and ":" not in row
     assert note.startswith("Anthropic ends this login on ") and "sign in again" in note
 
 
@@ -39,7 +39,7 @@ def test_warns_three_days_before_anthropic_ends_the_login():
 ])
 def test_a_login_that_cannot_renew_names_when_it_stops(state):
     row, note = core.renewal_warning(blob(**state))
-    assert row.startswith("sign in again by ")
+    assert row.startswith("ends ")
     assert note.startswith("This login can't renew, and it stops ")
 
 
@@ -50,7 +50,7 @@ def test_refused_renewal_keeps_the_hours_that_are_left(fake_api):
     core._REFUSED[core.os.path.abspath(slot)] = core.fingerprint(stored)
     acct = core.load_account("a", with_usage=False)
     assert acct.signed_in and not acct.error
-    assert acct.warning.startswith("sign in again by ")
+    assert acct.warning.startswith("ends ")
 
 
 def test_refused_renewal_after_the_token_expired_reads_as_expired(fake_api):

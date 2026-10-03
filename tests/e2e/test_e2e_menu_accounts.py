@@ -421,7 +421,7 @@ def test_a_login_that_ends_soon_says_when_and_offers_sign_in(sandbox, fake_serve
                       json.dumps({"claudeAiOauth": blob}))
     menu.refresh()
     row = menu.account_row("main")
-    assert "login ends on " in text(row)
+    assert "   ends " in text(row)
     note = menu.find("Anthropic ends this login on ", row)
     assert "To keep it, sign in again." in text(note)
     assert menu.find("Sign in again", row)

@@ -1511,6 +1511,9 @@ def _when(ts: float) -> str:
 def renewal_warning(blob: dict | None, refused: bool = False) -> tuple[str | None, str | None]:
     """Whether a working login stops soon, as (row text, menu sentence).
 
+    The row text stays short: account rows are near the widest a menu row
+    can be, and macOS wraps a longer tail onto a line it does not show.
+
     Two ways it does. Anthropic caps how long a login lives: each renewal
     reports what is left (refresh_token_expires_in), and it counts down rather
     than starting over. And a login that cannot renew at all (the server
@@ -1526,7 +1529,7 @@ def renewal_warning(blob: dict | None, refused: bool = False) -> tuple[str | Non
         if stops <= now:
             return None, None
         at = _when(stops)
-        return (f"sign in again by {at}",
+        return (f"ends {at}",
                 f"This login can't renew, and it stops at {at}. "
                 f"To keep it, sign in again." if ":" in at else
                 f"This login can't renew, and it stops on {at}. "
@@ -1535,7 +1538,7 @@ def renewal_warning(blob: dict | None, refused: bool = False) -> tuple[str | Non
         return None, None
     at = _when(ends)
     prep = "at" if ":" in at else "on"
-    return (f"login ends {prep} {at}",
+    return (f"ends {at}",
             f"Anthropic ends this login {prep} {at}. To keep it, sign in again.")
 
 
