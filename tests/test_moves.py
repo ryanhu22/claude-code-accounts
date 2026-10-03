@@ -1421,16 +1421,37 @@ def test_sync_takes_the_refresh_token_off_a_full_copy(fake_keychain, fake_api, s
     assert core.sync_credentials([live]) == []
 
 
-def test_quitting_gives_the_refresh_tokens_back(fake_keychain, fake_api, sole):
+def test_quitting_gives_the_refresh_tokens_back(fake_keychain, fake_api, sole, monkeypatch):
     slots = {n: known(n, f"{n}@example.com", fake_api, fake_keychain) for n in ("a", "b")}
     core.save_rules(profiles.Rules(projects={"/a": "a", "/b": "b"}))
     live = [session(f"t{i}", f"/{n}", n) for i, n in enumerate(("a", "b"))]
+    closed = session("t9", "/a", "a")
+    # Claude Code runs in the first two terminals; the third has closed.
+    monkeypatch.setattr(core.sessions, "discover_config_dirs",
+                        lambda home=None: [s.config_dir for s in live])
     assert all("refreshToken" not in stored(fake_keychain, s.config_dir) for s in live)
     assert core.hand_back_refresh_tokens() == [s.config_dir for s in live]
     for sess, name in zip(live, ("a", "b"), strict=True):
         assert stored(fake_keychain, sess.config_dir) == stored(fake_keychain, slots[name])
     # Every copy can refresh again, so a second pass has nothing to hand back.
     assert core.hand_back_refresh_tokens() == []
+    # A closed terminal needs no refresh token until something launches in it.
+    assert "refreshToken" not in stored(fake_keychain, closed.config_dir)
+    # Its next launch runs `ccm resolve` with the app off, and gets the whole login.
+    monkeypatch.setattr(core, "SOLE_REFRESHER", False)
+    assert core.prepare_session("t9", "a") == closed.config_dir
+    assert stored(fake_keychain, closed.config_dir) == stored(fake_keychain, slots["a"])
+
+
+def test_a_stripped_copy_stays_stripped_while_the_app_runs(fake_keychain, fake_api, sole):
+    slot = known("a", "a@example.com", fake_api, fake_keychain)
+    core.save_rules(profiles.Rules(default_account="a"))
+    sess = session("t0", "/a", "a")
+    assert "refreshToken" not in stored(fake_keychain, sess.config_dir)
+    core.prepare_session("t0", "a")
+    assert "refreshToken" not in stored(fake_keychain, sess.config_dir)
+    assert core.fingerprint(stored(fake_keychain, sess.config_dir)) == core.fingerprint(
+        stored(fake_keychain, slot))
 
 
 def test_a_stripped_copy_still_names_its_account(fake_keychain, fake_api, sole):

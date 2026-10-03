@@ -1325,6 +1325,18 @@ def is_session_dir(config_dir: str) -> bool:
     return os.path.dirname(os.path.abspath(config_dir)) == os.path.abspath(SESSION_DIRS)
 
 
+def _needs_whole(config_dir: str, have: dict | None, want: dict) -> bool:
+    """A stripped copy of this very login, in a dir that may hold the whole one.
+
+    With the app off, a session renews its own token, so it needs the refresh
+    token the app took away. The quit hands it back only to terminals where
+    Claude Code is running; a terminal reopened later gets it here, from the
+    `ccm resolve` its launch runs, as a new terminal would.
+    """
+    return bool(not SOLE_REFRESHER and is_session_dir(config_dir) and have
+                and not have.get("refreshToken") and want.get("refreshToken"))
+
+
 def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
           keep_newer: bool = False) -> bool:
     """Write a credential into a config dir under Claude Code's locks.
@@ -1354,7 +1366,8 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
         with locks.credentials(config_dir):
             if keep_newer and email:
                 have = keychain.read_credentials(config_dir, max_age=0)
-                if fingerprint(have) == fingerprint(blob):
+                if fingerprint(have) == fingerprint(blob) and not _needs_whole(
+                        config_dir, have, blob):
                     return False
                 # A copy that is ahead of what we hold is a rotation or a fresh
                 # sign-in, and the blob in hand would strand it. Only a copy
@@ -1399,7 +1412,7 @@ def hand_out(path: str, want: dict, email: str = "", *, account: str = "") -> bo
     login, so a stale oauthAccount heals without waiting for a move.
     """
     have = keychain.read_credentials(path, max_age=keychain.RECENT)
-    same = fingerprint(have) == fingerprint(want)
+    same = fingerprint(have) == fingerprint(want) and not _needs_whole(path, have, want)
     wrote = False
     if not same:
         wrote = adopt(path, want, email=email, keep_newer=True)
@@ -2766,9 +2779,13 @@ def hand_back_refresh_tokens() -> list[str]:
     and from a SIGTERM handler, and anything slower would not finish.
     """
     given: list[str] = []
-    dirs = _session_dirs()
+    # Only terminals running Claude Code. A closed terminal's dir needs no
+    # refresh token until something launches in it, and that launch gets the
+    # whole login from `hand_out`. Writing one into every closed dir made a
+    # quit take hundreds of keychain writes, past the time launchd allows.
     # Registry files and a signal-0 probe per pid: no network, no ps.
     live = {os.path.abspath(d) for d in sessions.discover_config_dirs(HOME)}
+    dirs = [d for d in _session_dirs() if os.path.abspath(d) in live]
     for name in account_names():
         slot = slot_dir(name)
         master = keychain.read_credentials(slot, max_age=keychain.RECENT)
