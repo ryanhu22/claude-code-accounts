@@ -14,6 +14,7 @@ import pytest
 from claude_code_accounts import codex_sessions, core
 from e2e.fake_server import FakeServer
 from e2e.harness import Sandbox
+from e2e.menu_harness import dialogs, menu, procs, tabs  # noqa: F401 - menu bar fixtures
 from fakes import redirect_home
 
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
