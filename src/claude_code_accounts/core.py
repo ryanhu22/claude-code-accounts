@@ -950,6 +950,10 @@ class Account:
     limits: list[Limit] = field(default_factory=list)
     error: str | None = None
     mismatch: str | None = None   # holds a different account than its name
+    # The login works now but stops soon: short for the row, a sentence for
+    # the account's menu. Set from `renewal_warning`.
+    warning: str | None = None
+    warning_note: str | None = None
     checked_at: float = 0.0
     usage_at: float = 0.0        # when the usage payload was fetched, 0 if never
     provider: str = "claude"
@@ -1429,6 +1433,17 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
             blob = healed
             info, err = identity(slot, healed)
             email = info.get("email") or recorded_email(slot)
+    refused = False
+    if not email and err in GONE:
+        # The server refused to renew, but the token in hand still works until
+        # its own expiry. Saying "login expired" now hides the hours that are
+        # left; saying nothing hides that they end.
+        raw = keychain.read_credentials(slot)
+        if (raw and _REFUSED.get(os.path.abspath(slot)) == fingerprint(raw)
+                and (raw.get("expiresAt") or 0) / 1000 > time.time()):
+            got, _ = identity(slot, raw)
+            if got.get("email"):
+                blob, info, email, refused = raw, got, got["email"], True
     if not email:
         raw = keychain.read_credentials(slot)
         # "expired" is a claim about the login and needs evidence: the server
@@ -1439,6 +1454,7 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
                       else "can't reach Anthropic")
         return acct
     acct.email = email
+    acct.warning, acct.warning_note = renewal_warning(blob, refused)
     acct.plan = (recheck_plan(slot, blob) or info.get("plan")
                  or (blob or {}).get("subscriptionType"))
     # An account holding somebody else's login still answers every question,
@@ -1451,13 +1467,76 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
         # does, because the credential works. It is just the wrong one.
         acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
+        rejected: list[int] = []
+
+        def fetch() -> dict:
+            try:
+                return _get(CLAUDE_USAGE_PATH, blob["accessToken"])
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    rejected.append(e.code)
+                raise
+
         acct.limits, acct.usage_at, acct.error = _usage(
-            name, lambda: _get(CLAUDE_USAGE_PATH, blob["accessToken"]),
-            force, (email or "").lower())
+            name, fetch, force, (email or "").lower())
+        # A 401 used to be served the cached payload like any other failure,
+        # so a revoked login kept showing healthy numbers. One 401 can be a
+        # token rotating under the request, so ask the profile endpoint too:
+        # two refusals of the same token are evidence the login is gone.
+        if (rejected and profile_result(blob["accessToken"])[1] == "rejected"
+                # A rotation that landed meanwhile retired this token; the
+                # login itself is fine.
+                and fingerprint(keychain.read_credentials(slot)) == fingerprint(blob)):
+            log.info("rejected %s %s", name, _mark(fingerprint(blob)))
+            return Account(name=name, slot=slot, checked_at=acct.checked_at,
+                           error="login expired")
         entry = _cache_read().get(name) or {}
         if entry.get("data") and entry.get("who") in (None, "", (email or "").lower()):
             acct.extras = claude_extras(entry["data"])
     return acct
+
+
+# Claude Code warns three days before a login ends; so does the menu.
+LOGIN_WARN = 3 * 86400
+
+
+def _when(ts: float) -> str:
+    """A moment as a person says it: a clock time today, a date after that."""
+    dt = _dt.datetime.fromtimestamp(ts)
+    if dt.date() == _dt.date.today():
+        return dt.strftime("%-I:%M %p")
+    return dt.strftime("%b %-d")
+
+
+def renewal_warning(blob: dict | None, refused: bool = False) -> tuple[str | None, str | None]:
+    """Whether a working login stops soon, as (row text, menu sentence).
+
+    Two ways it does. Anthropic caps how long a login lives: each renewal
+    reports what is left (refresh_token_expires_in), and it counts down rather
+    than starting over. And a login that cannot renew at all (the server
+    refused, or the slot was healed from a copy with no refresh token) works
+    only until its access token expires.
+    """
+    if not blob or not blob.get("accessToken"):
+        return None, None
+    now = time.time()
+    ends = (blob.get("refreshTokenExpiresAt") or 0) / 1000
+    if refused or not blob.get("refreshToken") or (ends and ends <= now):
+        stops = (blob.get("expiresAt") or 0) / 1000
+        if stops <= now:
+            return None, None
+        at = _when(stops)
+        return (f"sign in again by {at}",
+                f"This login can't renew, and it stops at {at}. "
+                f"To keep it, sign in again." if ":" in at else
+                f"This login can't renew, and it stops on {at}. "
+                f"To keep it, sign in again.")
+    if not ends or ends - now > LOGIN_WARN:
+        return None, None
+    at = _when(ends)
+    prep = "at" if ":" in at else "on"
+    return (f"login ends {prep} {at}",
+            f"Anthropic ends this login {prep} {at}. To keep it, sign in again.")
 
 
 # The usage read Claude Code makes when it offers a reset. The plain read

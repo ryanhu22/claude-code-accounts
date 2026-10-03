@@ -1115,7 +1115,7 @@ def _shape(snap: Snapshot) -> tuple:
         # usage, so a poke or a reset that landed used to leave its own row
         # behind, offering again what it had just done, until something
         # else happened to rebuild the menu.
-        tuple((a.name, a.signed_in, a.error, a.mismatch, a.reading, a.plan,
+        tuple((a.name, a.signed_in, a.error, a.mismatch, a.warning, a.reading, a.plan,
                tuple(lim.label for lim in a.limits if not lim.resets_at),
                a.extras.get("reset_credits", 0), a.extras.get("reset_credit_expires", ""))
               for a in snap.accounts),
@@ -2097,6 +2097,8 @@ class ManagerApp(rumps.App):
             segments.append((f"   {acct.mismatch}", "hot"))
         elif acct.error:
             segments.append((f"   {acct.error}", "dim"))
+        elif acct.warning:
+            segments.append((f"   {acct.warning}", "warn"))
         elif acct.stale:
             segments.append((f"   usage from {_age(acct.usage_age)} ago", "dim"))
         return segments
@@ -2228,6 +2230,13 @@ class ManagerApp(rumps.App):
             _apply_style(note, [("  ", "dim"), (f"This is not {acct.name}. "
                                                 f"Sign in again to fix it.", "hot")],
                          mono=False)
+            _set_icon(note, "exclamationmark.triangle")
+            item.add(note)
+        elif acct.warning_note:
+            # The login works now and stops soon. Said where the button that
+            # fixes it is, since the row itself has room for a few words only.
+            note = rumps.MenuItem(f"warning:{acct.name}", callback=None)
+            _apply_style(note, [("  ", "dim"), (acct.warning_note, "hot")], mono=False)
             _set_icon(note, "exclamationmark.triangle")
             item.add(note)
         self._signing_row(item, acct.name)

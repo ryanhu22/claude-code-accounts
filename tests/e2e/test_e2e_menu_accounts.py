@@ -406,3 +406,22 @@ def test_the_add_account_dialogs_say_a_browser_opens(sandbox, fake_server, menu,
         assert "Terminal" not in asked["message"] and "/login" not in asked["message"]
         assert asked["ok"] == "Open browser"
     assert sandbox.opened_urls() == []
+
+
+def test_a_login_that_ends_soon_says_when_and_offers_sign_in(sandbox, fake_server, menu):
+    import json
+    import time
+
+    from claude_code_accounts import keychain
+
+    blob = sandbox.seed_claude("main", "main@example.com")
+    # Anthropic caps a login's life; this one has a day left.
+    blob["refreshTokenExpiresAt"] = int((time.time() + 86400) * 1000)
+    sandbox._put_item(keychain.service_for(sandbox.slot("main")),
+                      json.dumps({"claudeAiOauth": blob}))
+    menu.refresh()
+    row = menu.account_row("main")
+    assert "login ends on " in text(row)
+    note = menu.find("Anthropic ends this login on ", row)
+    assert "To keep it, sign in again." in text(note)
+    assert menu.find("Sign in again", row)

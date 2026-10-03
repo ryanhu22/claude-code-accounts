@@ -202,6 +202,12 @@ wrong one gets attached to a name. The app and the `ccm` command both let you
 pick the browser, and a sign-in that lands on a different account than the
 name held before says so.
 
+A login doesn't last forever. Anthropic ends each one some weeks after it
+starts, and renewing the token doesn't move that date. Three days before an
+account's login ends, its row says "login ends on <date>". A login that can't
+renew says "sign in again by <time>", which is when its last token stops. To
+keep the account, choose "Sign in again" in its menu or run `ccm login <name>`.
+
 ### 3. Let the shell pick the account
 
 Add this line to `.zshrc`:

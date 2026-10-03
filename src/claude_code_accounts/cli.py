@@ -47,6 +47,8 @@ def cmd_list(_args) -> int:
             head += f"  {R}{acct.mismatch}{X}"
         elif acct.error:
             head += f"  {Y}{acct.error}{X}"
+        elif acct.warning:
+            head += f"  {Y}{acct.warning}{X}"
         print(head)
         if not acct.signed_in:
             hint = f"ccm login {acct.name} --codex" if acct.is_codex else f"ccm add {acct.name}"
