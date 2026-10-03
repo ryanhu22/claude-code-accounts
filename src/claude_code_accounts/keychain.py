@@ -61,11 +61,18 @@ def write_raw(service: str, value: str) -> None:
     hexed = binascii.hexlify(value.encode()).decode()
     acct = account_name()
     line = f'add-generic-password -U -a "{acct}" -s "{service}" -X {hexed}\n'
-    if len(line) <= _STDIN_LIMIT:
-        r = _run(["security", "-i"], stdin=line)
-        if r.returncode == 0:
-            return
-    r = _run(["security", "add-generic-password", "-U", "-a", acct, "-s", service, "-w", value])
+    try:
+        if len(line) <= _STDIN_LIMIT:
+            r = _run(["security", "-i"], stdin=line)
+            if r.returncode == 0:
+                return
+        r = _run(["security", "add-generic-password", "-U", "-a", acct, "-s", service,
+                  "-w", value])
+    except subprocess.TimeoutExpired as e:
+        # A locked keychain makes `security` prompt rather than fail. Every
+        # caller treats a failed write as RuntimeError, and a write that never
+        # answered has failed the same way: the value is not in the keychain.
+        raise RuntimeError("keychain write failed: security did not answer") from e
     if r.returncode != 0:
         raise RuntimeError(f"keychain write failed: {r.stderr.strip()[:200]}")
 

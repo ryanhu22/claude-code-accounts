@@ -8,6 +8,7 @@ no copy falls behind its slot.
 """
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -195,5 +196,34 @@ def test_a_keychain_that_refuses_the_write_keeps_the_successor(sandbox, fake_ser
     slot = sandbox.blob(core.slot_dir("a"))
     assert slot["refreshToken"] == rotated["refreshToken"]
     assert os.listdir(os.path.join(sandbox.home, PENDING)) == []
+    assert len(refreshes(fake_server)) == 1
+    check_invariants(sandbox, fake_server, fleet, settled=True)
+
+
+def test_a_keychain_that_hangs_after_the_grant_keeps_the_successor(
+        sandbox, fake_server, fleet, app_running, monkeypatch):
+    """A locked keychain makes `security` prompt and hang rather than fail.
+    The successor must reach the stash exactly as it does on a refusal."""
+    one_account(sandbox, fake_server)
+    live = [fleet.start("term-1")]
+    core.sync_credentials(live)
+    before = expire_in(sandbox, core.slot_dir("a"), 20 * 60)
+    run = keychain._run
+
+    def hung_write(args, stdin=None):
+        if "add-generic-password" in (stdin or "") or args[1:2] == ["add-generic-password"]:
+            raise subprocess.TimeoutExpired(args, 20)
+        return run(args, stdin)
+
+    monkeypatch.setattr(keychain, "_run", hung_write)
+    rotated = core.live_blob(core.slot_dir("a"))
+    assert rotated and generation(fake_server, rotated) == 2
+    monkeypatch.setattr(keychain, "_run", run)
+    keychain.forget()
+    assert sandbox.blob(core.slot_dir("a")) == before
+    assert len(os.listdir(os.path.join(sandbox.home, PENDING))) == 1
+    assert core.refresh_slots() == ["a"]
+    core.sync_credentials(live)
+    assert sandbox.blob(core.slot_dir("a"))["refreshToken"] == rotated["refreshToken"]
     assert len(refreshes(fake_server)) == 1
     check_invariants(sandbox, fake_server, fleet, settled=True)
