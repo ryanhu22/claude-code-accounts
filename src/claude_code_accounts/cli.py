@@ -455,7 +455,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.add_argument("--weekly", action="store_true", help="start only stopped weekly windows")
     p.set_defaults(func=cmd_poke)
-    p = sub.add_parser("reset", help="use one limit reset (Claude) or reset credit (Codex): limits back to zero")
+    p = sub.add_parser("reset", help="use one limit reset (Claude) or reset credit (Codex): "
+                                     "limits back to zero")
     p.add_argument("account")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask first")
     p.set_defaults(func=cmd_reset)

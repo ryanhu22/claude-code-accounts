@@ -1489,7 +1489,8 @@ def _reset_claude(name: str) -> tuple[bool, str]:
            "cooldown": "resets are cooling down, try again later",
            "ineligible": "this account cannot use a reset now",
            }.get(result or "", f"the server answered {result or 'nothing'}")
-    log.info("reset %s refused: %s %s", name, result, resp.get("reason") if isinstance(resp, dict) else "")
+    log.info("reset %s refused: %s %s", name, result,
+             resp.get("reason") if isinstance(resp, dict) else "")
     return False, why
 
 

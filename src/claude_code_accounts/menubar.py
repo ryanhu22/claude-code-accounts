@@ -2924,7 +2924,7 @@ class ManagerApp(rumps.App):
                 continue
             if applied:
                 done = note + core.applied_note(moved, stuck)
-                self._later(lambda: self._settle(done, applied))
+                self._later(lambda done=done, applied=applied: self._settle(done, applied))
             return
 
     def _settle(self, message: str, applied: dict) -> None:
