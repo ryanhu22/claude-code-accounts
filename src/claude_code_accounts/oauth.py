@@ -122,6 +122,10 @@ class Callback:
         outer = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            # A connection that never sends its request (a port scanner, a
+            # stalled prefetch) is dropped, so `close()` never waits on it.
+            timeout = 30
+
             def do_GET(self):  # noqa: N802
                 parsed = urllib.parse.urlparse(self.path)
                 if parsed.path != outer.path:
@@ -134,27 +138,37 @@ class Callback:
                 if not state or (outer.expected_state and state != outer.expected_state):
                     self._reply(400, WRONG_SIGN_IN_PAGE)
                     return
-                if outer._done.is_set():
-                    # A reload of the tab, or a late arrival. The caller may
-                    # be reading `code` right now, so nothing is overwritten;
-                    # the tab gets the outcome it saw the first time.
+                with outer._lock:
+                    first = not outer._taken
+                    outer._taken = True
+                if not first:
+                    # A reload of the tab, a second tab, or a late arrival.
+                    # The caller may be reading `code` right now, so nothing
+                    # is overwritten: this tab waits for the outcome the
+                    # first request is producing and shows the same page.
+                    outer._done.wait(120)
                     self._reply(*outer._outcome_page())
                     return
-                outer.code = (got.get("code") or [""])[0]
-                outer.state = state
-                error = (got.get("error") or [""])[0]
-                description = (got.get("error_description") or [""])[0]
-                outer.error = description or error
-                if outer.error or not outer.code:
-                    outer.result = (False, describe_error(error, description) if error
-                                    else "The sign-in page sent no code.")
-                elif outer.finish is not None:
-                    try:
-                        outer.result = outer.finish(outer.code, outer.state)
-                    except Exception as e:  # the page must still answer
-                        outer.result = (False, f"The sign-in could not be finished: {e}")
+                try:
+                    outer.code = (got.get("code") or [""])[0]
+                    outer.state = state
+                    error = (got.get("error") or [""])[0]
+                    description = (got.get("error_description") or [""])[0]
+                    outer.error = description or error
+                    if outer.error or not outer.code:
+                        outer.result = (False, describe_error(error, description) if error
+                                        else "The sign-in page sent no code.")
+                    elif outer.finish is not None:
+                        try:
+                            outer.result = outer.finish(outer.code, outer.state)
+                        except Exception as e:  # the page must still answer
+                            outer.result = (False, f"The sign-in could not be finished: {e}")
+                finally:
+                    # Whatever happens to this connection (the tab was closed
+                    # or reloaded while the exchange ran), the caller learns
+                    # the outcome; a reply that fails is only a lost page.
+                    outer._done.set()
                 self._reply(*outer._outcome_page())
-                outer._done.set()
 
             def _reply(self, status: int, page: bytes) -> None:
                 self.send_response(status)
@@ -166,8 +180,15 @@ class Callback:
             def log_message(self, *_a):
                 pass
 
-        self._server = http.server.HTTPServer(("127.0.0.1", port), Handler)
+        # Threaded, so a second visit during the exchange is answered rather
+        # than queued behind it and reset when the server closes. Handler
+        # threads are not daemons: `close()` joins them, so a page in flight
+        # is written before the process moves on.
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self._server.daemon_threads = False
         self._done = threading.Event()
+        self._lock = threading.Lock()
+        self._taken = False
         self.port = self._server.server_address[1]
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -195,6 +216,9 @@ class Callback:
         return self._done.wait(timeout)
 
     def close(self) -> None:
+        # A tab still waiting for the outcome gets what there is: the caller
+        # has stopped waiting, so nothing more is coming.
+        self._done.set()
         try:
             self._server.shutdown()
             self._server.server_close()

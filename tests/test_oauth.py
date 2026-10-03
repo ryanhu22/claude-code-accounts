@@ -203,3 +203,43 @@ def test_pages_are_plain_self_contained_html(page):
     assert text.startswith("<!doctype html><meta charset=utf-8>")
     assert '<meta name="color-scheme" content="light dark">' in text
     assert "<script" not in text and "http" not in text and "—" not in text
+
+
+def test_callback_answers_a_second_visit_during_the_exchange_with_the_same_outcome(callback):
+    import threading
+    import time
+
+    started, exchanged = threading.Event(), []
+
+    def slow_finish(code, state):
+        started.set()
+        time.sleep(0.5)
+        exchanged.append(code)
+        return True, "“work” is signed in as work@example.com"
+
+    callback.finish = slow_finish
+    url = f"{callback.redirect_uri}?code=abc&state=state"
+    pages: list[tuple[int, str]] = []
+    first = threading.Thread(target=lambda: pages.append(_get(url)))
+    first.start()
+    assert started.wait(2)
+    # A reload while the exchange runs: answered with the outcome, not reset,
+    # and the code is exchanged once.
+    second = _get(url)
+    first.join(5)
+    assert pages and pages[0] == second
+    assert second[0] == 200 and "“work” is signed in as work@example.com" in second[1]
+    assert exchanged == ["abc"]
+
+
+def test_callback_reports_done_even_when_the_tab_went_away(callback):
+    import time
+
+    callback.finish = lambda code, state: (time.sleep(0.2), (True, "stored"))[1]
+    # The browser drops the connection before the page is written (the user
+    # closed or reloaded the tab mid-exchange). The caller still learns the
+    # outcome instead of waiting out the five minutes.
+    with socket.create_connection(("127.0.0.1", callback.port)) as s:
+        s.sendall(b"GET /callback?code=abc&state=state HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    assert callback.wait(5)
+    assert callback.result == (True, "stored")
