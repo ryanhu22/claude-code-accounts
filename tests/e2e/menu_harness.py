@@ -167,7 +167,7 @@ class Menu:
 
     def start_session(self, account: str, term_id: str, cwd: str, *, name: str = "",
                       status: str = "idle", kind: str = "interactive", tty: str = "ttys001",
-                      config_dir: str | None = None) -> int:
+                      config_dir: str | None = None, updated_at: float | None = None) -> int:
         """A live Claude Code session: a process plus the registry file it writes.
 
         The session runs in the per-terminal config dir ccm would have given
@@ -180,7 +180,7 @@ class Menu:
         self.procs.append(proc)
         os.makedirs(cwd, exist_ok=True)
         os.makedirs(os.path.join(path, "sessions"), exist_ok=True)
-        now = int(time.time() * 1000)
+        now = int((updated_at or time.time()) * 1000)
         with open(os.path.join(path, "sessions", f"{proc.pid}.json"), "w") as f:
             json.dump({"pid": proc.pid, "sessionId": f"sess-{proc.pid}", "cwd": cwd,
                        "name": name or os.path.basename(cwd), "kind": kind,
@@ -197,19 +197,18 @@ class Menu:
     def menu(self) -> rumps.MenuItem:
         return self.app.menu
 
-    def keyed(self, item=None) -> list[tuple[str, rumps.MenuItem]]:
-        """(key, row) for each row of a menu, separators left out.
+    def items(self, item=None) -> list[rumps.MenuItem]:
+        """The rows of a menu (or of a section), separators left out.
 
-        The key is the plain title the row was made with. Styling a row
-        replaces what NSMenuItem reports as its title, so the key is the one
-        stable name a row has.
+        Read from the NSMenu, which is what the screen shows. rumps keeps a
+        dict beside it keyed by each row's title at the time it was added,
+        and two styled rows with the same text share one key there, so the
+        dict can be a row short of the menu.
         """
         parent = self.app.menu if item is None else item
-        return [(key, row) for key, row in parent.items() if isinstance(row, rumps.MenuItem)]
-
-    def items(self, item=None) -> list[rumps.MenuItem]:
-        """The rows of a menu, separators left out."""
-        return [row for _key, row in self.keyed(item)]
+        if isinstance(parent, list):           # a section, already rows
+            return list(parent)
+        return [row for row in _rows(parent) if row is not SEPARATOR]
 
     def texts(self, item=None) -> list[str]:
         return [text(row) for row in self.items(item)]
@@ -224,14 +223,14 @@ class Menu:
     def section(self, heading: str) -> list[rumps.MenuItem]:
         """The rows under one of the menu's headings, up to the next separator."""
         rows, inside = [], False
-        for item in self.app.menu.values():
-            if not isinstance(item, rumps.MenuItem):
+        for row in _rows(self.app.menu):
+            if row is SEPARATOR:
                 if inside:
                     break
                 continue
             if inside:
-                rows.append(item)
-            elif text(item) == heading:
+                rows.append(row)
+            elif text(row) == heading:
                 inside = True
         return rows
 
@@ -257,6 +256,39 @@ class Menu:
     def title(self) -> str:
         """The menu bar text, as drawn when there is no status item to draw into."""
         return self.app.title or ""
+
+
+SEPARATOR = object()
+
+
+def _rows(parent) -> list:
+    """The rows of an NSMenu in order, as their rumps objects; SEPARATOR for a line."""
+    nsmenu = getattr(parent, "_menu", None)
+    if nsmenu is None:
+        return []
+    registry = rumps.rumps.NSApp._ns_to_py_and_callback
+    out = []
+    for ns in nsmenu.itemArray():
+        if ns.isSeparatorItem():
+            out.append(SEPARATOR)
+            continue
+        entry = registry.get(ns)
+        assert entry is not None, f"row {ns.title()!r} is not a rumps item"
+        out.append(entry[0])
+    return out
+
+
+def same(rows, expected) -> bool:
+    """Whether two lists hold the same menu items, by identity.
+
+    A rumps MenuItem is a dict of its submenu, so == compares submenus and
+    calls two plain rows equal.
+    """
+    return len(rows) == len(expected) and all(a is b for a, b in zip(rows, expected, strict=True))
+
+
+def index_of(rows, item) -> int:
+    return next(i for i, row in enumerate(rows) if row is item)
 
 
 def text(item) -> str:
