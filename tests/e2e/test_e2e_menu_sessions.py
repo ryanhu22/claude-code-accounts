@@ -10,7 +10,7 @@ import os
 import time
 
 from claude_code_accounts import core, keychain
-from e2e.menu_harness import checked, click, enabled, index_of, text
+from e2e.menu_harness import checked, click, enabled, index_of, same, text
 
 
 def test_no_sessions_says_none(sandbox, fake_server, menu):
@@ -168,6 +168,37 @@ def test_sessions_come_and_go_between_refreshes(sandbox, fake_server, menu):
     menu.poll_sessions()
     assert pid not in menu.app._session_rows
     assert menu.texts(menu.section("RUNNING SESSIONS")) == ["  none"]
+
+
+def test_a_session_that_starts_while_the_menu_is_open_is_inserted(sandbox, fake_server, menu):
+    """Rows are added under the pointer, even after the rows above were repainted."""
+    sandbox.seed_claude("main", "main@example.com")
+    cwd = os.path.join(sandbox.home, "repos", "acme")
+    first = menu.start_session("main", "T1", cwd, name="acme-first")
+    menu.refresh()
+    menu.open()
+    # The first session goes busy: its row is repainted in place.
+    path = os.path.join(core.session_dir("T1"), "sessions", f"{first}.json")
+    data = json.load(open(path))
+    data["status"], data["updatedAt"] = "busy", int(time.time() * 1000)
+    json.dump(data, open(path, "w"))
+    menu.poll_sessions()
+    assert " busy " in text(menu.session_row(first))
+    assert not menu.app._rebuild_pending
+    # A second one, started earlier, is only now in the registry: it sorts
+    # after the first, so its row goes in under the repainted one.
+    second = menu.start_session("main", "T2", os.path.join(sandbox.home, "repos", "beta"),
+                                name="beta-second", tty="ttys002",
+                                updated_at=time.time() - 60)
+    menu.poll_sessions()
+    assert same(menu.section("RUNNING SESSIONS · 2"),
+                [menu.session_row(first), menu.session_row(second)])
+    assert "\u25cf 2" in text(menu.account_row("main"))
+    assert menu.app._rebuild_pending
+    menu.close()
+    assert not menu.app._rebuild_pending
+    assert same(menu.section("RUNNING SESSIONS · 2"),
+                [menu.session_row(first), menu.session_row(second)])
 
 
 def test_menu_open_notices_a_session_that_ended(sandbox, fake_server, menu):

@@ -760,10 +760,10 @@ class Menu(dict):
         # keep its place, so it is keyed by where it landed.
         self[getattr(item, "title", None) or f"sep{len(self)}"] = item
 
-    def insert_after(self, key, item):
+    def insert_after(self, after, key, item):
         pairs = list(self.items())
-        index = list(self).index(key) + 1
-        pairs.insert(index, (item.title, item))
+        index = list(self).index(after) + 1
+        pairs.insert(index, (key, item))
         self.clear()
         self.update(pairs)
 
@@ -787,10 +787,11 @@ def test_open_menu_inserts_sessions_and_defers_removals(
         return item
 
     app._session_item = build
+    # Rows are filed by pid, never by their text, which a repaint changes.
+    app._insert_row = app.menu.insert_after
     app._snapshot.sessions = [sessions.Session(pid=pid, config_dir="") for pid in old]
     for sess in app._snapshot.sessions:
-        item = build(sess, app._snapshot)
-        app.menu[item.title] = item
+        app.menu[app._session_key(sess.pid)] = build(sess, app._snapshot)
     originals = dict(app.menu)
     if not old:
         app.menu["  none"] = object()
@@ -801,10 +802,11 @@ def test_open_menu_inserts_sessions_and_defers_removals(
     app._fresh_sessions = (
         [sessions.Session(pid=pid, config_dir="") for pid in live], {}, app._edits)
     app._take_sessions()
-    assert list(app.menu) == [app._sessions_heading, *map(str, expected), "PROFILES"]
+    assert list(app.menu) == [app._sessions_heading,
+                              *(app._session_key(pid) for pid in expected), "PROFILES"]
     assert built == [pid for pid in live if pid not in old]
     assert all(app.menu[key] is item for key, item in originals.items())
-    assert all(app.menu[str(pid)] is app._session_rows[pid][0] for pid in live)
+    assert all(app.menu[app._session_key(pid)] is app._session_rows[pid][0] for pid in live)
     assert app._rebuild_pending
     app._rebuild = Mock()
     app._alerts = []

@@ -1762,18 +1762,41 @@ class ManagerApp(rumps.App):
 
     # ------------------------------------------------------------------ menu
 
+    @staticmethod
+    def _session_key(pid: int) -> str:
+        """The key a session row is filed under in the menu.
+
+        rumps keys a row by its title, and a styled row's title is the text
+        it was last drawn with. A repaint changes that text, and two sessions
+        can draw the same one, so a row looked up by its text was found only
+        until the first repaint: a session that started while the menu was
+        open then raised out of the tick, and its row never appeared.
+        """
+        return f"session:{pid}"
+
+    def _insert_row(self, after: str, key: str, item: rumps.MenuItem) -> None:
+        """Put a row after another, under a key of our own.
+
+        rumps' own insert_after derives the key from the title, which is the
+        very thing this avoids, so this does the two steps it would do: the
+        NSMenu gets the item, and the dict beside it gets the key.
+        """
+        anchor = self.menu[after]
+        index = self.menu._menu.indexOfItem_(anchor._menuitem)
+        self.menu._menu.insertItem_atIndex_(item._menuitem, index + 1)
+        super(rumps.rumps.Menu, self.menu).insert_after(after, (key, item))
+
     def _insert_sessions(self, added: set[int]) -> None:
         """Add rows without replacing the items under the pointer."""
         snap = self._snapshot
         # Keep existing rows until close, even if additions exceed the row cap.
         previous = self._sessions_heading
         for sess in snap.sessions:
+            key = self._session_key(sess.pid)
             if sess.pid in added and sess.pid not in self._session_rows:
-                item = self._session_item(sess, snap)
-                self.menu.insert_after(previous, item)
-            row = self._session_rows.get(sess.pid)
-            if row is not None:
-                previous = row[0].title
+                self._insert_row(previous, key, self._session_item(sess, snap))
+            if sess.pid in self._session_rows:
+                previous = key
         if "  none" in self.menu:
             del self.menu["  none"]
         title = f"RUNNING SESSIONS · {len(snap.sessions)}"
@@ -1844,7 +1867,7 @@ class ManagerApp(rumps.App):
         fixed = 1 + 3 + 3 + len(snap.accounts) + len(snap.rules.profiles) + 1 + 6
         shown, hidden = _capped(snap.sessions, _rows_that_fit() - fixed)
         for sess in shown:
-            self.menu.add(self._session_item(sess, snap))
+            self.menu[self._session_key(sess.pid)] = self._session_item(sess, snap)
         if hidden:
             self._more(hidden, "main")
         self.menu.add(rumps.separator)
