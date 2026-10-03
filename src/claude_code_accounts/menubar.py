@@ -2110,7 +2110,13 @@ class ManagerApp(rumps.App):
             self._signing_row(item, acct.name)
             again = "Sign in again" if acct.error == "login expired" else "Sign in"
             self._bar_choice(item, acct)
-            item.add(self._browser_menu(again, acct.name, provider=acct.provider))
+            # Styled like its twin on a signed-in row: as a bare title it
+            # came out in the larger system face, without the indent the
+            # row above it has or the icon that keeps the gutter even.
+            signin = self._browser_menu(again, acct.name, provider=acct.provider)
+            _apply_style(signin, [("  ", "dim"), (again, "text")], mono=False)
+            _set_icon(signin, "person.crop.circle.badge.checkmark")
+            item.add(signin)
             return item
         # plain title stays unique: rumps keys its callback registry by it
         head = f"{acct.name} - {_pct(acct.session_pct)} 5h"

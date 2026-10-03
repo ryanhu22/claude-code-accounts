@@ -8,8 +8,9 @@ import json
 import os
 import threading
 import time
+from types import SimpleNamespace
 
-from claude_code_accounts import core, keychain
+from claude_code_accounts import core, keychain, menubar
 from e2e.menu_harness import checked, click, text
 
 
@@ -69,6 +70,60 @@ def test_menu_bar_title_follows_the_pinned_account(sandbox, fake_server, menu):
     assert menu.title().startswith("⇄ main 5h 58%")
 
 
+def test_menu_bar_image_states(sandbox, fake_server, menu, monkeypatch):
+    """What the status item draws: the shown account's batteries, dimmed when
+    its numbers cannot be trusted, and only the windows its plan has."""
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_codex("gpt", "gpt@example.com", plan="plus")
+    drawn: list = []
+    images: list = []
+    real = menubar.gauge.status_image
+
+    def spy(sections):
+        drawn.append(sections)
+        return real(sections)
+
+    monkeypatch.setattr(menubar.gauge, "status_image", spy)
+    item = SimpleNamespace(setTitle_=lambda t: None,
+                           button=lambda: SimpleNamespace(setImage_=images.append))
+    monkeypatch.setattr(menu.app, "_nsapp", SimpleNamespace(nsstatusitem=item), raising=False)
+    menu.refresh()
+    (section,) = drawn[-1]
+    assert (section.provider, section.name, section.dim) == ("claude", "main", False)
+    assert [(c.caption, c.used, c.reset) for c in section.cells] == [
+        ("5h", 58.0, "26752d"), ("7d", 71.0, "26754d"), ("fable", 34.0, "26754d")]
+    assert images[-1] is not None
+    # A Codex plan without a 5h window draws two batteries, not a blank third.
+    click(menu.find("Show this account in the menu bar", menu.account_row("gpt")))
+    (section,) = drawn[-1]
+    assert (section.provider, section.name) == ("codex", "gpt")
+    assert [(c.caption, c.used) for c in section.cells] == [("7d", 62.0)]
+    # Rate limited with nothing cached: an empty, dimmed battery, not a full one.
+    fake_server.add_claude("busy@example.com")
+    sandbox.seed_claude("busy", "busy@example.com")
+    fake_server.script("/api/oauth/usage", 429, {"error": "rate_limited"},
+                       headers={"Retry-After": "300"})
+    click(menu.find("Show the front tab's account"))
+    core.set_pref("bar_account", "busy")
+    menu.refresh()
+    (section,) = drawn[-1]
+    assert (section.name, section.dim) == ("busy", True)
+    assert [(c.caption, c.used) for c in section.cells] == [("5h", None), ("7d", None)]
+
+
+def test_an_empty_slot_offers_a_first_sign_in(sandbox, fake_server, menu):
+    sandbox.seed_claude("main", "main@example.com")
+    os.makedirs(sandbox.slot("ghost"))
+    menu.refresh()
+    row = menu.account_row("ghost")
+    assert text(row).strip().endswith("not signed in")
+    # Styled like every other row of the menu, not a bare title.
+    assert "  Sign in" in menu.texts(row) and "Sign in again" not in "".join(menu.texts(row))
+    signin = menu.find("Sign in", row)
+    assert signin._menuitem.image() is not None
+    assert menu.texts(signin)[0] == "Default browser"
+
+
 def test_rate_limited_account_keeps_its_row_and_says_why(sandbox, fake_server, menu):
     sandbox.seed_claude("busy", "busy@example.com")
     fake_server.script("/api/oauth/usage", 429, {"error": "rate_limited"},
@@ -121,7 +176,7 @@ def test_expired_login_offers_sign_in_again(sandbox, fake_server, menu):
     assert text(row).strip().endswith("gone            login expired")
     assert "%" not in text(row)
     sub = menu.texts(row)
-    assert "Sign in again" in sub
+    assert "  Sign in again" in sub
     assert not any("Rename" in line or "Remove account" in line for line in sub)
     browsers = menu.texts(menu.find("Sign in again", row))
     assert browsers[0] == "Default browser"
