@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import uuid
@@ -1325,16 +1326,58 @@ def is_session_dir(config_dir: str) -> bool:
     return os.path.dirname(os.path.abspath(config_dir)) == os.path.abspath(SESSION_DIRS)
 
 
+def _app_pid_file() -> str:
+    # Read at call time, not import time, so a redirected CCM_HOME applies.
+    return os.path.join(profiles.CCM_HOME, "menubar.pid")
+
+
+def mark_app_running(running: bool) -> None:
+    """Tell other ccm processes whether the menu bar app is rotating logins.
+
+    SOLE_REFRESHER says so only inside the app's own process. `ccm resolve`
+    runs in the shell's, where it is always False, so it needs this to know
+    whether a session may hold a whole login.
+    """
+    try:
+        if running:
+            with open(_app_pid_file(), "w") as f:
+                f.write(str(os.getpid()))
+        elif _read_pid(_app_pid_file()) == os.getpid():
+            os.remove(_app_pid_file())
+    except OSError:
+        pass
+
+
+def _read_pid(path: str) -> int:
+    try:
+        with open(path) as f:
+            return int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def app_running() -> bool:
+    """Whether the menu bar app is rotating logins right now, from any process.
+
+    A pid file left by a crash names a dead process, and a dead process is not
+    running. If the pid was reused, this answers yes, which only keeps a copy
+    stripped: the safe direction.
+    """
+    return SOLE_REFRESHER or sessions.alive(_read_pid(_app_pid_file()))
+
+
 def _needs_whole(config_dir: str, have: dict | None, want: dict) -> bool:
     """A stripped copy of this very login, in a dir that may hold the whole one.
 
     With the app off, a session renews its own token, so it needs the refresh
     token the app took away. The quit hands it back only to terminals where
     Claude Code is running; a terminal reopened later gets it here, from the
-    `ccm resolve` its launch runs, as a new terminal would.
+    `ccm resolve` its launch runs, as a new terminal would. Never while the
+    app runs: a whole login in a session dir is a second spender.
     """
-    return bool(not SOLE_REFRESHER and is_session_dir(config_dir) and have
-                and not have.get("refreshToken") and want.get("refreshToken"))
+    return bool(is_session_dir(config_dir) and have
+                and not have.get("refreshToken") and want.get("refreshToken")
+                and not app_running())
 
 
 def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
@@ -2735,28 +2778,54 @@ def _handed_back(copy: dict | None, path: str, master: dict, owner: str,
                 and (copy.get("expiresAt") or 0) <= (master.get("expiresAt") or 0))
 
 
-def strip_idle_copies() -> list[str]:
-    """Take the refresh token out of every session dir no Claude Code is using.
+def _dir_live(path: str) -> bool:
+    """Whether Claude Code is running in this one dir, by its registry files."""
+    import glob
+    return any(sessions._read(f, path)
+               for f in glob.glob(os.path.join(path, "sessions", "*.json")))
+
+
+def strip_idle_copies(stop: threading.Event | None = None) -> list[str]:
+    """Take the refresh token out of session dirs no Claude Code is using.
 
     The sync pass strips only the dirs of running sessions. A dir whose
-    session ended while the app was off keeps the whole login it was handed
-    back, and dirs like that pile up: a hundred and more closed terminals,
-    each holding a refresh token, current or long spent. Either one is a
-    reuse waiting to happen if a new terminal ever lands in that dir and
-    renews from it. The app runs this once as it starts; a dir that is busy
-    is skipped, and one that starts a session meanwhile is the sync pass's.
+    session ended while the app was off keeps the whole login it was handed,
+    and dirs like that pile up: a hundred and more closed terminals, each
+    holding a refresh token, current or long spent. A new terminal landing
+    in one and renewing from it is a reuse. The app runs this once as it
+    starts.
+
+    A copy ahead of its account's slot is left alone: a session that renewed
+    itself while the app was off holds the only live lineage, and reopening
+    that terminal is how the sync pass promotes it. So is a copy whose owner
+    the cache does not name. `stop` ends the walk at quit, and liveness is
+    asked again under the lock, so a terminal that starts meanwhile, or is
+    handed its login back by the quit, is never stripped.
     """
-    live = {os.path.abspath(d) for d in sessions.discover_config_dirs(HOME)}
+    slots: dict[str, float] = {}
+    for name in account_names():
+        slot = slot_dir(name)
+        owner = (_cached_email(slot) or recorded_email(slot)).lower()
+        if owner:
+            have = keychain.read_credentials(slot, max_age=keychain.RECENT) or {}
+            slots[owner] = max(slots.get(owner, 0), have.get("expiresAt") or 0)
     stripped = []
     for path in _session_dirs():
-        if os.path.abspath(path) in live:
+        if stop is not None and stop.is_set():
+            break
+        copy = keychain.read_credentials(path, max_age=keychain.RECENT)
+        if not copy or not copy.get("refreshToken") or _dir_live(path):
             continue
-        if not (keychain.read_credentials(path) or {}).get("refreshToken"):
+        owner = _cached_email(path).lower()
+        if owner not in slots or (copy.get("expiresAt") or 0) > slots[owner]:
             continue
         try:
             with locks.credentials(path, timeout=3.0):
+                if (stop is not None and stop.is_set()) or _dir_live(path):
+                    continue
                 cur = keychain.read_credentials(path)
-                if not cur or not cur.get("refreshToken"):
+                if (not cur or not cur.get("refreshToken")
+                        or (cur.get("expiresAt") or 0) > slots[owner]):
                     continue
                 keychain.write_credentials(path, session_copy(cur))
                 stripped.append(path)

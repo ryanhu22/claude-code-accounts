@@ -314,3 +314,69 @@ def test_app_start_strips_closed_terminals_and_leaves_running_ones(sandbox, fake
     assert sandbox.blob(live[0].config_dir).get("refreshToken")
     assert core.strip_idle_copies() == []
     assert fake_server.reused_refresh_tokens == []
+
+
+def app_marks_running(pid: int) -> None:
+    """What the running app leaves for other ccm processes to find."""
+    import os
+    os.makedirs(os.path.dirname(core._app_pid_file()), exist_ok=True)
+    with open(core._app_pid_file(), "w") as f:
+        f.write(str(pid))
+
+
+def test_a_relaunch_while_the_app_runs_keeps_the_copy_stripped(sandbox, fake_server, fleet,
+                                                               monkeypatch):
+    """`ccm resolve` runs in the shell's process, where SOLE_REFRESHER is
+    always False. Relaunching `claude` in an open tab must not put the
+    slot's refresh token into that session's dir while the app rotates."""
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1")]
+    app_starts(monkeypatch)
+    core.sync_credentials(live)
+    assert "refreshToken" not in sandbox.blob(live[0].config_dir)
+    app_marks_running(fleet.procs[0].pid)        # any live pid stands in for the app
+    fleet.start("term-1")                         # the relaunch: a real `ccm resolve`
+    assert "refreshToken" not in sandbox.blob(live[0].config_dir)
+
+
+def test_a_relaunch_with_the_app_off_gets_the_whole_login(sandbox, fake_server, fleet,
+                                                          monkeypatch):
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1")]
+    app_starts(monkeypatch)
+    core.sync_credentials(live)
+    app_marks_running(999999)                     # left by a crash: names no process
+    monkeypatch.setattr(core, "SOLE_REFRESHER", False)
+    fleet.start("term-1")
+    assert sandbox.blob(live[0].config_dir) == sandbox.blob(core.slot_dir("a"))
+
+
+def test_the_start_strip_keeps_a_closed_copy_that_is_ahead_of_its_slot(
+        sandbox, fake_server, fleet, monkeypatch):
+    """App off: a session renews itself and closes. Its dir holds the only
+    live lineage; stripping it would leave the slot to send a spent token."""
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1")]
+    for path in (core.slot_dir("a"), live[0].config_dir):
+        expire_in(sandbox, path, 4 * 60)
+    assert claude_code_refresh(fake_server.url, live[0].config_dir) == "rotated"
+    ahead = sandbox.blob(live[0].config_dir)
+    end_session(fleet, 0)
+    app_starts(monkeypatch)
+    assert core.strip_idle_copies() == []
+    assert sandbox.blob(live[0].config_dir) == ahead
+
+
+def test_the_start_strip_stops_when_the_app_quits(sandbox, fake_server, fleet, monkeypatch):
+    import threading
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    fleet.start("term-1")
+    end_session(fleet, 0)
+    app_starts(monkeypatch)
+    stop = threading.Event()
+    stop.set()
+    assert core.strip_idle_copies(stop) == []

@@ -1263,6 +1263,11 @@ class Snapshot:
         self.edits: int = 0
 
 
+# Set as the app starts to quit, so background work that strips logins stops
+# before the quit hands them back.
+_STOPPING = threading.Event()
+
+
 class ManagerApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Claude", title=f"{ICON} …", quit_button=None)
@@ -1311,9 +1316,12 @@ class ManagerApp(rumps.App):
         # token: every copy it hands a session carries the access token alone.
         # Set before the first refresh, so no full copy goes out first.
         core.SOLE_REFRESHER = True
+        core.mark_app_running(True)
         self._watch_stop()
         # Off the main thread: a hundred keychain reads would freeze the menu.
-        threading.Thread(target=core.strip_idle_copies, daemon=True).start()
+        # Stopped at quit, so it never strips a login the quit hands back.
+        threading.Thread(target=core.strip_idle_copies, args=(_STOPPING,),
+                         daemon=True).start()
         self.refresh_now(None)
         self._watch_menu()
         _start_timer(self._on_refresh_tick, REFRESH_SECONDS)
@@ -1354,6 +1362,8 @@ class ManagerApp(rumps.App):
     @staticmethod
     def _on_stop(_signum, _frame) -> None:
         try:
+            _STOPPING.set()
+            core.mark_app_running(False)
             core.hand_back_refresh_tokens()
         finally:
             # Not sys.exit: a SystemExit raised inside a signal handler has to
@@ -1635,6 +1645,8 @@ class ManagerApp(rumps.App):
         the copies it hands out cannot rotate themselves. The moment it stops,
         that has to be true the other way around again.
         """
+        _STOPPING.set()
+        core.mark_app_running(False)
         core.hand_back_refresh_tokens()
         rumps.quit_application()
 
