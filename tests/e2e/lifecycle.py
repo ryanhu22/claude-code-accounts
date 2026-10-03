@@ -109,15 +109,19 @@ def post_token(server_url: str, body: dict) -> dict:
 def claude_code_refresh(server_url: str, config_dir: str, hold: float = 0.0) -> str:
     """What a Claude Code session does with a refresh token of its own.
 
-    Takes the same two locks Claude Code takes, re-reads under them, spends
-    the token and writes the whole rotated credential back. Returns
-    "rotated", "no_refresh_token", "invalid_grant" or "transient". `hold`
-    keeps the locks for that long after the write, as a slow session would.
+    Takes the same two locks Claude Code takes, re-reads under them and skips
+    the refresh when what it finds is not within five minutes of expiry (that
+    re-read is what makes the locks worth taking), spends the token and
+    writes the whole rotated credential back. Returns "rotated", "fresh",
+    "no_refresh_token", "invalid_grant" or "transient". `hold` keeps the
+    locks for that long after the write, as a slow session would.
     """
     with locks.credentials(config_dir):
         cur = keychain.read_credentials(config_dir)
         if not cur or not cur.get("refreshToken"):
             return "no_refresh_token"
+        if not core.expiring(cur, 5 * 60):
+            return "fresh"
         try:
             resp = post_token(server_url, {"grant_type": "refresh_token",
                                            "refresh_token": cur["refreshToken"],

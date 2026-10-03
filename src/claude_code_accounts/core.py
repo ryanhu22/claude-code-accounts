@@ -547,6 +547,35 @@ def _drop_stash(config_dir: str) -> None:
         pass
 
 
+def _newer_copy(config_dir: str, current: dict) -> dict | None:
+    """A whole copy of a slot's login that is ahead of the slot.
+
+    A session that refreshed on its own while the app was off, or a bare
+    `claude` in ~/.claude, holds the live lineage, and the token in the slot
+    is the one it spent. Sending that token again is what the server reads
+    as reuse. So a slot about to rotate looks for such a copy first, under
+    the same test the sync pass applies before a promotion: a refresh token,
+    a later expiry, and the API confirming it belongs to this account.
+    """
+    if not is_account_dir(config_dir):
+        return None
+    owner = (_cached_email(config_dir) or recorded_email(config_dir)).lower()
+    if not owner:
+        return None
+    best = None
+    for d in credential_dirs():
+        if os.path.abspath(d) == os.path.abspath(config_dir):
+            continue
+        b = keychain.read_credentials(d, max_age=keychain.RECENT)
+        if (not b or not b.get("refreshToken") or fingerprint(b) == fingerprint(current)
+                or (b.get("expiresAt") or 0) <= (current.get("expiresAt") or 0)
+                or (best is not None and b["expiresAt"] <= best["expiresAt"])):
+            continue
+        if (identity(d, b)[0].get("email") or "").lower() == owner:
+            best = b
+    return best
+
+
 def live_blob(config_dir: str, allow_refresh: bool = True,
               margin: float = REFRESH_AHEAD) -> dict | None:
     """Usable credentials for a config dir, refreshed in place when stale.
@@ -596,6 +625,19 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
                 current = saved
             if not expiring(current, margin):
                 return current            # somebody else refreshed while we waited
+            newer = _newer_copy(config_dir, current)
+            if newer is not None:
+                # A copy rotated on its own, so the token here is spent. Take
+                # the copy's lineage, and only then see if it needs rotating.
+                if not _persist(config_dir, newer, stored):
+                    return newer
+                log.info("promote %s from a copy %s", _where(config_dir),
+                         _mark(fingerprint(newer)))
+                carry_identity(config_dir, stored, fingerprint(newer))
+                _REFUSED.pop(path, None)
+                if not expiring(newer, margin):
+                    return newer
+                current, stored = newer, fingerprint(newer)
             spent = fingerprint(current)
             resp, err = refresh(current)
             if not resp:

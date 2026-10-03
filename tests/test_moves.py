@@ -326,7 +326,10 @@ def test_live_blob_refresh_and_failures(fake_keychain, fake_api, monkeypatch):
     with budget(fake_keychain, 1):
         assert core.load_account("a", with_usage=False).email == "a@example.com"
     assert fake_api.profile_calls == 0
+    # The spent generation is back in the slot, and nothing holds a newer
+    # one (a peer that did would be promoted instead of the token sent).
     keychain.write_credentials(slot, old)
+    keychain.write_credentials(path, old)
     # 2 slot reads for a rejected refresh; no successor is written.
     with budget(fake_keychain, 2):
         assert core.live_blob(slot) is None
