@@ -3306,17 +3306,16 @@ class ManagerApp(rumps.App):
         """
         name = preset
         if not name:
+            # Both providers sign in through the browser. This dialog used to
+            # promise a Terminal and a /login for Claude, which was the flow
+            # before the app had a browser sign-in of its own.
+            service = "ChatGPT" if provider == "codex" else "Claude"
             win = rumps.Window(
                 title="Add a Codex account" if provider == "codex" else "Add a Claude account",
                 message=("Name this account (letters, digits, dashes). It is a label "
-                         "for you, not the email.\nA browser opens to sign in to ChatGPT. "
-                         "Use the browser that is signed in to the account you want."
-                         if provider == "codex" else
-                         "Name this account (letters, digits, dashes). It is a label "
-                         "for you, not the email.\nA Terminal opens running Claude Code "
-                         "as that account, where you type /login."),
-                ok="Open browser" if provider == "codex" else "Open Terminal",
-                cancel="Cancel", dimensions=(240, 22))
+                         f"for you, not the email.\nYour default browser opens to sign in "
+                         f"to {service}. Make sure it is signed in to the account you want."),
+                ok="Open browser", cancel="Cancel", dimensions=(240, 22))
             resp = win.run()
             if resp.clicked != 1:
                 return

@@ -295,3 +295,18 @@ class _Never:
 
     def kill(self):
         pass
+
+
+def test_the_add_account_dialogs_say_a_browser_opens(sandbox, fake_server, menu, dialogs):
+    """Both sign-ins go through the browser, so neither dialog may promise a Terminal."""
+    sandbox.seed_claude("main", "main@example.com")
+    menu.refresh()
+    for label in ("Add a Claude account…", "Add a Codex account…"):
+        dialogs.answers.append((0, ""))
+        click(menu.find(label))
+        asked = dialogs.windows[-1]
+        assert asked["title"] == label.rstrip("…")
+        assert "browser opens" in asked["message"]
+        assert "Terminal" not in asked["message"] and "/login" not in asked["message"]
+        assert asked["ok"] == "Open browser"
+    assert sandbox.opened_urls() == []
