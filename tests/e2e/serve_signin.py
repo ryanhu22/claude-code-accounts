@@ -129,6 +129,9 @@ class SignIn:
         # Nothing will ever be pasted: a prompt for a code must get EOF, not hang.
         assert self.proc.stdin is not None
         self.proc.stdin.close()
+        # communicate() flushes stdin first, and on Python 3.12 a closed
+        # stdin makes that flush raise. Nothing more is written to it.
+        self.proc.stdin = None
         deadline = time.monotonic() + timeout
         while True:
             urls = self.sandbox.opened_urls()
