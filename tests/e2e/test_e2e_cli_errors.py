@@ -124,8 +124,9 @@ def test_a_denied_sign_in_stores_nothing(sandbox, fake_server):
     fake_server.deny_next_authorize = True
     r = sandbox.sign_in("work")
     assert r.returncode == 1
-    assert "The user denied the request" in plain(r.stderr)
-    assert "no code given; nothing changed" in r.stderr
+    # The refusal is final: no paste prompt follows it.
+    assert plain(r.stderr).strip() == "The sign-in page reported that the request was not allowed."
+    assert "Paste the code" not in r.stdout
     assert sandbox.blob(sandbox.slot("work")) is None
     assert not fake_server.calls("/v1/oauth/token")
 

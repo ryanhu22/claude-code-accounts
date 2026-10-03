@@ -347,6 +347,19 @@ def cmd_resolve(args) -> int:
     return 0
 
 
+def _signed_in(ok: bool, msg: str) -> int:
+    """Report how a sign-in ended, and start the rules on a success.
+
+    The first account signed in is the default until a rule says otherwise,
+    so the shell wrapper launches on it from now on rather than in ~/.claude
+    until some other command starts the rules.
+    """
+    print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
+    if ok:
+        core.bootstrap()
+    return 0 if ok else 1
+
+
 def cmd_login(args) -> int:
     """Sign an account in through the browser.
 
@@ -384,10 +397,7 @@ def cmd_login(args) -> int:
                 ok, msg = False, "no code returned within five minutes; try signing in again"
         finally:
             cb.close()
-        print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
-        if ok:
-            core.bootstrap()
-        return 0 if ok else 1
+        return _signed_in(ok, msg)
     cb = None
     if not args.paste:
         try:
@@ -415,9 +425,7 @@ def cmd_login(args) -> int:
             # The redirect came back: the tab already shows this outcome. A
             # refusal is final; asking for a pasted code after it would be
             # asking for a code the page never showed.
-            ok, msg = cb.result
-            print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
-            return 0 if ok else 1
+            return _signed_in(*cb.result)
         print(f"{Y}No code came back within five minutes.{X}", file=sys.stderr)
     print(f"{D}Paste the code the page shows.{X}")
     try:
@@ -425,14 +433,7 @@ def cmd_login(args) -> int:
     except EOFError:
         print("\nno code given; nothing changed", file=sys.stderr)
         return 1
-    ok, msg = core.sign_in_finish(attempt, pasted)
-    print(msg if ok else f"{Y}{msg}{X}", file=sys.stdout if ok else sys.stderr)
-    if ok:
-        # The first account signed in is the default until a rule says
-        # otherwise, so the shell wrapper launches on it from now on rather
-        # than in ~/.claude until some other command starts the rules.
-        core.bootstrap()
-    return 0 if ok else 1
+    return _signed_in(*core.sign_in_finish(attempt, pasted))
 
 
 def cmd_add(args) -> int:
