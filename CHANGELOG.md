@@ -58,6 +58,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Renaming an account carries its rules with it, so launches stop routing to the old directory.
 - A rule change no longer overwrites a session's newer credential with the account's spent one.
 - A poke now shows its started windows within seconds instead of after the next poll.
+- `ccm list` with no account yet says how to sign one in, instead of printing nothing.
+- `ccm list` right after `ccm reset` or `ccm poke` reads usage again, instead of showing the
+  limits from before.
+- `ccm login` starts the rules on the account it signs in, so the `claude` wrapper launches on
+  it at once rather than in `~/.claude` until some other command runs.
+- A Codex rule says to restart Codex once, and only when a Codex ran in that terminal.
+- With the network down every account row says "can't reach Anthropic" or "can't reach
+  OpenAI", and a reset or poke that fails reports the reason without the urlopen wrapper.
 
 ### Changed
 
