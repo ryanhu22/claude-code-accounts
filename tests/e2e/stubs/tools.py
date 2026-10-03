@@ -15,7 +15,9 @@ line, and the ones a test asks about get a file of their own:
   is how a test gives a stand-in process the environment of a Claude Code
   session.
 - `claude`, `codex --version`: a version, so the User-Agent is deterministic.
-- `pmset`: a full wake. `osascript`: fails, as it would with no terminal app.
+- `pmset`: a full wake, or a dark wake (no Graphics) while a file named
+  `pmset.dark` exists in the sandbox. `osascript`: fails, as it would with
+  no terminal app.
 """
 import json
 import os
@@ -86,7 +88,10 @@ def main(tool: str, argv: list[str]) -> int:
     if tool in ("ps", "lsof"):
         return 0
     if tool == "pmset":
-        print(" Current System Capabilities: CPU Disk Network Graphics Audio")
+        if os.path.exists(os.path.join(_sandbox(), "pmset.dark")):
+            print(" Current System Capabilities: CPU Disk Network")
+        else:
+            print(" Current System Capabilities: CPU Disk Network Graphics Audio")
         return 0
     if tool == "osascript":
         sys.stderr.write("stub osascript: no terminal app in the sandbox\n")
