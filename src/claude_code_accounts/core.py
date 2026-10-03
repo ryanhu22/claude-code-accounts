@@ -1208,15 +1208,20 @@ def _usage(name: str, fetch, force: bool = False,
 
 
 def forget_usage(name: str) -> None:
-    """Clear the attempt floor so the refresh after a poke can fetch usage.
+    """Make the next read fetch usage, because what is cached is now wrong.
 
-    A poke's own pre-check stamps the floor that the refresh after it then
-    trips over, so the row stayed "unused" until the next poll. Preserve the
-    cached payload and any retry deadline while allowing another attempt.
+    A poke or a reset changes the account's state on the server, so the
+    payload read a moment earlier no longer describes it. Clear the attempt
+    floor, which a poke's own pre-check stamps and the forced refresh after
+    it tripped over, and age the payload past the point where an ordinary
+    read serves it without asking: `ccm list` right after `ccm reset` showed
+    the limits from before the reset. The payload itself and any retry
+    deadline stay, so a fetch that fails still has numbers to show.
     """
     store = _cache_read()
     if name in store:
         store[name]["tried_at"] = 0
+        store[name]["at"] = min(store[name].get("at") or 0, time.time() - _MIN_AGE)
         _cache_write(store)
 
 

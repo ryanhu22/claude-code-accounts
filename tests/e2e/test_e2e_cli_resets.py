@@ -188,3 +188,21 @@ def test_poke_starts_a_codex_window_through_the_codex_cli(sandbox, fake_server, 
     assert r.returncode == 0
     assert r.stdout.strip() == "gpt: every weekly window is already running"
     assert len(sandbox.codex_execs()) == 2
+
+
+def test_list_right_after_a_reset_or_a_poke_shows_the_new_state(sandbox, fake_server, work,
+                                                                 run_ccm):
+    out = plain(run_ccm("list").stdout)
+    assert "58.0%" in out and "resets: 2" in out
+    assert run_ccm("reset", "work", "-y").returncode == 0
+    out = plain(run_ccm("list").stdout)
+    assert "0.0%" in out and "58.0%" not in out
+    assert "resets: 1 · expires 2100-02-01" in out
+    # The same after a poke: the windows it started are running, not idle.
+    for lim in work.limits:
+        lim["resets_at"] = None
+    os.remove(os.path.join(sandbox.home, ".claude-accts", ".usage-cache.json"))
+    assert plain(run_ccm("list").stdout).count("idle\n") == 3
+    assert run_ccm("poke", "work").returncode == 0
+    out = plain(run_ccm("list").stdout)
+    assert "idle" not in out and out.count("resets ") == 3
