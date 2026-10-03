@@ -122,3 +122,15 @@ def test_menubar_uninstall_with_nothing_installed_touches_no_launchd(sandbox, ru
     assert r.returncode == 0
     assert r.stdout.strip() == "The menu bar app was not installed as a login item"
     assert sandbox.tripwire() == []
+
+
+def test_list_with_no_accounts_says_how_to_start(sandbox, run_ccm):
+    r = run_ccm("list")
+    assert r.returncode == 0, r.stderr
+    out = plain(r.stdout)
+    assert out.startswith("No accounts yet.")
+    assert "`ccm login work`" in out and "`ccm login work --codex`" in out
+    assert "`ccm add work`" in out
+    # A slot waiting for its first sign-in is an account, so the hint goes.
+    os.makedirs(sandbox.slot("work"))
+    assert plain(run_ccm("list").stdout).startswith("work  not signed in")

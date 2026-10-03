@@ -25,6 +25,11 @@ def _bar(pct: float, width: int = 20) -> str:
 def cmd_list(_args) -> int:
     r = core.bootstrap()
     accts = core.all_accounts()
+    if not accts:
+        print(f"{D}No accounts yet. Each account gets a name: `ccm login work` signs one in")
+        print("through the browser, `ccm login work --codex` a Codex one, and `ccm add work`")
+        print(f"prints the command that signs one in through Claude Code.{X}")
+        return 0
     for acct in accts:
         # rules_using reads the side the account is on, so a Codex account
         # reports the codex rules that name it rather than nothing at all.
