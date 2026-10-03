@@ -2701,21 +2701,56 @@ def _session_dirs() -> list[str]:
     return [path for path in out if os.path.isdir(path)]
 
 
-def _handed_back(copy: dict | None, path: str, master: dict, owner: str) -> bool:
+def _handed_back(copy: dict | None, path: str, master: dict, owner: str,
+                 live: set[str]) -> bool:
     """Whether a copy is a stripped copy of this login: its generation or one behind.
 
     A copy can miss a rotation (its lock was busy) and still be this
     account's. Left out at quit, it keeps an access token alone and stops
-    within the hour. It is given the slot's login only when the cache says it
-    is this account's and it is not ahead of the slot, so another account's
-    copy, or one nobody has named, is never written.
+    within the hour. It is given the slot's login only when its terminal is
+    running Claude Code, the cache says it is this account's, and it is not
+    ahead of the slot. Without the first test this reached every closed
+    terminal's dir that had ever held the account, and wrote a spendable
+    refresh token into dozens of dirs nothing was using.
     """
     if not copy or copy.get("refreshToken"):
         return False
     if fingerprint(copy) == fingerprint(master):
         return True
-    return bool(owner and _cached_email(path).lower() == owner
+    return bool(os.path.abspath(path) in live
+                and owner and _cached_email(path).lower() == owner
                 and (copy.get("expiresAt") or 0) <= (master.get("expiresAt") or 0))
+
+
+def strip_idle_copies() -> list[str]:
+    """Take the refresh token out of every session dir no Claude Code is using.
+
+    The sync pass strips only the dirs of running sessions. A dir whose
+    session ended while the app was off keeps the whole login it was handed
+    back, and dirs like that pile up: a hundred and more closed terminals,
+    each holding a refresh token, current or long spent. Either one is a
+    reuse waiting to happen if a new terminal ever lands in that dir and
+    renews from it. The app runs this once as it starts; a dir that is busy
+    is skipped, and one that starts a session meanwhile is the sync pass's.
+    """
+    live = {os.path.abspath(d) for d in sessions.discover_config_dirs(HOME)}
+    stripped = []
+    for path in _session_dirs():
+        if os.path.abspath(path) in live:
+            continue
+        if not (keychain.read_credentials(path) or {}).get("refreshToken"):
+            continue
+        try:
+            with locks.credentials(path, timeout=3.0):
+                cur = keychain.read_credentials(path)
+                if not cur or not cur.get("refreshToken"):
+                    continue
+                keychain.write_credentials(path, session_copy(cur))
+                stripped.append(path)
+                log.info("strip idle %s", _where(path))
+        except (locks.LockBusy, RuntimeError):
+            continue
+    return stripped
 
 
 def hand_back_refresh_tokens() -> list[str]:
@@ -2732,6 +2767,8 @@ def hand_back_refresh_tokens() -> list[str]:
     """
     given: list[str] = []
     dirs = _session_dirs()
+    # Registry files and a signal-0 probe per pid: no network, no ps.
+    live = {os.path.abspath(d) for d in sessions.discover_config_dirs(HOME)}
     for name in account_names():
         slot = slot_dir(name)
         master = keychain.read_credentials(slot, max_age=keychain.RECENT)
@@ -2740,11 +2777,12 @@ def hand_back_refresh_tokens() -> list[str]:
         owner = (_cached_email(slot) or recorded_email(slot)).lower()
         for path in dirs:
             copy = keychain.read_credentials(path, max_age=keychain.RECENT)
-            if not _handed_back(copy, path, master, owner):
+            if not _handed_back(copy, path, master, owner, live):
                 continue
             try:
                 with locks.credentials(path, timeout=3.0):
-                    if not _handed_back(keychain.read_credentials(path), path, master, owner):
+                    if not _handed_back(keychain.read_credentials(path), path, master,
+                                        owner, live):
                         continue   # it moved on while we waited
                     keychain.write_credentials(path, master)
                     given.append(path)

@@ -1312,6 +1312,8 @@ class ManagerApp(rumps.App):
         # Set before the first refresh, so no full copy goes out first.
         core.SOLE_REFRESHER = True
         self._watch_stop()
+        # Off the main thread: a hundred keychain reads would freeze the menu.
+        threading.Thread(target=core.strip_idle_copies, daemon=True).start()
         self.refresh_now(None)
         self._watch_menu()
         _start_timer(self._on_refresh_tick, REFRESH_SECONDS)

@@ -270,3 +270,47 @@ def test_hand_back_leaves_a_copy_it_cannot_name_alone(sandbox, fake_server, flee
     core._cache_write(store, core.IDENTITY_CACHE)
     assert core.hand_back_refresh_tokens() == [live[0].config_dir]
     assert sandbox.blob(live[1].config_dir) == stale
+
+
+def end_session(fleet, index):
+    proc = fleet.procs[index]
+    proc.kill()
+    proc.wait(timeout=5)
+
+
+def test_hand_back_skips_a_stale_copy_whose_terminal_closed(sandbox, fake_server, fleet,
+                                                            monkeypatch):
+    """A closed terminal's dir that missed a rotation stays stripped at quit.
+    Writing the slot's login into it reached every closed terminal the
+    account ever had, and left a spendable refresh token in each."""
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1"), fleet.start("term-2")]
+    app_starts(monkeypatch)
+    core.sync_credentials(live)
+    end_session(fleet, 1)
+    expire_in(sandbox, core.slot_dir("a"), 20 * 60)
+    stale = sandbox.blob(live[1].config_dir)
+    assert core.refresh_slots() == ["a"]
+    assert sandbox.blob(live[1].config_dir) == stale        # not live, not propagated
+    assert core.hand_back_refresh_tokens() == [live[0].config_dir]
+    assert sandbox.blob(live[1].config_dir) == stale
+
+
+def test_app_start_strips_closed_terminals_and_leaves_running_ones(sandbox, fake_server,
+                                                                   fleet, monkeypatch):
+    """Dirs whose session ended while the app was off keep the whole login
+    they were handed. The app takes the refresh token out of them as it
+    starts; a running session's dir is left for the sync pass."""
+    one_account(sandbox, fake_server)
+    core.load_account("a", with_usage=False)
+    live = [fleet.start("term-1"), fleet.start("term-2")]   # app off: whole copies
+    assert all(sandbox.blob(s.config_dir).get("refreshToken") for s in live)
+    end_session(fleet, 1)
+    app_starts(monkeypatch)
+    assert core.strip_idle_copies() == [live[1].config_dir]
+    closed = sandbox.blob(live[1].config_dir)
+    assert "refreshToken" not in closed and closed["accessToken"]
+    assert sandbox.blob(live[0].config_dir).get("refreshToken")
+    assert core.strip_idle_copies() == []
+    assert fake_server.reused_refresh_tokens == []
