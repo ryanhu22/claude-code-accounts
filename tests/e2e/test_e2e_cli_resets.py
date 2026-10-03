@@ -65,7 +65,15 @@ def test_claude_reset_refusals_say_why(sandbox, fake_server, work, run_ccm):
     r = run_ccm("reset", "work", "-y")
     assert r.returncode == 1
     assert r.stdout.strip() == "work: resets are cooling down, try again later"
-    assert "reset work refused: cooldown" in run_ccm("log").stdout
+    # The log names the refusal, and a reason only when the server gave one.
+    lines = run_ccm("log").stdout.splitlines()
+    assert lines[-1].endswith(" reset work refused: cooldown"), lines[-1]
+    fake_server.script("/api/organizations/", 200, {"result": "ineligible", "reason": "trial"},
+                       method="POST")
+    r = run_ccm("reset", "work", "-y")
+    assert r.stdout.strip() == "work: this account cannot use a reset now"
+    last = run_ccm("log", "-n", "1").stdout.rstrip()
+    assert last.endswith("reset work refused: ineligible trial"), last
 
 
 def test_codex_reset_spends_the_credit_that_expires_first(sandbox, fake_server, run_ccm):
