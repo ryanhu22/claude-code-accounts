@@ -150,6 +150,8 @@ def test_codex_account_lists_plan_usage_and_credits(sandbox, fake_server, run_cc
 
 def _port_free(port: int) -> bool:
     with socket.socket() as s:
+        # As ccm's callback server binds: a port in TIME_WAIT is free to it.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
         except OSError:

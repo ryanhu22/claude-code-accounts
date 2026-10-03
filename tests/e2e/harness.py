@@ -53,7 +53,9 @@ def fetch(url: str, timeout: float = 10.0) -> tuple[int, str]:
 
 class Sandbox:
     def __init__(self, root: str | os.PathLike, server: FakeServer) -> None:
-        self.root = str(root)
+        # The real path: a temp dir under /var is really under /private/var,
+        # and ccm compares the cwd it is given with the HOME it is given.
+        self.root = os.path.realpath(str(root))
         self.server = server
         self.home = os.path.join(self.root, "home")
         self.bin = os.path.join(self.root, "bin")
