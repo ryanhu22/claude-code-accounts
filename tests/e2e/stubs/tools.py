@@ -10,7 +10,10 @@ line, and the ones a test asks about get a file of their own:
 - `launchctl`: a tripwire. ccm must never reach it from a test, so a call
   lands in `tripwire.log` and fails.
 - `ps`, `lsof`: answer with nothing, so the real machine's processes never
-  walk into the sandbox.
+  walk into the sandbox. `ps eww -p PID` answers for a pid listed in the
+  sandbox's `ps.json` (`{"PID": {"tty": "ttys001", "env": {...}}}`), which
+  is how a test gives a stand-in process the environment of a Claude Code
+  session.
 - `claude`, `codex --version`: a version, so the User-Agent is deterministic.
 - `pmset`: a full wake. `osascript`: fails, as it would with no terminal app.
 """
@@ -68,6 +71,17 @@ def main(tool: str, argv: list[str]) -> int:
         if url:
             with open(os.path.join(_sandbox(), "open-urls.log"), "a") as f:
                 f.write(url + "\n")
+        return 0
+    if tool == "ps" and argv[:2] == ["eww", "-p"] and len(argv) == 3:
+        try:
+            with open(os.path.join(_sandbox(), "ps.json")) as f:
+                proc = json.load(f).get(argv[2])
+        except (OSError, ValueError):
+            proc = None
+        print("  PID TTY           TIME CMD")
+        if proc:
+            words = " ".join(f"{k}={v}" for k, v in (proc.get("env") or {}).items())
+            print(f"{argv[2]:>5} {proc.get('tty') or '??':<8} 0:00.00 claude {words}")
         return 0
     if tool in ("ps", "lsof"):
         return 0

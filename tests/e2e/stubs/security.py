@@ -8,7 +8,9 @@ real exit codes: `find-generic-password -s S [-a A] -w`, `-i` reading one
 
 The file is named by CCM_E2E_KEYCHAIN_FILE. Without it the fake refuses to
 run, so nothing can quietly fall through to a real keychain. Every call is
-appended to a `.log` beside the file, with secrets redacted.
+appended to a `.log` beside the file, with secrets redacted. While a file
+named `<keychain>.fail-writes` exists, every add fails the way a locked or
+refusing keychain does, and reads keep working.
 """
 import binascii
 import fcntl
@@ -91,7 +93,12 @@ def main():
                 items = json.load(f)
         except (OSError, ValueError):
             items = {}
-        rc, out = _run(argv, items)
+        if argv[:1] == ["add-generic-password"] and os.path.exists(path + ".fail-writes"):
+            rc, out = 36, ""      # errSecNoSuchKeychain: the write never lands
+            sys.stderr.write("security: SecKeychainItemCreateFromContent: "
+                             "A keychain cannot be found to store.\n")
+        else:
+            rc, out = _run(argv, items)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(items, f)

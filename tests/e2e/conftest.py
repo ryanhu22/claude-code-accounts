@@ -44,6 +44,25 @@ def run_ccm(sandbox):
     return sandbox.run
 
 
+@pytest.fixture
+def fleet(sandbox):
+    """The Claude Code sessions a test starts (`lifecycle.Fleet`); each one is
+    a real process, killed after the test."""
+    from e2e.lifecycle import Fleet
+
+    fleet = Fleet(sandbox)
+    yield fleet
+    fleet.stop()
+
+
+@pytest.fixture
+def app_running(monkeypatch):
+    """The menu bar app is up: this process is the only thing that may refresh,
+    and the credential log is written, as the app writes it."""
+    monkeypatch.setattr(core, "SOLE_REFRESHER", True)
+    core.enable_file_log()
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(sandbox, monkeypatch):
     """This process lives in the sandbox too, for code run in-process.

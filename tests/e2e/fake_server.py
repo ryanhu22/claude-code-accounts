@@ -179,7 +179,17 @@ class FakeServer:
         self._codex_refresh: dict[str, tuple[str, bool]] = {}
         self._gen: dict[str, int] = {}
         self.access_lifetime = 3600
-        self.refresh_lifetime = 30 * 86400
+        # What the token response says in `refresh_token_expires_in`: None
+        # leaves the field out, and a string is passed through as a string.
+        self.refresh_lifetime: int | str | None = 30 * 86400
+        # Every refresh grant attempt, per refresh token, reuse included. A
+        # token that reaches 2 was sent twice, which strands a copy of the
+        # login on the real server, so a test asks `reused_refresh_tokens`.
+        self.refresh_uses: dict[str, int] = {}
+        # The next N refresh grants spend their token and then close the
+        # connection without a reply: what the Mac sleeping mid-request does.
+        self.lost_refresh_replies = 0
+        self.lost_replies: list[str] = []
         self.pokes: list[dict] = []
         self.resets: list[dict] = []
         self._server: http.server.ThreadingHTTPServer | None = None
@@ -261,14 +271,29 @@ class FakeServer:
                 f"rt-{email}-{gen}-{secrets.token_hex(4)}"
             self._access[access] = email
             self._refresh[refresh] = (email, False)
-        return {"access_token": access, "refresh_token": refresh,
-                "token_type": "Bearer", "expires_in": self.access_lifetime,
-                "refresh_token_expires_in": self.refresh_lifetime,
-                "scope": "user:profile user:inference user:sessions:claude_code "
-                         "user:mcp_servers user:file_upload",
-                "account": {"uuid": self.claude[email].profile()["account"]["uuid"],
-                            "email_address": email},
-                "organization": {"uuid": self.claude[email].org_uuid}}
+        grant = {"access_token": access, "refresh_token": refresh,
+                 "token_type": "Bearer", "expires_in": self.access_lifetime,
+                 "scope": "user:profile user:inference user:sessions:claude_code "
+                          "user:mcp_servers user:file_upload",
+                 "account": {"uuid": self.claude[email].profile()["account"]["uuid"],
+                             "email_address": email},
+                 "organization": {"uuid": self.claude[email].org_uuid}}
+        if self.refresh_lifetime is not None:
+            grant["refresh_token_expires_in"] = self.refresh_lifetime
+        return grant
+
+    def generation(self, access_token: str | None) -> int:
+        """Which grant of its account an access token came from; 0 if unknown."""
+        parts = (access_token or "").split("-")
+        try:
+            return int(parts[-2]) if parts[0] == "at" else 0
+        except (IndexError, ValueError):
+            return 0
+
+    @property
+    def reused_refresh_tokens(self) -> list[str]:
+        with self._lock:
+            return [t for t, n in self.refresh_uses.items() if n > 1]
 
     def blob(self, email: str, expires_in: int | None = None) -> dict:
         """A keychain credential for an account, for seeding a signed-in slot."""
@@ -276,9 +301,13 @@ class FakeServer:
         tier = self.claude[email].tier
         now = time.time()
         life = self.access_lifetime if expires_in is None else expires_in
+        try:
+            renew = float(self.refresh_lifetime)
+        except (TypeError, ValueError):
+            renew = 30 * 86400.0
         return {"accessToken": grant["access_token"], "refreshToken": grant["refresh_token"],
                 "expiresAt": int((now + life) * 1000),
-                "refreshTokenExpiresAt": int((now + self.refresh_lifetime) * 1000),
+                "refreshTokenExpiresAt": int((now + renew) * 1000),
                 "scopes": sorted(grant["scope"].split()),
                 "subscriptionType": "max" if "max" in tier else "pro" if "pro" in tier else "",
                 "rateLimitTier": tier}
@@ -538,14 +567,27 @@ class FakeServer:
             self._json(h, 200, self.issue(email))
             return
         if grant == "refresh_token":
+            token = body.get("refresh_token", "")
             with self._lock:
-                owner = self._refresh.get(body.get("refresh_token", ""))
+                self.refresh_uses[token] = self.refresh_uses.get(token, 0) + 1
+                owner = self._refresh.get(token)
                 if owner is None or owner[1]:
                     self._json(h, 400, {"error": "invalid_grant",
                                         "error_description": "Refresh token is invalid or expired"})
                     return
-                self._refresh[body["refresh_token"]] = (owner[0], True)
-            self._json(h, 200, self.issue(owner[0]))
+                self._refresh[token] = (owner[0], True)
+                lose = self.lost_refresh_replies > 0
+                if lose:
+                    self.lost_refresh_replies -= 1
+                    self.lost_replies.append(token)
+            issued = self.issue(owner[0])
+            if lose:
+                # The token is spent and the successor exists, and the client
+                # never hears about it: the connection just goes away.
+                h.close_connection = True
+                h.wfile.close()
+                return
+            self._json(h, 200, issued)
             return
         self._json(h, 400, {"error": "unsupported_grant_type"})
 
