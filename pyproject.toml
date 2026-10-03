@@ -62,3 +62,6 @@ known-first-party = ["claude_code_accounts"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "e2e: runs the real ccm command in a sandbox against a fake server (tests/e2e)",
+]
