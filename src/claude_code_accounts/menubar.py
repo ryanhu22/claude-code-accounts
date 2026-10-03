@@ -695,11 +695,20 @@ def _windows(acct: core.Account) -> list[tuple[str, str, str]]:
     they already know rather than a second set that happens to agree.
     """
     out: list[tuple[str, str, str]] = []
-    for kind in ("session", "weekly_all"):
+    for kind, label in (("session", "5h"), ("weekly_all", "7d")):
         lim = acct.limit(kind)
-        out += _window_cell(lim.label if lim else kind, lim)
+        if lim is None and kind == "session" and acct.is_codex \
+                and acct.extras.get("has_5h") is False:
+            # The plan has no such window, as the account row says. This
+            # used to read "session -", and a dash claims the number is
+            # merely unknown.
+            out += [(f"\t{label}", "dim", "ui"), ("\tnone", "dim", "fig"), ("\t", "dim", "ui")]
+            continue
+        out += _window_cell(label, lim)
     scoped = _scoped(acct)
-    out += _window_cell(scoped.label if scoped else "fable", scoped)
+    # A Codex account has no Fable window; its scoped column is a model's.
+    out += _window_cell(scoped.label if scoped else "model" if acct.is_codex else "fable",
+                        scoped)
     return out
 
 

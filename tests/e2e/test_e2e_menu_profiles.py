@@ -173,6 +173,19 @@ def test_the_default_rule_names_one_account_per_provider(sandbox, fake_server, m
     assert [checked(r) for r in picks(menu, row)] == [False, True, True]
 
 
+def test_a_picker_names_windows_the_way_the_account_row_does(sandbox, fake_server, menu):
+    """A Codex plan with no 5h window says "none" there, and names no Claude model."""
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_codex("gpt", "gpt@example.com", plan="plus")
+    menu.refresh()
+    row = menu.find("everything else", menu.section("PROFILES"))
+    claude, codex = picks(menu, row)
+    assert text(claude).split("\t")[1:] == ["5h", "58%", "(26752d)", "7d", "71%", "(26754d)",
+                                             "fable", "34%", "(26754d)"]
+    assert text(codex).split("\t")[1:] == ["5h", "none", "", "7d", "62%", "(26752d)",
+                                            "model", "-", ""]
+
+
 def test_new_profile_from_a_session_row_takes_the_project_along(
         sandbox, fake_server, menu, dialogs):
     pid = seed(sandbox, menu)
