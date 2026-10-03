@@ -264,9 +264,9 @@ def finish(attempt: Attempt, pasted: str, post, profile_result) -> tuple[dict | 
         "subscriptionType": "max" if "max" in tier else "pro" if "pro" in tier else plan.lower(),
         "rateLimitTier": tier,
     }
-    if resp.get("refresh_expires_in"):
-        blob["refreshTokenExpiresAt"] = int(
-            (now + float(resp["refresh_expires_in"])) * 1000)
+    lifetime = resp.get("refresh_token_expires_in") or resp.get("refresh_expires_in")
+    if lifetime:
+        blob["refreshTokenExpiresAt"] = int((now + float(lifetime)) * 1000)
     return blob, email
 
 

@@ -302,9 +302,35 @@ def _apply(blob: dict, resp: dict) -> dict:
     if resp.get("refresh_token"):
         out["refreshToken"] = resp["refresh_token"]
     out["expiresAt"] = int((time.time() + resp.get("expires_in", 3600)) * 1000)
+    # Claude Code warns "Your login expires in N days" from this field, so a
+    # value left over from sign-in counts down while the login keeps renewing.
+    # Do what Claude Code does on its own refresh: take the new lifetime, or
+    # drop the field when the response does not state one.
+    lifetime = refresh_lifetime(resp)
+    if lifetime is not None:
+        out["refreshTokenExpiresAt"] = int((time.time() + lifetime) * 1000)
+    elif resp.get("refresh_token"):
+        out.pop("refreshTokenExpiresAt", None)
     if resp.get("scope"):
         out["scopes"] = resp["scope"].split()
     return out
+
+
+def refresh_lifetime(resp: dict) -> float | None:
+    """Seconds a grant's refresh token lives, when the response says.
+
+    `refresh_token_expires_in` is the name Claude Code reads. The older name is
+    kept as a fallback because ccm read only that one before.
+    """
+    for key in ("refresh_token_expires_in", "refresh_expires_in"):
+        value = resp.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def refresh(blob: dict) -> tuple[dict | None, str | None]:
@@ -567,7 +593,9 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
         return blob                       # Claude Code is mid-refresh; try later
     new_fp = fingerprint(rotated)
     if new_fp != spent:
-        log.info("refresh %s %s->%s", _where(config_dir), _mark(spent), _mark(new_fp))
+        lifetime = refresh_lifetime(resp)
+        log.info("refresh %s %s->%s refresh-token-life %s", _where(config_dir), _mark(spent),
+                 _mark(new_fp), f"{lifetime / 86400:.1f}d" if lifetime is not None else "unstated")
         carry_identity(config_dir, spent, new_fp)
         propagate(spent, resp, skip=config_dir)
     return rotated
@@ -676,13 +704,134 @@ def identity(config_dir: str, blob: dict | None) -> tuple[dict, str | None]:
     info, err = profile_result(blob.get("accessToken"))
     if info.get("email"):
         store[os.path.abspath(config_dir)] = {"fp": fp, "email": info["email"],
-                                              "plan": info.get("plan"), "at": time.time()}
+                                              "plan": info.get("plan"), "tier": info.get("tier"),
+                                              "at": time.time()}
         _cache_write(store, IDENTITY_CACHE)
         return info, None
     if err == "transient" and hit.get("email"):
         # Say nothing about the login: we simply could not ask right now.
         return {"email": hit["email"], "plan": hit.get("plan")}, None
     return {}, err
+
+
+# How long a plan answer is trusted. The identity cache keeps the email for the
+# life of the login, which is right for the email and wrong for the plan: a
+# plan changed on claude.ai never reached the menu or the sessions.
+PLAN_TTL = 6 * 3600
+
+
+def subscription_type(tier: str, plan: str = "") -> str:
+    """The `subscriptionType` Claude Code expects next to a rate-limit tier."""
+    return "max" if "max" in tier else "pro" if "pro" in tier else plan.lower()
+
+
+def recheck_plan(slot: str, blob: dict | None) -> str | None:
+    """An account's current plan, asked again once the answer is PLAN_TTL old.
+
+    A new tier is written into the slot's credential, every copy of it, and
+    the slot's oauthAccount, which the sessions then pick up from there. A
+    failed lookup keeps the last answer: it says nothing about the plan.
+    Returns the plan label to show, or None when nothing is known.
+    """
+    if not blob:
+        return None
+    key = os.path.abspath(slot)
+    store = _cache_read(IDENTITY_CACHE)
+    hit = store.get(key) or {}
+    if hit.get("fp") != fingerprint(blob) or not hit.get("email"):
+        return hit.get("plan")
+    if time.time() - (hit.get("plan_at") or hit.get("at") or 0) >= PLAN_TTL:
+        info, _ = profile_result(blob.get("accessToken"))
+        store = _cache_read(IDENTITY_CACHE)
+        entry = store.get(key)
+        if entry and entry.get("fp") == hit["fp"]:
+            # Stamped whatever the answer, so an account the endpoint cannot
+            # describe is asked again in PLAN_TTL, not on every poll.
+            entry["plan_at"] = time.time()
+            if (info.get("email") or "").lower() == hit["email"].lower() and info.get("tier"):
+                if entry.get("plan") != info.get("plan"):
+                    log.info("plan %s %s -> %s", _where(slot), entry.get("plan"), info.get("plan"))
+                entry.update(plan=info.get("plan"), tier=info["tier"])
+            _cache_write(store, IDENTITY_CACHE)
+            hit = entry
+    tier = hit.get("tier")
+    if tier and tier != blob.get("rateLimitTier"):
+        _retier(slot, blob, tier, hit.get("plan") or "")
+    return hit.get("plan")
+
+
+PLAN_FIELDS = ("rateLimitTier", "subscriptionType")
+
+
+def same_plan(a: dict | None, b: dict | None) -> bool:
+    return all((a or {}).get(k) == (b or {}).get(k) for k in PLAN_FIELDS)
+
+
+def _replan(path: str, slot: str) -> bool:
+    """Give a copy the plan its account's slot holds, touching nothing else.
+
+    Only a copy of the slot's own generation is written, and only its plan
+    fields change, so this can neither add a refresh token nor move a token.
+    The slot is read fresh rather than from the memo: a stale read is how an
+    old plan would be written back over a new one.
+    """
+    have = keychain.read_credentials(path, max_age=keychain.RECENT)
+    src = keychain.read_credentials(slot, max_age=keychain.RECENT)
+    if not have or fingerprint(have) != fingerprint(src) or same_plan(have, src):
+        return False
+    try:
+        with locks.credentials(path, timeout=3.0):
+            cur = keychain.read_credentials(path)
+            src = keychain.read_credentials(slot)
+            if not cur or fingerprint(cur) != fingerprint(src) or same_plan(cur, src):
+                return False
+            keychain.write_credentials(path, _for_dir(path, {
+                **cur, **{k: src[k] for k in PLAN_FIELDS if k in src}}))
+            log.info("replan %s %s", _where(path), src.get("rateLimitTier"))
+            return True
+    except (locks.LockBusy, RuntimeError):
+        return False
+
+
+def _retier(slot: str, blob: dict, tier: str, plan: str) -> None:
+    """Write a changed plan into an account's credential and its oauthAccount.
+
+    The slot goes first and is the only source the copies take a plan from, so
+    a copy can never be handed a plan the slot does not hold. Copies that miss
+    this pass are caught by `sync_credentials`, which runs `_replan` every pass.
+    """
+    fp = fingerprint(blob)
+    sub = subscription_type(tier, plan)
+    try:
+        with locks.credentials(slot, timeout=3.0):
+            cur = keychain.read_credentials(slot)
+            if fingerprint(cur) != fp:
+                return        # rotated meanwhile; the next poll looks again
+            want = {**cur, "rateLimitTier": tier, "subscriptionType": sub}
+            if not same_plan(cur, want):
+                keychain.write_credentials(slot, _for_dir(slot, want))
+                log.info("retier %s %s", _where(slot), tier)
+    except (locks.LockBusy, RuntimeError):
+        return
+    for d in credential_dirs():
+        if os.path.abspath(d) != os.path.abspath(slot):
+            _replan(d, slot)
+    dst = _config_json(slot)
+    try:
+        with locks.config(slot):
+            with open(dst) as f:
+                data = json.load(f)
+            account = data.get("oauthAccount") if isinstance(data, dict) else None
+            if not isinstance(account, dict) or account.get("organizationRateLimitTier") == tier:
+                return
+            account["organizationRateLimitTier"] = tier
+            tmp = dst + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, dst)
+    except (locks.LockBusy, OSError, ValueError):
+        pass
 
 
 def whoami(token: str | None) -> str | None:
@@ -1149,8 +1298,12 @@ def adopt(config_dir: str, blob: dict, email: str = "", rebind: bool = False,
     store = _cache_read(IDENTITY_CACHE)
     key = os.path.abspath(config_dir)
     if email:
+        old = store.get(key) or {}
         store[key] = {"fp": fingerprint(blob), "email": email,
-                      "plan": (store.get(key) or {}).get("plan"), "at": time.time()}
+                      "plan": old.get("plan"), "at": time.time()}
+        if (old.get("email") or "").lower() == email.lower():
+            # Same account, same plan: keep when it was last asked.
+            store[key].update({k: old[k] for k in ("tier", "plan_at") if k in old})
     else:
         store.pop(key, None)
     _cache_write(store, IDENTITY_CACHE)
@@ -1215,7 +1368,8 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
                       else "can't reach Anthropic")
         return acct
     acct.email = email
-    acct.plan = info.get("plan") or blob.get("subscriptionType")
+    acct.plan = (recheck_plan(slot, blob) or info.get("plan")
+                 or (blob or {}).get("subscriptionType"))
     # An account holding somebody else's login still answers every question,
     # it just answers them about the wrong subscription, which reads as two
     # accounts reporting identical usage rather than as a fault. Say it.
@@ -1470,6 +1624,7 @@ def sign_in_finish(attempt: oauth.Attempt, pasted: str) -> tuple[bool, str]:
                   os.path.abspath(slot): {"fp": fingerprint(blob), "email": email,
                                           "plan": plan_label(blob.get("rateLimitTier") or "")
                                           or blob.get("subscriptionType"),
+                                          "tier": blob.get("rateLimitTier"),
                                           "at": time.time()}}, IDENTITY_CACHE)
     try:
         _account_identity(attempt.account)
@@ -2192,6 +2347,8 @@ def sync_credentials(live: Iterable[sessions.Session]) -> list[str]:
         best = fingerprint(master)
         for path in session_paths:
             if fingerprint(copies[path]) == best:
+                if not same_plan(copies[path], master) and _replan(path, home):
+                    healed.append(path)
                 continue
             # Never write an older token over a newer one that could not be
             # identified. The promotion above passed on it because the endpoint

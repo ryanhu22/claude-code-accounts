@@ -123,7 +123,8 @@ class FakeApi:
         self._generations[email] = max(gen, self._generations.get(email, 0))
         return {"accessToken": access, "refreshToken": refresh,
                 "expiresAt": int((time.time() + (expires_in if fresh else -3600)) * 1000),
-                "subscriptionType": "max", "scopes": ["user:inference", "user:profile"]}
+                "subscriptionType": "max", "rateLimitTier": "default_claude_max_5x",
+                "scopes": ["user:inference", "user:profile"]}
 
     def install(self, monkeypatch):
         monkeypatch.setattr(core, "_get", self.get)
