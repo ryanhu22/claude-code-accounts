@@ -186,6 +186,9 @@ class FakeServer:
         # token that reaches 2 was sent twice, which strands a copy of the
         # login on the real server, so a test asks `reused_refresh_tokens`.
         self.refresh_uses: dict[str, int] = {}
+        # Set by a test that stages a reuse on purpose; the `fleet` fixture
+        # fails any other test that caused one.
+        self.allow_reuse = False
         # The next N refresh grants spend their token and then close the
         # connection without a reply: what the Mac sleeping mid-request does.
         self.lost_refresh_replies = 0

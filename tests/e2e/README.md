@@ -94,7 +94,30 @@ menu bar code run in-process against the same sandbox.
 
 Token behaviour mirrors the real servers: codes are single use and PKCE is
 checked; a refresh token is single use and a reused one gets `400
-invalid_grant`; the token response carries `refresh_token_expires_in`.
+invalid_grant`; the token response carries `refresh_token_expires_in`
+(`refresh_lifetime`: a number, a string, or None to leave it out). Every
+refresh grant is counted in `refresh_uses`, and `reused_refresh_tokens`
+lists the ones sent twice; the `fleet` fixture fails a test that caused one
+unless it set `allow_reuse`. `lost_refresh_replies = N` makes the next N
+refresh grants spend their token and drop the connection without a reply.
+`generation(access_token)` says which grant of its account a token is.
+
+## Sessions that are real processes
+
+`lifecycle.py` (fixture `fleet`) starts a Claude Code session the way the
+shell wrapper does: the real `ccm resolve` prepares the terminal's dir, a
+live `sleep` process stands in for Claude Code with the registry file it
+would write, and the `ps` stub answers for that pid from the sandbox's
+`ps.json`, so `core.credential_dirs()` and `sessions.live()` find it as the
+app does. `claude_code_refresh(url, dir)` does what a session does with a
+refresh token of its own, under Claude Code's locks, with the re-read that
+skips a fresh token. `menubar_app(live)` gives the app's sleep, wake and
+tick handlers on an app that never drew a menu, and `check_invariants`
+asserts the three things every scenario must keep: no session copy with a
+refresh token while the app runs, no token sent twice, no copy behind its
+slot. A file named `<keychain>.fail-writes` makes the fake `security`
+refuse every write; `pmset.dark` in the sandbox makes `pmset` report a
+dark wake.
 
 ## Endpoints the fake serves
 

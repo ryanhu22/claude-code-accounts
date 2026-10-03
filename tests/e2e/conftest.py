@@ -53,6 +53,11 @@ def fleet(sandbox):
     fleet = Fleet(sandbox)
     yield fleet
     fleet.stop()
+    # A refresh token that went to the server twice strands a copy of the
+    # login on the real server. A test that stages that on purpose says so.
+    reused = sandbox.server.reused_refresh_tokens
+    if reused and not getattr(sandbox.server, "allow_reuse", False):
+        pytest.fail(f"a refresh token was sent twice: {reused}")
 
 
 @pytest.fixture

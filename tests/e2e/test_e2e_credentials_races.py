@@ -61,6 +61,33 @@ def test_a_session_that_rotated_while_the_app_was_off_is_promoted_not_raced(
     assert generation(fake_server, sandbox.blob(live[1].config_dir)) == 2
 
 
+def test_a_rate_limit_during_the_promotion_still_spends_nothing(sandbox, fake_server, fleet,
+                                                                monkeypatch):
+    """The copy's account is confirmed before it is promoted. When the
+    profile endpoint is rate limited, the answer cached at hand-out stands
+    in, as it does everywhere else, and the spent token still stays home.
+
+    The app asks every slot's identity on its first usage poll, so a session
+    handed out afterwards carries it. A copy with no cached identity at all
+    cannot be confirmed under a rate limit, and the slot's token is sent."""
+    one_account(sandbox, fake_server)
+    assert core.load_account("a", with_usage=False).email == "a@example.com"
+    live = [fleet.start("term-1")]
+    assert core._cached_email(live[0].config_dir) == "a@example.com"
+    expire_in(sandbox, live[0].config_dir, 60)
+    assert claude_code_refresh(fake_server.url, live[0].config_dir) == "rotated"
+    expire_in(sandbox, core.slot_dir("a"), 20 * 60)
+    app_starts(monkeypatch)
+    fake_server.script("/api/oauth/profile", 429, {"error": "rate_limited"},
+                       headers={"Retry-After": "60"}, times=3)
+    assert core.refresh_slots() == ["a"]
+    slot = sandbox.blob(core.slot_dir("a"))
+    assert generation(fake_server, slot) == 2 and slot["refreshToken"]
+    assert len(refreshes(fake_server)) == 1
+    core.sync_credentials(live)
+    check_invariants(sandbox, fake_server, fleet, settled=True)
+
+
 def test_a_session_finds_the_app_already_rotated_and_skips(sandbox, fake_server, fleet,
                                                            monkeypatch):
     """The other order: the app rotates first and hands the successor to a
@@ -91,6 +118,7 @@ def test_the_app_and_a_whole_copy_rotating_at_once_settle_on_one_lineage(
     app_starts(monkeypatch)
     expire_in(sandbox, core.slot_dir("a"), 20 * 60)
     expire_in(sandbox, live[0].config_dir, 20 * 60)
+    fake_server.allow_reuse = True          # the two racers may collide
     outcome = {}
 
     def session():
@@ -129,6 +157,7 @@ def test_a_copy_refused_while_a_peer_holds_the_successor(sandbox, fake_server, f
     expire_in(sandbox, live[0].config_dir, 60)
     assert claude_code_refresh(fake_server.url, live[0].config_dir) == "rotated"
     expire_in(sandbox, live[1].config_dir, 60)
+    fake_server.allow_reuse = True          # the second session's doing, below
     assert claude_code_refresh(fake_server.url, live[1].config_dir) == "invalid_grant"
     assert sandbox.blob(live[1].config_dir)["accessToken"] == ""
     # That one reuse was the two sessions' doing, with no app to stop them.

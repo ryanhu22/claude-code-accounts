@@ -148,6 +148,7 @@ def test_a_refresh_reply_lost_to_the_sleep_is_tried_once_more_and_then_left(
     app = menubar_app(live)
     before = expire_in(sandbox, core.slot_dir("a"), 2 * 3600)
     fake_server.lost_refresh_replies = 1
+    fake_server.allow_reuse = True
     app._on_sleep()
     assert fake_server.lost_replies == [before["refreshToken"]]
     assert sandbox.blob(core.slot_dir("a")) == before          # nothing to store
