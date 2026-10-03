@@ -2136,23 +2136,38 @@ class ManagerApp(rumps.App):
         # that says the price. Offered whenever there is one to spend: the
         # account row above shows how full the windows are, and how close to
         # full is worth a credit is the user's call, not this menu's.
-        credits = acct.extras.get("reset_credits", 0) if acct.is_codex else 0
-        if acct.is_codex and acct.reading and credits > 0:
+        # Claude grants resets too (Claude Code's /limit-reset). Same submenu,
+        # in Claude's own words: a Claude reset clears only the limits it names.
+        credits = acct.extras.get("reset_credits", 0)
+        if acct.reading and credits > 0:
             reset = rumps.MenuItem(f"reset:{acct.name}")
-            _apply_style(reset, [("  ", "dim"), ("Reset every window now…", "text")],
+            _apply_style(reset, [("  ", "dim"), ("Reset every window now…" if acct.is_codex
+                                                 else "Reset your limits now…", "text")],
                          mono=False)
             _set_icon(reset, "arrow.counterclockwise.circle")
             # The row that spends is shaped like every other action here: an
             # icon and a command. The two dim lines under it are the price and
             # the one fact worth knowing first, which is when the credit lapses.
-            label = f"Use 1 of {credits} reset credit{'s' if credits != 1 else ''} now"
+            lapses = _day(acct.extras.get("reset_credit_expires") or "")
+            if acct.is_codex:
+                label = f"Use 1 of {credits} reset credit{'s' if credits != 1 else ''} now"
+                notes = [("reset-note", "Every window of this account goes back to 0%."),
+                         ("reset-when", f"The one that expires first goes, on {lapses}."
+                          if lapses else "The one that expires first goes.")]
+            else:
+                label = ("Use your reset now" if credits == 1
+                         else f"Use 1 of {credits} resets now")
+                clears = " and ".join(acct.extras.get("reset_clears") or [])
+                notes = [("reset-note", f"The {clears} limits go back to 0%."
+                          if acct.extras.get("reset_clears") else "Your limits go back to 0%.")]
+                if acct.extras.get("reset_needs_limit"):
+                    notes.append(("reset-limit", "It works only after you reach a limit."))
+                if lapses:
+                    notes.append(("reset-when", f"Use it by {lapses}, or it expires."))
             _set_icon(self._line(reset, f"reset-go:{acct.name}", label,
                                  callback=self._make_reset(acct.name)),
                       "arrow.counterclockwise")
-            lapses = _day(acct.extras.get("reset_credit_expires") or "")
-            for key, text in (("reset-note", "Every window of this account goes back to 0%."),
-                              ("reset-when", f"The one that expires first goes, on {lapses}."
-                               if lapses else "The one that expires first goes.")):
+            for key, text in notes:
                 note = rumps.MenuItem(f"{key}:{acct.name}", callback=None)
                 _apply_style(note, [("  ", "dim"), (text, "dim")], mono=False)
                 reset.add(note)
@@ -2654,6 +2669,12 @@ class ManagerApp(rumps.App):
             self._spec(item, f"credits:{acct.name}", "credits", balance_text, "dim",
                        after=[(note, "dim")] if note else [])
             item.add(rumps.separator)
+        elif acct.extras.get("reset_credits"):
+            n = acct.extras["reset_credits"]
+            lapses = _day(acct.extras.get("reset_credit_expires") or "")
+            self._spec(item, f"resets:{acct.name}", "resets", str(n), "dim",
+                       after=[(f"  expires {lapses}", "dim")] if lapses else [])
+            item.add(rumps.separator)
 
     @staticmethod
     def _spec(row: rumps.MenuItem, key: str, label: str, figure: str,
@@ -3070,7 +3091,7 @@ class ManagerApp(rumps.App):
             # Same shape as a poke: the menu is gone by the time the request
             # returns, so the click is acknowledged first and the result
             # reported to the flash row, or interrupts when it failed.
-            self._report(True, f"{account}: spending a reset credit…")
+            self._report(True, f"{account}: using a reset…")
             threading.Thread(target=self._reset, args=(account,), daemon=True).start()
         return handler
 
@@ -3092,7 +3113,7 @@ class ManagerApp(rumps.App):
             except Exception:  # noqa: BLE001 - no bundle to notify from; the row still says it
                 pass
         else:
-            self._notify(f"Could not reset the windows for {account}.\n\n{message}")
+            self._notify(f"Could not reset the limits for {account}.\n\n{message}")
 
     def _poke_again(self, account: str) -> None:
         acct = next((a for a in self._snapshot.accounts if a.name == account), None)

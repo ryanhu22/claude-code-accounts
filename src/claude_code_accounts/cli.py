@@ -56,7 +56,11 @@ def cmd_list(_args) -> int:
         for lim, label in zip(acct.limits, labels, strict=True):
             when = f"{D}resets {lim.resets_in}{X}" if lim.resets_at else f"{D}idle{X}"
             print(f"  {label:>{width}}  {_bar(lim.percent)} {lim.percent:5.1f}%  {when}")
-        if acct.extras:
+        if acct.extras and not acct.is_codex:
+            n = acct.extras.get("reset_credits") or 0
+            when = (acct.extras.get("reset_credit_expires") or "")[:10]
+            print(f"  {D}resets: {n}{f' · expires {when}' if when else ''}{X}")
+        elif acct.extras:
             balance = acct.extras.get("credits_balance") or "none"
             if balance == "0":
                 balance = "none"
@@ -76,11 +80,11 @@ def cmd_poke(args) -> int:
 
 
 def cmd_reset(args) -> int:
-    """Spend one Codex reset credit. Irreversible, so it asks unless told not to."""
+    """Spend one reset (Claude) or reset credit (Codex). Irreversible, so it asks first."""
     if not args.yes:
         try:
-            answer = input(f"Spend one reset credit on {args.account}? "
-                           "Every window goes back to 0%. [y/N] ")
+            answer = input(f"Use one reset on {args.account}? "
+                           "Its limits go back to 0%. [y/N] ")
         except EOFError:
             answer = ""
         if answer.strip().lower() not in ("y", "yes"):
@@ -451,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("account")
     p.add_argument("--weekly", action="store_true", help="start only stopped weekly windows")
     p.set_defaults(func=cmd_poke)
-    p = sub.add_parser("reset", help="spend one Codex reset credit: every window back to zero")
+    p = sub.add_parser("reset", help="use one limit reset (Claude) or reset credit (Codex): limits back to zero")
     p.add_argument("account")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask first")
     p.set_defaults(func=cmd_reset)

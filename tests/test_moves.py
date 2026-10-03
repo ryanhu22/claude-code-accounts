@@ -1085,8 +1085,7 @@ def test_reset_windows_spends_the_soonest_credit(fake_keychain, fake_api, monkey
     spent = []
     monkeypatch.setattr(codex, "consume_reset_credit",
                         lambda auth, cid=None: spent.append(cid) or {})
-    assert core.reset_windows("a") == (
-        False, "a is a Claude account, and only Codex accounts have reset credits")
+    assert core.reset_windows("a") == (False, "no reset to use")
     ok, msg = core.reset_windows("cx")
     assert ok and spent == ["soon"] and msg == "windows reset, 1 reset credit left"
     details["credits"] = details["credits"][:1]

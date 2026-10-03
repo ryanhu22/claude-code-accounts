@@ -350,7 +350,7 @@ each generation and no tokens. The file is `~/.claude-manager/credentials.log`.
 | `ccm login <name>` | sign an account in through the browser (`--browser`, `--paste`, `--codex`) |
 | `ccm poke <account>` | spend a few tokens to start that account's stopped windows (`--weekly` for weekly windows only) |
 | `ccm auto-start on` | start weekly windows automatically while the app runs (`off` to stop) |
-| `ccm reset <account>` | spend one Codex reset credit: every window back to 0% (`-y` skips the prompt) |
+| `ccm reset <account>` | use one limit reset (Claude) or reset credit (Codex): its limits back to 0% (`-y` skips the prompt) |
 | `ccm resolve` | print the config directory for this shell (`--codex` for `CODEX_HOME`) |
 | `ccm shell-init` | print the shell wrapper to eval in your rc file |
 | `ccm menubar install` | start the menu bar app at every login (`uninstall` to stop) |
@@ -381,6 +381,16 @@ default, because it sends requests on your behalf, and it runs only while the
 menu bar app is running. The request that starts a weekly window starts the
 5-hour window too. Codex accounts are started the same way, through the Codex
 CLI's own request.
+
+### Limit resets
+
+Anthropic sometimes grants a Claude account a limit reset. The Claude Opus 5.5
+launch gave one to every Pro and Max account, for example. A reset puts the
+5-hour and 7-day limits back to 0%. Model-scoped weekly limits stay as they
+are. When an account has a reset, its menu shows how many it has and when
+they expire. To use one, open the account and choose "Reset your limits now",
+or run `ccm reset <account>`. ccm sends the same request as Claude Code's
+`/limit-reset`. A reset that you use is gone, and you can't undo it.
 
 ## Codex accounts
 

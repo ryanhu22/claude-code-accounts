@@ -22,6 +22,7 @@ import re
 import subprocess
 import time
 import urllib.error
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -1381,9 +1382,100 @@ def load_account(name: str, with_usage: bool = True, force: bool = False) -> Acc
         acct.mismatch = f"holds {email}, not {was}"
     if with_usage:
         acct.limits, acct.usage_at, acct.error = _usage(
-            name, lambda: _get("/api/oauth/usage", blob["accessToken"]),
+            name, lambda: _get(CLAUDE_USAGE_PATH, blob["accessToken"]),
             force, (email or "").lower())
+        entry = _cache_read().get(name) or {}
+        if entry.get("data") and entry.get("who") in (None, "", (email or "").lower()):
+            acct.extras = claude_extras(entry["data"])
     return acct
+
+
+# The usage read Claude Code makes when it offers a reset. The plain read
+# leaves the `cedar_ember` block out; skip_spend=1 is what Claude Code sends
+# with it, and nothing in ccm reads the spend block it skips.
+CLAUDE_USAGE_PATH = "/api/oauth/usage?cedar_ember=1&skip_spend=1"
+# Claude Code's name for the program that grants limit resets.
+CLAUDE_RESET_PROGRAM = "cedar_ember"
+_GRANT_ID = re.compile(r"^[a-z0-9_-]{1,40}$")
+# What a grant's `clears` names, in the words the account rows use.
+_CLEARS = {"five_hour": "5h", "seven_day": "7d"}
+
+
+def claude_reset_grants(data: dict) -> list[dict]:
+    """The reset grants an account can spend now, the one to spend first first.
+
+    The server names the grant it wants spent next (`next_grant_id`), and
+    Claude Code spends that one. After it, the grant that ends soonest, for the
+    same reason as with Codex credits: no grant lapses while another waits.
+    """
+    block = (data or {}).get(CLAUDE_RESET_PROGRAM) or {}
+    if not isinstance(block, dict) or not block.get("eligible"):
+        return []
+    out = [g for g in block.get("grants") or []
+           if isinstance(g, dict) and _GRANT_ID.match(str(g.get("id") or ""))
+           and int(g.get("resets_left") or 0) > 0 and not g.get("paused")
+           and g.get("usable_now")]
+    first = block.get("next_grant_id")
+    return sorted(out, key=lambda g: (g.get("id") != first, g.get("ends_at") or "~"))
+
+
+def claude_extras(data: dict) -> dict:
+    grants = claude_reset_grants(data)
+    if not grants:
+        return {}
+    g = grants[0]
+    clears = [_CLEARS.get(k) for k in g.get("clears") or [] if _CLEARS.get(k)]
+    return {
+        "reset_credits": sum(int(x.get("resets_left") or 0) for x in grants),
+        # When the grant that would be spent next lapses, ISO 8601, or "".
+        "reset_credit_expires": g.get("ends_at") or "",
+        "reset_clears": clears,
+        "reset_needs_limit": bool(g.get("use_requires_limit")),
+    }
+
+
+def _reset_claude(name: str) -> tuple[bool, str]:
+    """Spend one of a Claude account's limit resets, the way /limit-reset does.
+
+    The status is read again first rather than trusted from the menu's cache,
+    because a reset spent in a Claude Code session since then would otherwise
+    be claimed twice. The request id is fresh per click and never retried, so
+    one click can spend at most one reset.
+    """
+    blob = live_blob(slot_dir(name))
+    if not blob or not blob.get("accessToken"):
+        return False, "not signed in"
+    token = blob["accessToken"]
+    try:
+        grants = claude_reset_grants(_get(CLAUDE_USAGE_PATH, token))
+        org = ((_get("/api/oauth/profile", token).get("organization") or {}).get("uuid") or "")
+    except Exception as e:  # noqa: BLE001 - network, auth or parse: all "try later"
+        return False, f"could not read the resets ({_describe(e)})"
+    if not grants:
+        return False, "no reset to use"
+    if not re.match(r"^[0-9a-fA-F-]{8,64}$", org):
+        return False, "could not read the account's organization"
+    left = sum(int(g.get("resets_left") or 0) for g in grants) - 1
+    try:
+        resp = _post(f"{API}/api/organizations/{org}/reset_rate_limits",
+                     {"program": CLAUDE_RESET_PROGRAM, "grant_id": grants[0]["id"],
+                      "request_id": uuid.uuid4().hex}, token=token, timeout=25)
+    except Exception as e:  # noqa: BLE001 - the server said no; say what it said
+        return False, f"the reset was refused ({_describe(e)})"
+    result = resp.get("result") if isinstance(resp, dict) else None
+    forget_usage(name)
+    if result == "reset":
+        if isinstance(resp.get("resets_left"), int):
+            left = resp["resets_left"]
+        return True, (f"limits reset, {left} reset{'s' if left != 1 else ''} left"
+                      if left else "limits reset, that was the last reset")
+    why = {"already_used": "that reset is already used",
+           "not_limited": "this reset can only be used at a limit",
+           "cooldown": "resets are cooling down, try again later",
+           "ineligible": "this account cannot use a reset now",
+           }.get(result or "", f"the server answered {result or 'nothing'}")
+    log.info("reset %s refused: %s %s", name, result, resp.get("reason") if isinstance(resp, dict) else "")
+    return False, why
 
 
 def load_codex_account(name: str, with_usage: bool = True, force: bool = False) -> Account:
@@ -1720,7 +1812,9 @@ def _one_poke(blob: dict, model: str) -> None:
 
 
 def reset_windows(name: str) -> tuple[bool, str]:
-    """Spend one of a Codex account's reset credits, putting its windows at 0%.
+    """Spend one of an account's reset credits, putting its windows at 0%.
+
+    A Claude account goes to `_reset_claude`. The rest of this is Codex.
 
     OpenAI grants these now and then, and the Codex CLI offers to redeem one
     when a limit is hit. The account row already shows how many there are, so
@@ -1733,7 +1827,7 @@ def reset_windows(name: str) -> tuple[bool, str]:
     except UnknownAccount as e:
         return False, str(e)
     if provider != "codex":
-        return False, f"{name} is a Claude account, and only Codex accounts have reset credits"
+        return _reset_claude(name)
     auth = codex.live_auth(codex.slot_dir(name))
     if not auth:
         return False, "not signed in"

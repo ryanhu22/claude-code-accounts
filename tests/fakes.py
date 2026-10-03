@@ -69,6 +69,7 @@ class FakeApi:
         self.profile_calls = self.usage_calls = self.refresh_calls = 0
 
     def get(self, path, token, timeout=20):
+        path, _, query = path.partition("?")
         if path == "/api/oauth/profile":
             self.profile_calls += 1
         elif path == "/api/oauth/usage":
