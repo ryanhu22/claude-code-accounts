@@ -583,10 +583,15 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
             if path in _REFUSED and _REFUSED[path] == fingerprint(current):
                 return None
             # A successor from a write that failed earlier: the stored token is
-            # already spent, so use it before trying to exchange it again.
+            # already spent, so use it and never exchange the stored one again.
+            # While the keychain still refuses, the stash is what the slot
+            # holds; a stash the server sees as reuse would strand every copy.
+            stored = fingerprint(current)       # what a stash has to replace
             saved = _take_stash(config_dir, current)
-            if saved and _persist(config_dir, saved, fingerprint(current)):
-                if not expiring(saved, margin):
+            if saved:
+                if _persist(config_dir, saved, stored):
+                    stored = fingerprint(saved)
+                elif not expiring(saved, margin):
                     return saved
                 current = saved
             if not expiring(current, margin):
@@ -603,7 +608,7 @@ def live_blob(config_dir: str, allow_refresh: bool = True,
                 return current
             _REFUSED.pop(path, None)
             rotated = _apply(current, resp)
-            if not _persist(config_dir, rotated, spent):
+            if not _persist(config_dir, rotated, stored):
                 return rotated
     except locks.LockBusy:
         return blob                       # Claude Code is mid-refresh; try later

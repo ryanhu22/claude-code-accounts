@@ -154,3 +154,46 @@ def test_a_failed_refresh_keeps_the_token_and_tries_again(sandbox, fake_server, 
     acct = core.load_account("a", with_usage=False)
     assert acct.error is None and acct.email == "a@example.com"
     check_invariants(sandbox, fake_server, fleet, settled=True)
+
+
+def test_a_keychain_that_refuses_the_write_keeps_the_successor(sandbox, fake_server, fleet,
+                                                               app_running):
+    """A refresh token is spent the moment the grant succeeds, so a write that
+    fails afterwards must not lose the successor: it is stashed and lands on
+    the next pass, and the spent token is never sent again."""
+    one_account(sandbox, fake_server)
+    live = [fleet.start("term-1"), fleet.start("term-2")]
+    core.sync_credentials(live)
+    before = expire_in(sandbox, core.slot_dir("a"), 20 * 60)
+    fail = sandbox.keychain_file + ".fail-writes"
+    open(fail, "w").close()
+    try:
+        rotated = core.live_blob(core.slot_dir("a"))
+        assert generation(fake_server, rotated) == 2        # the grant went through
+        assert sandbox.blob(core.slot_dir("a")) == before    # the keychain did not
+        stash = os.listdir(os.path.join(sandbox.home, PENDING))
+        assert len(stash) == 1
+        with open(os.path.join(sandbox.home, PENDING, stash[0])) as f:
+            saved = json.load(f)
+        assert saved["replaces"] == core.fingerprint(before)
+        assert saved["blob"]["refreshToken"] == rotated["refreshToken"]
+        # A second pass while the keychain still refuses: the stored token is
+        # spent, so it must not go to the server again, and the stash must
+        # survive for the pass that can write.
+        core.refresh_slots()
+        assert core.sync_credentials(live) == []
+        assert fake_server.reused_refresh_tokens == []
+        assert core.load_account("a", with_usage=False).error is None
+        assert not core._REFUSED
+        assert sandbox.blob(core.slot_dir("a")) == before
+        assert os.listdir(os.path.join(sandbox.home, PENDING)) == stash
+    finally:
+        os.remove(fail)
+    # The keychain is back: the stash lands, and every copy follows.
+    assert core.refresh_slots() == ["a"]
+    assert core.sync_credentials(live) == [s.config_dir for s in live]
+    slot = sandbox.blob(core.slot_dir("a"))
+    assert slot["refreshToken"] == rotated["refreshToken"]
+    assert os.listdir(os.path.join(sandbox.home, PENDING)) == []
+    assert len(refreshes(fake_server)) == 1
+    check_invariants(sandbox, fake_server, fleet, settled=True)
