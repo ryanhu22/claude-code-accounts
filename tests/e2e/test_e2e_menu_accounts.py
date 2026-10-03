@@ -232,7 +232,8 @@ def test_a_refused_sign_in_interrupts_and_clears_the_mark(sandbox, fake_server, 
     click(menu.find("Sign in again", menu.account_row("main"))["Default browser"])
     sandbox.approve(sandbox.wait_for_url(_Never(), seen, 5))
     menu.settle()
-    assert dialogs.alerts[-1]["message"] == "Sign-in was refused: The user denied the request"
+    assert dialogs.alerts[-1]["message"] == (
+        "The sign-in page reported that the request was not allowed.")
     assert menu.flash() == dialogs.alerts[-1]["message"]
     assert "signing in" not in text(menu.account_row("main"))
     assert menu.app._signing_in == {}

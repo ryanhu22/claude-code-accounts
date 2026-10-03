@@ -129,6 +129,28 @@ slot. A file named `<keychain>.fail-writes` makes the fake `security`
 refuse every write; `pmset.dark` in the sandbox makes `pmset` report a
 dark wake.
 
+## The menu bar app in-process
+
+`menu_harness.py` (fixture `menu`, with `dialogs`, `tabs` and `procs`)
+builds the real `ManagerApp` inside the sandbox: rumps makes real
+NSMenuItems, AppKit styles the rows, and `click(row)` runs the row's own
+callback. Only what needs a running application or a person is taken away:
+the run loop timers (`menu.timers`; a test fires a tick itself through
+`menu.refresh()`, `menu.poll_sessions()`, `menu.open()` and `menu.close()`),
+the Dock and wake hooks, `rumps.quit_application` (`menu.quits`), the
+one-shot `threading.Timer`s (`menu.delayed`, run with `menu.fire_delayed()`),
+and the dialogs: `dialogs.alerts`, `dialogs.notifications` and
+`dialogs.windows` record them, and `dialogs.answers` is the queue they are
+answered from (an int for an alert, `(clicked, text)` for a Window).
+
+`menu.settle()` runs the main-thread sync tick until every thread the app
+started has reported back. `menu.start_session(account, term_id, cwd)` is a
+live Claude Code session in the dir ccm would have given that terminal, and
+`menu.start_codex_session(...)` a Codex one. Rows are read from the NSMenu:
+`menu.items(row)`, `menu.texts(row)`, `menu.find("Rename…", row)`,
+`menu.section("PROFILES")`, `menu.account_row(name)`,
+`menu.session_row(pid)`, `menu.flash()` and `menu.title()`.
+
 ## Endpoints the fake serves
 
 Claude: `GET /cai/oauth/authorize` (the sign-in page), `GET /cai/oauth/approve`
