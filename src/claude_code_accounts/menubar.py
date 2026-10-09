@@ -1470,12 +1470,22 @@ class ManagerApp(rumps.App):
     def _on_menu_close(self) -> None:
         self._menu_open = False
         if self._rebuild_pending:
-            self._rebuild_pending = False
-            self._rebuild()
+            # Not now. AppKit closes the menu before it sends the clicked row
+            # its action, and a rebuild here forgets every row in rumps'
+            # registry, the clicked one included, so the click found no
+            # callback and did nothing. It showed as a rule change that only
+            # took on the second try, whenever the last one's hand-out landed
+            # while the menu was open. The next tick runs after the action.
+            self._later(self._rebuild_if_pending)
         # Clear first so a modal alert cannot show the queue twice on re-entry.
         alerts, self._alerts = self._alerts, []
         for message in alerts:
             self._notify(message)
+
+    def _rebuild_if_pending(self) -> None:
+        """The rebuild a closed menu put off, unless a click already did it."""
+        if self._rebuild_pending and not self._menu_open:
+            self._rebuild()
 
     @staticmethod
     def _hide_from_dock() -> None:

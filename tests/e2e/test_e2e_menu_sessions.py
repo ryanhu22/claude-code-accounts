@@ -119,6 +119,40 @@ def test_a_project_rule_from_a_session_row(sandbox, fake_server, menu):
     assert text(after[2]).strip() == "Remove this rule"
 
 
+def test_a_rule_click_lands_when_a_rebuild_waited_for_the_menu(sandbox, fake_server, menu):
+    """The second project moved to an account took two clicks.
+
+    The first move's hand-out lands while the menu is open again, which puts
+    off a rebuild until it closes. AppKit closes the menu before it sends the
+    clicked row its action, so a rebuild at close forgot the row in rumps'
+    registry and the click found no callback.
+    """
+    import rumps
+
+    sandbox.seed_claude("main", "main@example.com")
+    sandbox.seed_claude("spare", "spare@example.com")
+    menu.start_session("main", "T1", os.path.join(sandbox.home, "repos", "acme"))
+    beta = menu.start_session("main", "T2", os.path.join(sandbox.home, "repos", "beta"),
+                              tty="ttys002")
+    menu.refresh()
+    menu.open()
+    menu.app._rebuild()          # what the first move's hand-out does on landing
+    assert menu.app._rebuild_pending
+    rows = menu.items(menu.session_row(beta))
+    project = menu.find("Use for project “beta”", menu.session_row(beta))
+    pick = next(r for r in rows[index_of(rows, project) + 1:] if "\ufffcspare " in text(r))
+    # AppKit's order: the menu closes, then the row's action is looked up.
+    menu.close()
+    registry = rumps.rumps.NSApp._ns_to_py_and_callback
+    assert pick._menuitem in registry
+    sender, callback = registry[pick._menuitem]
+    callback(sender)
+    assert core.rules().projects == {"~/repos/beta": "spare"}
+    menu.settle()
+    assert not menu.app._rebuild_pending
+    assert menu.texts(menu.session_row(beta))[0] == "  Spending spare, by a project rule"
+
+
 def test_a_codex_session_row_moves_between_codex_accounts(sandbox, fake_server, menu):
     """A Codex row is offered Codex accounts alone, and a pin is a Codex rule."""
     sandbox.seed_claude("main", "main@example.com")
@@ -229,6 +263,7 @@ def test_a_session_that_starts_while_the_menu_is_open_is_inserted(sandbox, fake_
     assert "\u25cf 2" in text(menu.account_row("main"))
     assert menu.app._rebuild_pending
     menu.close()
+    menu.settle()                # the rebuild waits for the tick after the click
     assert not menu.app._rebuild_pending
     assert same(menu.section("RUNNING SESSIONS · 2"),
                 [menu.session_row(first), menu.session_row(second)])

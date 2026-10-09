@@ -810,9 +810,14 @@ def test_open_menu_inserts_sessions_and_defers_removals(
     assert app._rebuild_pending
     app._rebuild = Mock()
     app._alerts = []
+    app._done = []
     app._on_menu_close()
-    app._rebuild.assert_called_once()
+    # Put off to the next tick, which runs after AppKit sends the click.
+    app._rebuild.assert_not_called()
     assert not app._menu_open
+    for fn in app._done:
+        fn()
+    app._rebuild.assert_called_once()
 
 
 def test_tab_style_clips_picker_and_spec_rows(menubar, monkeypatch):
