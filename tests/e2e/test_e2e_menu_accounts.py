@@ -11,7 +11,10 @@ import time
 from types import SimpleNamespace
 
 from claude_code_accounts import core, keychain, menubar
-from e2e.menu_harness import checked, click, text
+from e2e.fake_server import CLAUDE_LIMITS
+from e2e.menu_harness import checked, click, text, until
+
+JAN_1, JAN_3 = CLAUDE_LIMITS[0]["resets_at"], CLAUDE_LIMITS[1]["resets_at"]
 
 
 def test_account_rows_show_identity_plan_and_windows(sandbox, fake_server, menu):
@@ -91,7 +94,7 @@ def test_menu_bar_image_states(sandbox, fake_server, menu, monkeypatch):
     (section,) = drawn[-1]
     assert (section.provider, section.name, section.dim) == ("claude", "main", False)
     assert [(c.caption, c.used, c.reset) for c in section.cells] == [
-        ("5h", 58.0, "26752d"), ("7d", 71.0, "26754d"), ("fable", 34.0, "26754d")]
+        ("5h", 58.0, until(JAN_1)), ("7d", 71.0, until(JAN_3)), ("fable", 34.0, until(JAN_3))]
     assert images[-1] is not None
     # A Codex plan without a 5h window draws two batteries, not a blank third.
     click(menu.find("Show this account in the menu bar", menu.account_row("gpt")))

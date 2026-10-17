@@ -331,6 +331,11 @@ def text(item) -> str:
     return str(styled.string()) if styled is not None else str(item.title)
 
 
+def until(iso: str) -> str:
+    """The countdown a row shows for a fixture's reset, which shrinks every day."""
+    return menubar._compact_reset(iso)
+
+
 def click(item: rumps.MenuItem):
     """Do what a click does: run the row's callback with the row as sender."""
     callback = item.callback
@@ -385,6 +390,9 @@ def menu(sandbox, monkeypatch, dialogs, tabs, procs, tmp_path):
     monkeypatch.setattr(rumps.rumps, "application_support", lambda name: str(support / name))
     # No terminal is in front of a test, and asking would reach the real screen.
     monkeypatch.setattr(focus, "frontmost_bundle_id", lambda: "")
+    # The rows' layout follows the screen, and a CI runner's display is narrow
+    # enough to pick the compact one. Pin a wide screen so every test sees FULL.
+    monkeypatch.setattr(menubar.ManagerApp, "_status_screen_width", lambda self: 2560.0)
     monkeypatch.setattr(oauth, "_INSTALLED", None)
     monkeypatch.setattr(core, "SOLE_REFRESHER", False)
     app = menubar.ManagerApp()

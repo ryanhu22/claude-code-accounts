@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -78,6 +79,8 @@ class Sandbox:
             "TMPDIR": os.path.join(self.root, "tmp"),
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "PYTHONIOENCODING": "utf-8",
+            # A hung ccm prints every thread's stack when wait_for_url aborts it.
+            "PYTHONFAULTHANDLER": "1",
             "TERM_SESSION_ID": TERM_ID,
             "CCM_E2E_SANDBOX": self.root, "CCM_E2E_KEYCHAIN_FILE": self.keychain_file,
             **server.env(),
@@ -277,8 +280,14 @@ class Sandbox:
                 raise RuntimeError(f"ccm exited {proc.returncode} before opening a browser\n"
                                    f"stdout: {out}\nstderr: {err}")
             time.sleep(0.05)
-        proc.kill()
-        raise TimeoutError("ccm never asked to open a browser")
+        proc.send_signal(signal.SIGABRT)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+        raise TimeoutError(f"ccm never asked to open a browser\n"
+                           f"stdout: {out}\nstderr: {err}")
 
     def approve(self, authorize_url: str) -> tuple[int, str]:
         """Do what a person does on the sign-in page: press Authorize.

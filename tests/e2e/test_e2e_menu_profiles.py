@@ -2,7 +2,10 @@
 import os
 
 from claude_code_accounts import core
-from e2e.menu_harness import checked, click, index_of, text
+from e2e.fake_server import CLAUDE_LIMITS
+from e2e.menu_harness import checked, click, index_of, text, until
+
+JAN_1, JAN_3 = CLAUDE_LIMITS[0]["resets_at"], CLAUDE_LIMITS[1]["resets_at"]
 
 
 def seed(sandbox, menu, with_session=True):
@@ -180,9 +183,11 @@ def test_a_picker_names_windows_the_way_the_account_row_does(sandbox, fake_serve
     menu.refresh()
     row = menu.find("everything else", menu.section("PROFILES"))
     claude, codex = picks(menu, row)
-    assert text(claude).split("\t")[1:] == ["5h", "58%", "(26752d)", "7d", "71%", "(26754d)",
-                                             "fable", "34%", "(26754d)"]
-    assert text(codex).split("\t")[1:] == ["5h", "none", "", "7d", "62%", "(26752d)",
+    assert text(claude).split("\t")[1:] == [
+        "5h", "58%", f"({until(JAN_1)})", "7d", "71%", f"({until(JAN_3)})",
+        "fable", "34%", f"({until(JAN_3)})"]
+    # The Codex fixture's weekly window ends on 1 January 2100 too.
+    assert text(codex).split("\t")[1:] == ["5h", "none", "", "7d", "62%", f"({until(JAN_1)})",
                                             "model", "-", ""]
 
 
