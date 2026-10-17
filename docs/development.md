@@ -1,9 +1,6 @@
-# Contributing
+# Development
 
-Bug reports and small, focused pull requests are welcome. Include what you
-expected, what happened, and the output of `ccm list`. Redact account names,
-email addresses and project paths before posting. Include your macOS, Claude
-Code and Codex CLI versions when relevant.
+Notes for working on ccm from a checkout.
 
 ## Development setup
 
@@ -112,15 +109,3 @@ CLI and pure tests can load without it.
 
 Keep the voice of the existing files. Comments explain why. Use short active
 sentences with one idea per sentence. Do not use em dashes or emoji.
-
-## Pull requests
-
-Describe what changes for the user and why. Say how you tested it. Changes to
-keychain access, `auth.json` or token refresh get extra scrutiny; explain which
-credential paths your tests cover.
-
-Use one imperative sentence as the commit title. Say what changed for the user.
-Use the body to say why. Keep each pull request focused on one change.
-
-Pull requests run CI and need it green. Run tests and Ruff before submitting.
-Add an entry under Unreleased in `CHANGELOG.md` for user-visible changes.

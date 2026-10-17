@@ -164,3 +164,24 @@ writes one, and asks the process table once per session rather than once per
 poll. `scripts/bench.py` reports the wall time and the keychain calls of every
 move, and the test suite pins the exact call count of each so a regression
 fails CI.
+
+## What it touches
+
+The tool reads and writes macOS login keychain items named
+`Claude Code-credentials-*`. It can read the older `Claude Code-credentials`
+item as a fallback.
+
+Claude account slots live in `~/.claude-accts`. Per-session credential copies
+live in keychain items tied to directories under `~/.claude-ctx`. Shared settings
+and history link back to `~/.claude`. Rules, preferences and pending credential
+writes live in `~/.claude-manager`.
+
+Codex account slots live in `~/.codex-accts`. The default slot links to
+`~/.codex`, including its `auth.json`. Additional slots hold their own
+`auth.json` and link shared files back to `~/.codex`.
+
+The tool calls the Claude usage endpoint at
+`https://api.anthropic.com/api/oauth/usage` and the Codex usage endpoint at
+`https://chatgpt.com/backend-api/wham/usage`. Sign-in, profile checks, token refresh
+and `ccm poke` also send requests to the providers. These requests carry your
+credentials. The tool does not send them to the maintainer.
