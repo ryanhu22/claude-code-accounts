@@ -118,6 +118,19 @@ def callback(monkeypatch):
     cb.close()
 
 
+def test_callback_starts_without_a_hostname_lookup(monkeypatch):
+    """A reverse DNS lookup can hang on a bad network, before the browser opens."""
+    def no_lookup(*_a):
+        raise AssertionError("the callback server asked DNS for this machine's name")
+
+    monkeypatch.setattr(socket, "getfqdn", no_lookup)
+    cb = oauth.Callback()
+    try:
+        assert cb.redirect_uri.startswith(f"http://localhost:{cb.port}/")
+    finally:
+        cb.close()
+
+
 def test_callback_page_says_signed_in_only_once_the_exchange_succeeded(callback):
     exchanged = []
 

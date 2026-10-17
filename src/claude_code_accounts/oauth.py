@@ -21,6 +21,7 @@ import html
 import http.server
 import os
 import secrets
+import socketserver
 import threading
 import time
 import urllib.parse
@@ -84,6 +85,19 @@ def describe_error(error: str, description: str) -> str:
 
 
 CALLBACK_PATH = "/callback"
+
+
+class _LoopbackServer(http.server.ThreadingHTTPServer):
+    """An HTTP server that binds without asking DNS for this machine's name.
+
+    HTTPServer.server_bind calls socket.getfqdn, a reverse lookup that can
+    stall for minutes on a slow or offline network, before ccm can open the
+    browser. Nothing here reads the name it learns.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class Callback:
@@ -184,7 +198,7 @@ class Callback:
         # than queued behind it and reset when the server closes. Handler
         # threads are not daemons: `close()` joins them, so a page in flight
         # is written before the process moves on.
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self._server = _LoopbackServer(("127.0.0.1", port), Handler)
         self._server.daemon_threads = False
         self._done = threading.Event()
         self._lock = threading.Lock()
