@@ -45,6 +45,9 @@ FLASH_SECONDS = 30             # how long the last rule change stays on screen
 ICON = "⇄"
 FOCUS_MARK = "\u25b8"      # ▸ the session whose tab is in front
 SIGNING_TAIL = ("   signing in\u2026", "warn")   # an account with a browser tab open
+# A poke can take 45 seconds and the usage endpoint lags it, so a start that
+# has not shown by then is reported as not having happened.
+STARTING_FOR = 180.0
 
 
 # Menu rows are drawn as attributed strings so the three usage buckets line up
@@ -730,7 +733,8 @@ def _window_cell(label: str, lim) -> list[tuple[str, str, str]]:
             (f"\t{'(' + when + ')' if when else ''}", _reset_tone(lim), "ui")]
 
 
-def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list[tuple[str, str]]:
+def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True,
+            starting: bool = False) -> list[tuple[str, str]]:
     """One usage window: its name, how much is used, and when it comes back."""
     layout = _LAYOUT
     # The list fills as the window is spent, so the squares are the usage and
@@ -770,6 +774,10 @@ def _bucket(label: str, lim: core.Limit | None, show_reset: bool = True) -> list
             _compact_reset(lim.resets_at) if lim and not lim.over else "unused")
         if not layout.parens and when == "unused":
             when = "new"
+        # A poke is on its way. The usage endpoint takes a while to show the
+        # clock it started, and "new" until then read as a click that missed.
+        if starting and when in ("unused", "new"):
+            when = "…"
         # The countdown from _compact_reset fits three cells, as does "new".
         # Left aligned in a fixed field, so it hugs the number it belongs to
         # and the slack falls on the far side, before the next window.
@@ -795,7 +803,13 @@ def _blank_bucket(label: str) -> list[tuple[str, str]]:
             (" " * (layout.reset_w + 1), "dim")]
 
 
-def _account_buckets(acct: core.Account) -> list:
+def _stopped(acct: core.Account) -> list[core.Limit]:
+    """The windows a poke would start: no clock yet, and a model to ask for."""
+    return [lim for lim in acct.limits
+            if not lim.resets_at and not (acct.is_codex and lim.scope)]
+
+
+def _account_buckets(acct: core.Account, starting: bool = False) -> list:
     """Share the windows with the width check so neither can miss a column."""
     if not acct.reading:
         # Nothing usable came back. Empty would claim the allowance is known.
@@ -804,13 +818,13 @@ def _account_buckets(acct: core.Account) -> list:
                 for segment in _bucket(label, None)]
     segments = (_blank_bucket("5h")
                 if acct.is_codex and acct.extras.get("has_5h") is False
-                else _bucket("5h", acct.limit("session")))
-    segments += _bucket("7d", acct.limit("weekly_all"))
+                else _bucket("5h", acct.limit("session"), starting=starting))
+    segments += _bucket("7d", acct.limit("weekly_all"), starting=starting)
     # Repeating a countdown is easier to scan than a hole whose meaning
     # depends on knowing that the model and weekly windows roll over together.
     scoped = _scoped(acct)
     if scoped:
-        segments += _bucket(scoped.label, scoped)
+        segments += _bucket(scoped.label, scoped, starting=scoped in _stopped(acct) and starting)
     return segments
 
 
@@ -1288,6 +1302,9 @@ class ManagerApp(rumps.App):
         # Accounts with a browser tab open for a sign-in, keyed to the attempt
         # that opened it. Main thread only, like every other menu state.
         self._signing_in: dict[str, oauth.Attempt | codex.Attempt] = {}
+        # Accounts with a poke on its way, keyed to when it was clicked. Main
+        # thread only. Cleared when the usage shows the clocks, or gives up.
+        self._starting: dict[str, float] = {}
         # Per config dir, the fingerprint of the credential it held last time
         # it was looked at. What tells a cached owner from a stale one.
         self._owner_prints: dict[str, str | None] = {}
@@ -1580,6 +1597,16 @@ class ManagerApp(rumps.App):
             self._on_refresh_tick(None)
         if snap is not None:
             changed = _shape(snap) != _shape(self._snapshot)
+            # A poke is done once its clocks show. Past STARTING_FOR the usage
+            # endpoint has had its chances, and the row goes back to "unused"
+            # rather than claim a start nobody can see.
+            now = time.time()
+            for name, since in list(self._starting.items()):
+                acct = next((a for a in snap.accounts if a.name == name), None)
+                if (acct is None or (acct.reading and not _stopped(acct))
+                        or now - since > STARTING_FOR):
+                    del self._starting[name]
+                    changed = True
             added = {s.pid for s in snap.sessions} - {s.pid for s in self._snapshot.sessions}
             self._snapshot = snap
             self._tracker.update_sessions(snap.sessions)
@@ -2108,7 +2135,7 @@ class ManagerApp(rumps.App):
         segments = [(f"{FOCUS_MARK} ", "ok" if sure else "warn")
                     if shown else ("  ", "dim"),
                     *_chip(acct.name, NAME_W), ("  ", "dim"), *_lamps(here)]
-        segments += _account_buckets(acct)
+        segments += _account_buckets(acct, starting=acct.name in self._starting)
         if not acct.reading:
             # Says the app is still trying, because a row of dashes on its own
             # reads as broken rather than as pending.
@@ -2193,14 +2220,19 @@ class ManagerApp(rumps.App):
         # A Codex account is started the same way, by the Codex CLI's own
         # request. Its model-scoped window has no model to ask for, so the
         # names on the label are the general windows alone.
-        stopped = [lim for lim in acct.limits
-                   if not lim.resets_at and not (acct.is_codex and lim.scope)]
+        stopped = _stopped(acct)
         if acct.reading and stopped:
             names = ", ".join(lim.label for lim in stopped)
+            plural = "window" if len(stopped) == 1 else "windows"
+            # No callback while one is on its way: a second click would send
+            # a second request for a clock the first one already started.
+            starting = acct.name in self._starting
             _set_icon(self._line(item, f"poke:{acct.name}",
-                                 f"Start the {names} window now" if len(stopped) == 1
-                                 else f"Start the {names} windows now",
-                                 callback=self._make_poke(acct.name)), "clock.arrow.circlepath")
+                                 f"Starting the {names} {plural}…" if starting
+                                 else f"Start the {names} {plural} now",
+                                 callback=None if starting else self._make_poke(acct.name),
+                                 tone="dim" if starting else "text"),
+                      "clock.arrow.circlepath")
             item.add(rumps.separator)
 
         # A Codex reset credit puts every window back to 0%, once, and cannot
@@ -2721,6 +2753,7 @@ class ManagerApp(rumps.App):
         if not acct.reading:
             return
         self._legend(item, f"use:{acct.name}", "Usage")
+        starting, stopped = acct.name in self._starting, _stopped(acct)
         for index, lim in enumerate(acct.limits):
             spent = lim.spent
             if spent is None:
@@ -2732,7 +2765,9 @@ class ManagerApp(rumps.App):
             self._spec(item, f"lim:{acct.name}:{lim.kind}:{index}", label,
                        f"{spent:.0f}%", _tone(spent),
                        after=[("".join(t for t, *_ in _gauge(spent, BAR_W, "ok")), "mono"),
-                              (f"  resets in {when}" if lim.resets_at else "  unused", "dim"),
+                              (f"  resets in {when}" if lim.resets_at
+                               else "  starting…" if starting and lim in stopped
+                               else "  unused", "dim"),
                               (f" ({at})" if at else "", "dim")])
         if acct.is_codex and acct.extras.get("has_5h") is False:
             self._line(item, f"no5h:{acct.name}", "This plan has no 5h window.", tone="dim")
@@ -3137,6 +3172,7 @@ class ManagerApp(rumps.App):
             # 45 seconds, so say the click landed before anything is waited on.
             # Without this the only sign of a running request was a row in a
             # menu that was no longer on screen.
+            self._starting[account] = time.time()
             self._report(True, f"{account}: starting its windows…")
             # Up to a 45 second request. Never on the drawing thread.
             threading.Thread(target=self._poke, args=(account,), daemon=True).start()
@@ -3163,6 +3199,8 @@ class ManagerApp(rumps.App):
             # flash row above lives 30 seconds in a menu nobody is looking at,
             # so a poke that failed was indistinguishable from one that was
             # never wired up.
+            self._starting.pop(account, None)
+            self._rebuild()
             self._notify(f"Could not start the windows for {account}.\n\n{message}")
 
     def _make_reset(self, account: str):

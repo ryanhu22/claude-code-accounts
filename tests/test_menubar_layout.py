@@ -128,6 +128,7 @@ def snap(rows, monkeypatch):
 def picker(app):
     """An app with the state a row needs, and no rule change reaching disk."""
     app._signing_in = {}
+    app._starting = {}
     app._account_rows = {}
     app._pick_tabs = None
     app._flash = ("", "", 0.0)

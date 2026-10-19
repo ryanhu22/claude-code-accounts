@@ -430,7 +430,7 @@ def test_sync_tick_drops_a_pending_snapshot_older_than_an_edit():
     pending.edits = 1
     refreshes, rebuilds, repaints, tracked, takes, polls = [], [], [], [], [], []
     app = SimpleNamespace(
-        _lock=threading.Lock(), _done=[], _edits=2, _pending=pending,
+        _lock=threading.Lock(), _done=[], _edits=2, _pending=pending, _starting={},
         _snapshot=previous, _menu_open=False,
         _on_refresh_tick=refreshes.append,
         _rebuild=lambda: rebuilds.append(True),

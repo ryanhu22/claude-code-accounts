@@ -29,6 +29,12 @@ def test_poke_starts_the_stopped_windows(sandbox, fake_server, menu):
     poke = menu.find("Start the 5h, 7d, fable windows now", row)
     click(poke)
     assert menu.flash() == "main: starting its windows…"
+    # Until the usage shows the clocks, the row says a start is on its way and
+    # the button cannot send a second request.
+    row = menu.account_row("main")
+    assert "(…)" in text(row) and "(unused)" not in text(row)
+    starting = menu.find("Starting the 5h, 7d, fable windows…", row)
+    assert starting.callback is None
     menu.settle()
     assert menu.flash() == "main: 1 window group(s) started"
     # One request to the scoped model starts every window at once.
@@ -53,6 +59,28 @@ def test_a_poke_that_fails_interrupts(sandbox, fake_server, menu, dialogs):
         "Could not start the windows for main.\n\nclaude-fable-5-1: overloaded")
     assert menu.flash() == "main: claude-fable-5-1: overloaded"
     assert menu.delayed == []
+    # A failed start puts the button back.
+    row = menu.account_row("main")
+    assert "(unused)" in text(row)
+    assert menu.find("Start the 5h, 7d, fable windows now", row).callback is not None
+
+
+def test_a_start_the_usage_never_shows_stops_saying_so(sandbox, fake_server, menu,
+                                                       monkeypatch):
+    idle_account(fake_server, "main@example.com")
+    sandbox.seed_claude("main", "main@example.com")
+    menu.refresh()
+    # The request goes through, but the usage endpoint never shows a clock.
+    fake_server.script("/v1/messages", 200, {"type": "message", "content": []})
+    click(menu.find("Start the", menu.account_row("main")))
+    menu.settle()
+    menu.fire_delayed()
+    assert "(…)" in text(menu.account_row("main"))
+    monkeypatch.setattr(menubar, "STARTING_FOR", 0.0)
+    menu.refresh()
+    row = menu.account_row("main")
+    assert "(unused)" in text(row)
+    assert menu.find("Start the 5h, 7d, fable windows now", row).callback is not None
 
 
 def test_automatic_weekly_start_is_a_toggle_that_pokes_at_once(sandbox, fake_server, menu):
