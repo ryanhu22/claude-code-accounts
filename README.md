@@ -8,7 +8,7 @@ Two ways in: the `ccm` command, and a macOS menu bar app. The app shows every
 account's usage windows and every running session with what it spends, and
 moves a session to another account in one click.
 
-Status: early, macOS only, used daily by its author. Expect rough edges.
+Status: early and macOS only. I use it every day, but expect rough edges.
 
 [![CI](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ryanhu22/claude-code-accounts/actions/workflows/ci.yml)
 
