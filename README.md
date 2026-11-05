@@ -389,6 +389,24 @@ menu bar app is running. The request that starts a weekly window starts the
 5-hour window too. Codex accounts are started the same way, through the Codex
 CLI's own request.
 
+Automatic start also covers a weekly reset that happens while your Mac sleeps
+or is off. For each Claude account, the menu bar app keeps one Claude Code
+routine on claude.ai, named "Start weekly windows (ccm)". The routine runs on
+Anthropic's servers 2 minutes after the account's weekly reset. It sends one
+short request, and that request starts the new weekly window. The next time the
+app reads usage, it moves the same routine to the next reset. The account's
+menu shows when the next cloud start runs.
+
+- A run uses about 40,000 tokens of that account's usage, most of them cache
+  reads. An account with a Fable window runs on Fable, because only a Fable
+  request starts that window.
+- A routine needs a cloud environment. If an account has never used Claude
+  Code on the web, its menu says that it has none.
+- If you turn automatic start off, the app switches its routines off. To
+  delete one, open claude.ai/code/routines with that account.
+- Routines are in research preview, so this can stop working without notice.
+- Codex has no routines. A Codex account starts only while the app runs.
+
 ### Limit resets
 
 Anthropic sometimes grants a Claude account a limit reset. The Claude Opus 5.5

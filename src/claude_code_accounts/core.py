@@ -1073,6 +1073,8 @@ def _parse_limits(data: dict) -> list[Limit]:
 # --------------------------------------------------------------------------- usage cache
 
 USAGE_CACHE = os.path.join(ACCOUNTS_DIR, ".usage-cache.json")
+# Each Claude account's cloud routine (routines.py), by account name.
+CLOUD_STARTS = os.path.join(ACCOUNTS_DIR, ".cloud-starts.json")
 # The endpoint sends Retry-After: 0, which says nothing, so the wait is ours to
 # choose. Start short because a brief limit is the common case and the row is
 # blank until it clears; escalate only if the limiting is sustained.
@@ -1860,6 +1862,12 @@ def rename_account(old: str, new: str) -> tuple[bool, str]:
     if old_key in store:
         store[new_key] = store.pop(old_key)
         _cache_write(store)
+    # The routine follows the login, or switching it off would look for a
+    # slot that no longer exists.
+    starts = _cache_read(CLOUD_STARTS)
+    if not is_codex and isinstance(starts, dict) and old in starts:
+        starts[new] = starts.pop(old)
+        _cache_write(starts, CLOUD_STARTS)
     try:                                     # keep its colour through the rename
         with open(CHIP_FILE) as f:
             table = json.load(f)

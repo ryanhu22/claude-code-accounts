@@ -72,6 +72,15 @@ class ClaudeAccount:
     # Limit resets (Claude Code's /limit-reset): the `cedar_ember` block.
     grants: list[dict] = field(default_factory=list)
     eligible: bool = True
+    # Claude Code routines, by id. An account that has never used Claude Code
+    # on the web has no environment, and the real server then has nowhere to
+    # run a routine; set `environments` to [] for that.
+    triggers: dict[str, dict] = field(default_factory=dict)
+    environments: list[dict] = field(default_factory=lambda: [
+        {"kind": "anthropic_cloud", "environment_id": "env_default", "name": "Default",
+         "state": "active"}])
+    # Connectors the real server attaches to every routine it creates.
+    connectors: list[str] = field(default_factory=lambda: ["Gmail", "Google_Drive"])
 
     def profile(self) -> dict:
         return {
@@ -435,6 +444,10 @@ class FakeServer:
         if method == "POST" and path.startswith("/api/organizations/") \
                 and path.endswith("/reset_rate_limits"):
             return self._reset_rate_limits
+        if path == "/v1/environment_providers" and method == "GET":
+            return self._environments
+        if path == "/v1/code/triggers" or path.startswith("/v1/code/triggers/"):
+            return self._triggers
         return None
 
     # ------------------------------------------------------------- replies
@@ -665,6 +678,105 @@ class FakeServer:
                             "content": [{"type": "text", "text": "ok"}],
                             "stop_reason": "max_tokens", "stop_sequence": None,
                             "usage": {"input_tokens": 22, "output_tokens": 1}})
+
+    # Routines are listed this many to a page, so a test can put ours past the first.
+    trigger_page = 20
+    # The next N creates make the routine and then fail to answer, the way a
+    # reply lost to sleep or a dropped connection looks to the client.
+    lost_create_replies = 0
+
+    def _environments(self, h, rec: Recorded) -> None:
+        email = self._claude_email(h, rec)
+        if email:
+            self._json(h, 200, {"environments": self.claude[email].environments,
+                                "has_more": False})
+
+    def _triggers(self, h, rec: Recorded) -> None:
+        """Claude Code routines: list, create, read and partly update.
+
+        Strict about the two headers the real endpoint wants, so a client that
+        drops one fails here the way it would there. There is no delete, as
+        there is none on the real API.
+        """
+        email = self._claude_email(h, rec)
+        if not email:
+            return
+        if not rec.headers.get("anthropic-version"):
+            self._json(h, 400, {"type": "error", "error": {
+                "type": "invalid_request_error",
+                "message": "anthropic-version: header is required"}})
+            return
+        if "ccr-triggers-2026-01-30" not in rec.headers.get("anthropic-beta", ""):
+            self._json(h, 404, {"type": "error", "error": {
+                "type": "not_found_error", "message": "not found"}})
+            return
+        acct = self.claude[email]
+        tail = rec.path[len("/v1/code/triggers"):].strip("/")
+        body = rec.json or {}
+        with self._lock:
+            if not tail and rec.method == "GET":
+                ids = sorted(acct.triggers)
+                start = ids.index(rec.query["cursor"]) if rec.query.get("cursor") in ids else 0
+                page = ids[start:start + self.trigger_page]
+                more = start + self.trigger_page < len(ids)
+                after = ids[start + self.trigger_page] if more else None
+                self._json(h, 200, {"data": [acct.triggers[i] for i in page],
+                                    "has_more": more, "next_cursor": after})
+                return
+            if not tail and rec.method == "POST":
+                env = ((body.get("job_config") or {}).get("ccr") or {}).get("environment_id")
+                if env not in [e["environment_id"] for e in acct.environments]:
+                    self._json(h, 400, {"type": "error", "error": {
+                        "type": "invalid_request_error", "message": "environment not found"}})
+                    return
+                tid = f"trig_{len(acct.triggers) + 1:04d}{secrets.token_hex(4)}"
+                acct.triggers[tid] = {
+                    "id": tid, "name": body.get("name"), "enabled": body.get("enabled", True),
+                    "run_once_at": body.get("run_once_at"), "job_config": body.get("job_config"),
+                    "mcp_connections": [{"name": c} for c in acct.connectors],
+                    "ended_reason": ""}
+                if self.lost_create_replies:
+                    self.lost_create_replies -= 1
+                    self._json(h, 502, {"error": "bad gateway"})
+                    return
+                self._json(h, 200, {"trigger": acct.triggers[tid]})
+                return
+            trigger = acct.triggers.get(tail)
+            if trigger is None:
+                self._json(h, 404, {"type": "error", "error": {
+                    "type": "not_found_error", "message": f"Trigger not found: {tail}"}})
+                return
+            if rec.method == "POST":
+                for key in ("name", "enabled", "run_once_at", "job_config"):
+                    if key in body:
+                        trigger[key] = body[key]
+                if body.get("clear_mcp_connections"):
+                    trigger["mcp_connections"] = []
+                if "run_once_at" in body:
+                    trigger["ended_reason"] = ""
+            self._json(h, 200, {"trigger": trigger})
+
+    def fire(self, email: str, trigger_id: str) -> None:
+        """Run a routine the way the real server does at its time.
+
+        Its one request starts the stopped windows it can: the general ones on
+        any model, a model-scoped one only on that model. Then a one-time
+        routine switches itself off.
+        """
+        scoped = {"Fable": "claude-fable-5-1"}
+        with self._lock:
+            trigger = self.claude[email].triggers[trigger_id]
+            assert trigger["enabled"], "a routine that is off does not run"
+            context = trigger["job_config"]["ccr"]["session_context"]
+            assert trigger["job_config"]["ccr"]["events"][0]["data"]["message"]["role"] == "user"
+            now = time.time()
+            for lim in self.claude[email].limits:
+                name = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+                if lim.get("resets_at") or (name and scoped.get(name) != context["model"]):
+                    continue
+                span = 18000 if lim.get("kind") == "session" else 604800
+                lim["resets_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + span))
+            trigger.update(enabled=False, ended_reason="run_once_fired")
 
     def _reset_rate_limits(self, h, rec: Recorded) -> None:
         email = self._claude_email(h, rec)

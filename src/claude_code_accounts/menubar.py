@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 import rumps
 
-from . import codex, core, focus, gauge, glyphs, keychain, oauth, sessions
+from . import codex, core, focus, gauge, glyphs, keychain, oauth, routines, sessions
 
 REFRESH_SECONDS = 180      # usage is not fast-moving; stay light on the API
 CREDENTIAL_SYNC_SECONDS = 45   # local only: keeps every copy of a login alive
@@ -1147,6 +1147,11 @@ def _shape(snap: Snapshot) -> tuple:
         r.codex_default_account,
         tuple(sorted(r.codex_projects.items())),
         tuple(sorted(r.codex_sessions.items())),
+        # A routine moving to next week's reset changes an account's menu row,
+        # and so does its run time passing, which the row stops showing.
+        tuple(sorted((name, e.get("run_at"), e.get("enabled"), e.get("error"),
+                      (e.get("run_at") or "") > routines._iso(time.time()))
+                     for name, e in snap.cloud.items())),
     )
 
 
@@ -1272,6 +1277,7 @@ class Snapshot:
         self.sessions: list[sessions.Session] = []
         self.rules: core.profiles.Rules = core.profiles.Rules()
         self.running_on: dict[str, str] = {}   # config dir -> account name
+        self.cloud: dict[str, dict] = {}       # account name -> its routine, from routines.status()
         self.taken_at: float = 0.0
         # This is the app's edit counter when the snapshot was read.
         self.edits: int = 0
@@ -1532,6 +1538,7 @@ class ManagerApp(rumps.App):
         core.prune_session_rules(terms)
         snap.running_on = core.dirs_to_accounts(
             {s.env_config_dir for s in snap.sessions}, snap.accounts)
+        snap.cloud = routines.status()
         snap.taken_at = time.time()
         return snap
 
@@ -1557,6 +1564,14 @@ class ManagerApp(rumps.App):
                                 lambda: self._poke_again(name))).start()
                 except Exception:
                     pass          # automatic start must not hide a usage reading
+                try:
+                    # After the local start, which only acts on a stopped
+                    # window: the routine is aimed at the reset of a running
+                    # one, so the two never want the same window.
+                    if routines.sync(snap.accounts):
+                        snap.cloud = routines.status()
+                except Exception:
+                    pass          # nor must a routine the server would not take
                 with self._lock:
                     snap.edits = edits
                     self._pending = snap
@@ -2092,6 +2107,11 @@ class ManagerApp(rumps.App):
         self._rebuild()
         if enabled:
             self._on_refresh_tick(None, force=True)
+        else:
+            # Off has to reach the routines too, or each one fires once more.
+            # That needs no usage, so no refresh: just the requests that
+            # switch them off, off the drawing thread.
+            threading.Thread(target=routines.sync, args=([],), daemon=True).start()
 
     def _make_show_bar(self, name: str):
         def handler(_sender):
@@ -2192,7 +2212,7 @@ class ManagerApp(rumps.App):
         item.add(who)
         item.add(rumps.separator)
         self._usage_block(item, acct)
-
+        self._cloud_block(item, acct, snap)
 
         # One block for both tools. A session is listed under the account that
         # pays for it, and which tool is running is a property of the row, not
@@ -2789,6 +2809,26 @@ class ManagerApp(rumps.App):
             self._spec(item, f"resets:{acct.name}", "resets", str(n), "dim",
                        after=[(f"  expires {lapses}", "dim")] if lapses else [])
             item.add(rumps.separator)
+
+    def _cloud_block(self, item: rumps.MenuItem, acct: core.Account, snap: Snapshot) -> None:
+        """When the cloud next starts this account's weekly windows, or why it cannot.
+
+        Under the usage, because what it answers is when the next window will
+        start. Nothing while the routine is between weeks: the time it ran is
+        history, and the next one is set on the next refresh.
+        """
+        if acct.is_codex or not core.pref(core.AUTO_START_PREF, False):
+            return
+        entry = snap.cloud.get(acct.name) or {}
+        if entry.get("error"):
+            self._spec(item, f"cloud:{acct.name}", "cloud start", "off", "warn",
+                       after=[(f"  {entry['error']}", "dim")])
+        elif entry.get("enabled") and (entry.get("run_at") or "") > routines._iso(time.time()):
+            self._spec(item, f"cloud:{acct.name}", "cloud start",
+                       _clock_time(entry["run_at"]), "dim")
+        else:
+            return
+        item.add(rumps.separator)
 
     @staticmethod
     def _spec(row: rumps.MenuItem, key: str, label: str, figure: str,
